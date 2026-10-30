@@ -1,5 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { createReadStream, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { createReadStream, existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { basename, extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -57,7 +57,8 @@ function readBody(req: IncomingMessage, limit: number): Promise<Buffer> {
   });
 }
 
-const inside = (file: string, dir: string) => resolve(file).startsWith(resolve(dir) + sep);
+const real = (p: string) => { try { return realpathSync(p); } catch { return resolve(p); } };
+const inside = (file: string, dir: string) => real(file).startsWith(real(dir) + sep);
 
 function sendMedia(req: IncomingMessage, res: ServerResponse, file: string) {
   if (!(inside(file, OUTPUT_ROOT) || inside(file, UPLOAD_DIR) || inside(file, CAPTIONS_DIR) || inside(file, projectsRoot())) || !existsSync(file)) return json(res, 404, { error: "Not found." });
@@ -86,7 +87,7 @@ const REMOTION_URL = "http://localhost:3000";
 export const remotionDefaults = {
   answering: () => fetch(REMOTION_URL, { signal: AbortSignal.timeout(1500) }).then(() => true, () => false),
   // Fixed command, cwd only; nothing from a request reaches it. shell:true is needed for npm.cmd on Windows.
-  start: (cwd: string) => void spawn("npm", ["run", "dev"], { cwd, detached: true, stdio: "ignore", shell: process.platform === "win32", windowsHide: true }).unref(),
+  start: (cwd: string, onError: (e: Error) => void) => void spawn("npm", ["run", "dev"], { cwd, detached: true, stdio: "ignore", shell: process.platform === "win32", windowsHide: true }).on("error", onError).unref(),
 };
 
 export async function startServer(core: Core, spawner = startClaude, remotion = remotionDefaults): Promise<ServerRole> {
@@ -152,9 +153,13 @@ export async function startServer(core: Core, spawner = startClaude, remotion = 
       if (req.method === "POST" && ["/api/scene", "/api/cancel", "/api/remotion/dev"].includes(url.pathname)) {
         if (!sameSecret(String(req.headers["x-ui-token"] ?? ""), uiToken)) return json(res, 403, { error: "Only the studio page can do this." });
         if (url.pathname === "/api/remotion/dev") {
-          if (remotionStarted || await remotion.answering()) return json(res, 200, { started: false });
-          remotionStarted = true;
-          remotion.start(remotionRoot());
+          if (remotionStarted) return json(res, 200, { started: false });
+          if (!existsSync(remotionRoot())) return json(res, 400, { error: "Remotion project folder not found." });
+          remotionStarted = true; // set before any await so two concurrent calls cannot both spawn
+          try {
+            if (await remotion.answering()) { remotionStarted = false; return json(res, 200, { started: false }); }
+            remotion.start(remotionRoot(), (e) => { console.error("remotion dev failed:", e.message); remotionStarted = false; });
+          } catch (e) { remotionStarted = false; return json(res, 400, { error: String(e instanceof Error ? e.message : e) }); }
           return json(res, 200, { started: true });
         }
         const b = JSON.parse((await readBody(req, 64 * 1024)).toString() || "{}") as { project?: string; sub?: string; n?: number; approved?: unknown; kept?: unknown; id?: string };

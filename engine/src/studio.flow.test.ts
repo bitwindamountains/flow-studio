@@ -108,3 +108,16 @@ test("plan_write cannot set or clear approved/kept", async () => {
   assert.equal(sc[1].approved, undefined);
   assert.equal(sc[1].kept, undefined);
 });
+
+test("plan_write: content edits clear approval, unchanged rewrite keeps it, swapped clip clears kept", async () => {
+  const { core, readPlan } = await setup("i", [{ n: 1, prompt: "x", approved: true, kept: true, clip: "C:\a.mp4" }]);
+  const w = (sc: object) => core.studio_plan_write({ project: "P", sub: "i", plan: { project: "P", sub: "i", aspect: "16:9", scenes: [sc] } } as never);
+  await w({ n: 1, prompt: "x" });
+  assert.equal(readPlan("P", "i").scenes[0].approved, true);
+  assert.equal(readPlan("P", "i").scenes[0].kept, true);
+  await w({ n: 1, prompt: "x", clip: "C:\b.mp4" });
+  assert.equal(readPlan("P", "i").scenes[0].kept, false);
+  assert.equal(readPlan("P", "i").scenes[0].approved, true);
+  await w({ n: 1, prompt: "changed" });
+  assert.equal(readPlan("P", "i").scenes[0].approved, false);
+});

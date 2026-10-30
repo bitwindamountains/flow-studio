@@ -122,7 +122,7 @@ test("server: scene, cancel and remotion/dev need the UI token and do only their
   const held = core.queue.add({ prompt: "p", type: "video", max_credits: 5 } as never);
   const starts: string[] = [];
   let up = false;
-  assert.equal(await srv.startServer(core, undefined, { answering: async () => up, start: (cwd) => void starts.push(cwd) }), "owner");
+  assert.equal(await srv.startServer(core, undefined, { answering: async () => up, start: (cwd: string) => void starts.push(cwd) }), "owner");
   const base = `http://127.0.0.1:${port}`;
   const html = await (await fetch(base + "/", { headers: { connection: "close" } })).text();
   const ui = /const UI_TOKEN = "(\w+)"/.exec(html)![1];
@@ -142,7 +142,8 @@ test("server: scene, cancel and remotion/dev need the UI token and do only their
   const { projDir } = await import("./projects.js");
   writeFileSync(join(projDir("P"), "references", "a.png"), "x");
   assert.equal(await media(join(projDir("P"), "references", "a.png")), 200);
-  assert.equal(await media(join(projDir("P"), "..", "..", "x")), 404);
+  writeFileSync(join(home, "outside.txt"), "x");
+  assert.equal(await media(join(home, "outside.txt")), 404);
   assert.equal((await post("/api/scene", { ...scene, prompt: "hacked" }, h)).status, 200);
   const s1 = readPlan("P", "s").scenes[0];
   assert.deepEqual([s1.approved, s1.kept, s1.prompt], [true, true, "x"]);
@@ -150,6 +151,10 @@ test("server: scene, cancel and remotion/dev need the UI token and do only their
   assert.equal((await post("/api/cancel", { id: "nope" }, h)).status, 400);
   assert.equal((await post("/api/cancel", { id: held.id }, h)).status, 200);
   assert.equal((await post("/api/cancel", { id: held.id }, h)).status, 400); // no longer held
+  process.env.STUDIO_REMOTION = join(home, "no-such-dir");
+  assert.equal((await post("/api/remotion/dev", {}, h)).status, 400);
+  assert.equal((await fetch(base + "/api/health")).status, 200);
+  process.env.STUDIO_REMOTION = home;
   assert.equal((await (await post("/api/remotion/dev", { cmd: "calc" }, h)).json() as { started: boolean }).started, true);
   assert.equal((await (await post("/api/remotion/dev", {}, h)).json() as { started: boolean }).started, false);
   assert.equal(starts.length, 1);

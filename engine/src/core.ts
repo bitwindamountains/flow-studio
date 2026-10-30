@@ -573,7 +573,11 @@ export class LocalCore implements Core {
       const o = old?.scenes.find((x) => x.n === s.n);
       // approved/kept are the owner's decisions (set only through the UI token routes), so Claude cannot flip them.
       const { approved: _a, kept: _k, ...rest } = s;
-      return o ? { ...rest, storyboard: s.storyboard ?? o.storyboard, clip: s.clip ?? o.clip, approved: o.approved, kept: o.kept } : rest;
+      if (!o) return rest;
+      // Approval belongs to what was approved: changing the content clears it.
+      const changed = s.prompt !== o.prompt || s.camera !== o.camera || JSON.stringify(s.references ?? []) !== JSON.stringify(o.references ?? []) || (s.storyboard !== undefined && s.storyboard !== o.storyboard);
+      const clipChanged = s.clip !== undefined && s.clip !== o.clip;
+      return { ...rest, storyboard: s.storyboard ?? o.storyboard, clip: s.clip ?? o.clip, approved: changed ? false : o.approved, kept: clipChanged ? false : o.kept };
     });
     writePlan({ ...plan, scenes, project: safeName(project), sub: safeName(sub) });
     return { ok: true };

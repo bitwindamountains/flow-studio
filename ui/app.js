@@ -169,9 +169,10 @@ async function fetchData() {
   }
 }
 const editing = () => { const a = document.activeElement; return !!a && $("views").contains(a) && /INPUT|TEXTAREA|SELECT/.test(a.tagName) && a.type !== "file"; };
-let busy = false;
+let busy = false, again = false;
 async function refresh(force) {
-  if (busy || (!force && (document.visibilityState !== "visible" || editing()))) return;
+  if (busy) { if (force) again = true; return; }
+  if (!force && (document.visibilityState !== "visible" || editing())) return;
   busy = true;
   try {
     await fetchData();
@@ -179,6 +180,7 @@ async function refresh(force) {
     if (force || s !== sig) { sig = s; render(); }
   } catch { /* server hiccup: keep what is shown */ }
   busy = false;
+  if (again) { again = false; refresh(true); }
 }
 // Cheap local polling, only while the window is visible.
 setInterval(() => { if (document.visibilityState === "visible") { refresh(false); accounts(); } }, 4000);
@@ -192,7 +194,8 @@ function render() {
 }
 
 // ---- Plan ----
-let notesFor = "", notesTimer;
+const notesText = {}, notesLoading = new Set(), lessonText = {};
+let notesTimer;
 function renderPlan(el) {
   const p = data.plan, c = cur();
   const np = h("input", { placeholder: "Project", "aria-label": "New project" }), ns = h("input", { placeholder: "Sub-project", "aria-label": "New sub-project" });
@@ -216,9 +219,23 @@ function renderPlan(el) {
         await savePlan((pl) => { const sc = pl.scenes.find((x) => x.n === s.n); sc.references = [...(sc.references || []), r.path]; });
       }), h("small", {}, (s.references || []).length ? ` ${s.references.length} ref` : ""))));
     const notes = h("textarea", { rows: "6", "aria-label": "Notes", placeholder: "Notes for this sub-project (saved automatically)" });
-    notes.oninput = () => { clearTimeout(notesTimer); notesTimer = setTimeout(() => api("studio_notes_write", { ...c, text: notes.value }).catch(() => {}), 800); };
     const key = c.project + "/" + c.sub;
-    if (notesFor !== key) { notesFor = key; api("studio_notes_read", c).then((r) => { if (!notes.value && r.text) notes.value = r.text; }); }
+    notes.value = notesText[key] ?? "";
+    notes.disabled = !(key in notesText); // never autosave before the saved notes have loaded
+    notes.oninput = () => {
+      if (!(key in notesText)) return;
+      notesText[key] = notes.value;
+      clearTimeout(notesTimer);
+      notesTimer = setTimeout(() => api("studio_notes_write", { ...c, text: notesText[key] }).catch(() => {}), 800);
+    };
+    if (!(key in notesText) && !notesLoading.has(key)) {
+      notesLoading.add(key);
+      api("studio_notes_read", c).then((r) => { if (r && typeof r.text === "string") notesText[key] = r.text; }).catch(() => {}).finally(() => {
+        // on failure keep the key "loading" a while so a bad read cannot spin
+        setTimeout(() => notesLoading.delete(key), key in notesText ? 0 : 5000);
+        refresh(true);
+      });
+    }
     kids.push(h("h3", {}, `${p.project} / ${p.sub}`), h("div", { class: "row" }, asp, sty),
       p.scenes.length ? h("table", {}, h("thead", {}, h("tr", {}, ...["#", "Prompt", "Camera", "Caption", "Voiceover", "References"].map((t) => h("th", {}, t)))), h("tbody", {}, rows)) : h("p", {}, "No scenes yet. Ask Claude to write the plan."),
       h("h3", {}, "Notes"), notes,
@@ -251,7 +268,8 @@ function renderGen(el) {
   const res = h("select", { "aria-label": "Resolution" }, h("option", { value: "360p" }, "360p"), h("option", { value: "720p", selected: true }, "720p"));
   const kids = [h("div", { class: "row" }, dur, res, btn("Queue approved scenes (held)", () => apiOk("studio_generate", { ...c, duration: Number(dur.value), resolution: res.value })))];
   for (const l of data.lessons) {
-    const txt = h("input", { value: l.text, "aria-label": "Lesson text" });
+    const txt = h("input", { value: lessonText[l.id] ?? l.text, "aria-label": "Lesson text" });
+    txt.oninput = () => (lessonText[l.id] = txt.value);
     kids.push(h("div", { class: "lesson" }, h("b", {}, "Learned: "), txt, h("small", {}, ` [${l.scope}] `),
       btn("Save", () => owner("/api/lessons/resolve", { id: l.id, action: "save", editedText: txt.value }), true),
       btn("Discard", () => owner("/api/lessons/resolve", { id: l.id, action: "discard" }), true)));
@@ -288,7 +306,7 @@ function renderEdit(el) {
   el.dataset.built = "1";
   const files = {};
   const out = h("pre", { class: "dim" });
-  const frame = h("iframe", { src: "http://localhost:3000", title: "Remotion Studio", class: "frame" });
+  const frame = h("iframe", { src: "http://localhost:3000", title: "Remotion Studio", class: "frame", sandbox: "allow-scripts allow-same-origin allow-forms allow-downloads" });
   el.replaceChildren(
     h("div", { class: "row" }, picker("Music", async (f) => (files.music = await upload(f)), "audio/*"), picker("Voiceover", async (f) => (files.voiceover = await upload(f)), "audio/*")),
     h("div", { class: "row" },
