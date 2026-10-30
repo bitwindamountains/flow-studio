@@ -8,10 +8,10 @@ import { GEMINI_VOICES, geminiKey, saveGeminiKey, speakWithGemini } from "./gemi
 import { extractLastFrame } from "./chain.js";
 import { burnCaptions, captionedName, captionSetup, previewCaptions, transcribe } from "./captions.js";
 import { characterLook, createCharacter, downloadAsset, trashAsset, editCharacter, getFlowState, listAssets, listCharacters, rememberCharacter, runAgentBatch, runContinue, runEdit, runGeneration } from "./flow.js";
-import { JobQueue, type Job } from "./queue.js";
+import { JobQueue, type Job, type JobRunner, type SceneParams } from "./queue.js";
 import { HOME_DIR } from "./chrome.js";
 import { BIN, COMPUTER, IS_MAC, IS_WIN, moveToBin } from "./platform.js";
-import { PlanSchema, safeName, createSub, listProjects, readNotes, readPlan, writeNotes, writePlan } from "./projects.js";
+import { PlanSchema, projDir, subDir, safeName, createSub, listProjects, readNotes, readPlan, writeNotes, writePlan } from "./projects.js";
 import { proposeLesson, readLessons } from "./lessons.js";
 import { TECHNIQUES, techniqueById } from "./techniques.js";
 
@@ -270,6 +270,16 @@ export const shapes = {
   studio_plan_read: { project: z.string().min(1), sub: z.string().min(1) },
   studio_plan_write: { project: z.string().min(1), sub: z.string().min(1), plan: PlanSchema },
   studio_notes_read: { project: z.string().min(1), sub: z.string().min(1) },
+  studio_storyboard: { project: z.string().min(1), sub: z.string().min(1), scenes: z.array(z.number().int()).optional() },
+  studio_generate: {
+    project: z.string().min(1), sub: z.string().min(1), scenes: z.array(z.number().int()).optional(),
+    duration: z.union([z.literal(4), z.literal(6), z.literal(8), z.literal(10)]).default(8),
+    resolution: z.enum(["360p", "720p"]).default("720p"),
+    model: z.string().optional(),
+    max_credits: z.number().min(0).default(20).describe("Cap per clip."),
+  },
+  studio_redo: { project: z.string().min(1), sub: z.string().min(1), scene: z.number().int(), prompt: z.string().optional() },
+  studio_status: { project: z.string().min(1), sub: z.string().min(1) },
   studio_propose_lesson: { text: z.string().min(1), scope: z.string().default("global") },
   studio_notes_write: { project: z.string().min(1), sub: z.string().min(1), text: z.string() },
 };
@@ -324,6 +334,10 @@ export interface Core {
   studio_plan_write(a: Args<"studio_plan_write">): Promise<unknown>;
   studio_notes_read(a: Args<"studio_notes_read">): Promise<unknown>;
   studio_notes_write(a: Args<"studio_notes_write">): Promise<unknown>;
+  studio_storyboard(a: Args<"studio_storyboard">): Promise<unknown>;
+  studio_generate(a: Args<"studio_generate">): Promise<unknown>;
+  studio_redo(a: Args<"studio_redo">): Promise<unknown>;
+  studio_status(a: Args<"studio_status">): Promise<unknown>;
   studio_propose_lesson(a: Args<"studio_propose_lesson">): Promise<unknown>;
 }
 
@@ -349,7 +363,12 @@ export const VOICES = [
 const BUSY = "A generation is running in the Flow tab. Wait for it to finish (flow_wait), then retry.";
 
 export class LocalCore implements Core {
-  readonly queue: JobQueue = new JobQueue(async (job) => {
+  readonly queue: JobQueue;
+  constructor(init: { runner?: JobRunner; queueOpts?: { file?: string; pauseMs?: [number, number] } } = {}) {
+    this.queue = new JobQueue(init.runner ?? this.defaultRunner, { file: join(HOME_DIR, "queue.json"), onDone: (j) => this.recordDone(j), ...init.queueOpts });
+  }
+
+  private defaultRunner: JobRunner = async (job) => {
     const { chain_from, reference_from } = job.params;
     if (reference_from) {
       const still = this.queue.get(reference_from)?.files.find((f) => /\.(jpe?g|png|webp)$/i.test(f));
@@ -365,7 +384,7 @@ export class LocalCore implements Core {
     if (job.params.agent_scenes) return runAgentBatch(job);
     if (job.params.edit_asset) return runEdit(job);
     return runGeneration(job);
-  }, { file: join(HOME_DIR, "queue.json") });
+  };
 
   async status({ detailed }: Args<"status">) {
     const flow = await getFlowState(detailed && !this.queue.busy);
@@ -550,6 +569,104 @@ export class LocalCore implements Core {
   async studio_notes_write({ project, sub, text }: Args<"studio_notes_write">) {
     writeNotes(project, sub, text);
     return { ok: true };
+  }
+
+  private recordDone(job: Job): void {
+    const st = job.params.studio;
+    if (!st || !job.files[0]) return;
+    const plan = readPlan(st.project, st.sub);
+    const scene = plan.scenes.find((x) => x.n === st.scene);
+    if (!scene) return;
+    scene[st.kind] = job.files[0];
+    writePlan(plan);
+  }
+
+  private studioJobs(project: string, sub: string, kind: "storyboard" | "clip", scene: number) {
+    return this.queue.list().filter((j) => j.params.studio?.project === project && j.params.studio.sub === sub && j.params.studio.kind === kind && j.params.studio.scene === scene);
+  }
+
+  // First free stem: scene-NN, then scene-NN<sep>2, <sep>3... Never reuses a name on disk or in a live job.
+  private freeStem(dir: string, project: string, sub: string, kind: "storyboard" | "clip", n: number): string {
+    const base = `scene-${String(n).padStart(2, "0")}`;
+    const sep = kind === "clip" ? "-take-" : "-v";
+    const used = new Set([
+      ...(existsSync(dir) ? readdirSync(dir).map((f) => f.replace(/\.[^.]+$/, "")) : []),
+      ...this.studioJobs(project, sub, kind, n).filter((j) => j.status !== "failed" && j.status !== "cancelled").map((j) => j.params.file_stem),
+    ]);
+    let stem = base;
+    for (let k = 2; used.has(stem); k++) stem = `${base}${sep}${k}`;
+    return stem;
+  }
+
+  private studioRefs(project: string, scene: { references?: string[] }): string[] {
+    const dir = join(projDir(project), "references");
+    const shared = existsSync(dir) ? readdirSync(dir).filter((f) => statSync(join(dir, f)).isFile()).map((f) => join(dir, f)) : [];
+    return [...(scene.references ?? []).map((r) => resolve(r)), ...shared];
+  }
+
+  private pickScenes(plan: ReturnType<typeof readPlan>, scenes: number[] | undefined, approvedOnly: boolean) {
+    if (scenes) {
+      return scenes.map((n) => {
+        const s = plan.scenes.find((x) => x.n === n);
+        if (!s) throw new Error(`Unknown scene ${n}.`);
+        return s;
+      });
+    }
+    const out = plan.scenes.filter((s) => !approvedOnly || s.approved === true);
+    if (!out.length) throw new Error(approvedOnly ? "No approved scenes - approve storyboard frames first." : "Plan has no scenes.");
+    return out;
+  }
+
+  private clipJob(plan: ReturnType<typeof readPlan>, scene: ReturnType<typeof readPlan>["scenes"][number], a: { duration: 4 | 6 | 8 | 10; resolution: "360p" | "720p"; model?: string; max_credits: number; prompt?: string }, batch: string) {
+    const dir = join(subDir(plan.project, plan.sub), "clips");
+    const params: SceneParams = {
+      prompt: a.prompt ?? scene.prompt, type: "video", max_credits: a.max_credits, duration: a.duration, resolution: a.resolution, model: a.model,
+      aspect_ratio: plan.aspect, first_frame: scene.storyboard,
+      reference_images: this.studioRefs(plan.project, scene),
+      output_dir: dir, file_stem: this.freeStem(dir, plan.project, plan.sub, "clip", scene.n),
+      studio: { project: plan.project, sub: plan.sub, scene: scene.n, kind: "clip" },
+    };
+    return this.queue.add(params, { batch });
+  }
+
+  async studio_storyboard({ project, sub, scenes }: Args<"studio_storyboard">) {
+    const plan = readPlan(project, sub);
+    const dir = join(subDir(project, sub), "storyboard");
+    const job_ids = this.pickScenes(plan, scenes, false).map((s) => this.queue.add({
+      prompt: s.prompt, type: "image", max_credits: 0, aspect_ratio: plan.aspect,
+      reference_images: this.studioRefs(project, s),
+      output_dir: dir, file_stem: this.freeStem(dir, plan.project, plan.sub, "storyboard", s.n),
+      studio: { project: plan.project, sub: plan.sub, scene: s.n, kind: "storyboard" },
+    }).id);
+    return { job_ids };
+  }
+
+  async studio_generate({ project, sub, scenes, duration, resolution, model, max_credits }: Args<"studio_generate">) {
+    const plan = readPlan(project, sub);
+    const picked = this.pickScenes(plan, scenes, true);
+    const batch = randomUUID().slice(0, 8);
+    for (const s of picked) this.clipJob(plan, s, { duration, resolution, model, max_credits }, batch);
+    return { batch, held: picked.length, quoted_max_credits: max_credits * picked.length };
+  }
+
+  async studio_redo({ project, sub, scene, prompt }: Args<"studio_redo">) {
+    const plan = readPlan(project, sub);
+    const s = this.pickScenes(plan, [scene], false)[0];
+    const batch = randomUUID().slice(0, 8);
+    const job = this.clipJob(plan, s, { duration: 8, resolution: "720p", max_credits: 20, prompt }, batch);
+    return { batch, held: 1, job_id: job.id, quoted_max_credits: 20 };
+  }
+
+  async studio_status({ project, sub }: Args<"studio_status">) {
+    const plan = readPlan(project, sub);
+    const mine = this.queue.list().filter((j) => j.params.studio?.project === plan.project && j.params.studio.sub === plan.sub);
+    return {
+      scenes: plan.scenes.map((s) => ({
+        n: s.n, storyboard: s.storyboard, approved: s.approved, clip: s.clip, kept: s.kept,
+        jobs: mine.filter((j) => j.params.studio!.scene === s.n).map((j) => ({ id: j.id, kind: j.params.studio!.kind, status: j.status, credits: j.credits, note: j.note, error: j.error })),
+      })),
+      pending: this.queue.pendingApproval().filter((g) => g.jobs.some((j) => j.params.studio?.project === plan.project && j.params.studio.sub === plan.sub)),
+    };
   }
 
   // Everything already downloaded, newest project first, so the panel can show past work after a restart.

@@ -35,6 +35,8 @@ export interface SceneParams {
   download_quality?: "original" | "upscaled";
   output_dir: string;
   file_stem: string;
+  // Links a job to a Studio plan scene so its finished file is recorded in plan.json.
+  studio?: { project: string; sub: string; scene: number; kind: "storyboard" | "clip" };
 }
 
 export interface Job {
@@ -75,7 +77,7 @@ export class JobQueue {
   // Only the process that owns the Flow tab restores and writes the shared file (see restore()).
   private active = false;
 
-  constructor(private runner: JobRunner, private opts: { file?: string; pauseMs?: [number, number] } = {}) {
+  constructor(private runner: JobRunner, private opts: { file?: string; pauseMs?: [number, number]; onDone?: (job: Job) => void } = {}) {
     this.pauseMs = opts.pauseMs ?? [PAUSE_MIN_MS, PAUSE_MAX_MS];
   }
 
@@ -214,6 +216,7 @@ export class JobQueue {
           job.files = await this.runner(job);
           job.status = "done";
           job.error = undefined;
+          try { this.opts.onDone?.(job); } catch (e) { console.error(`flow-mcp: onDone failed: ${(e as Error).message}`); }
         } catch (err) {
           job.error = err instanceof Error ? err.message : String(err);
           // Failed tiles are already retried inside Flow (its own Retry button); only an agent that produced nothing

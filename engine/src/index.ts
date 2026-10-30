@@ -397,4 +397,48 @@ server.registerTool(
   (args) => reply(core.studio_propose_lesson(args)),
 );
 
+server.registerTool(
+  "studio_storyboard",
+  {
+    title: "Storyboard",
+    description: "Queue one free image job per plan scene (all scenes if none given) into storyboard/. No approval needed. Returns job_ids; check studio_status.",
+    inputSchema: shapes.studio_storyboard,
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+  },
+  (args) => reply(core.studio_storyboard(args)),
+);
+
+server.registerTool(
+  "studio_generate",
+  {
+    title: "Generate clips",
+    description: "Queue one video job per approved scene (or the given scenes), held until the owner approves in the Studio page. Returns batch, held and quoted_max_credits. Never spends credits by itself.",
+    inputSchema: shapes.studio_generate,
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+  },
+  (args) => reply(core.studio_generate(args)),
+);
+
+server.registerTool(
+  "studio_redo",
+  {
+    title: "Redo clip",
+    description: "Queue one held video job for a scene as a new take; earlier clips are kept. Optional new prompt.",
+    inputSchema: shapes.studio_redo,
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+  },
+  (args) => reply(core.studio_redo(args)),
+);
+
+server.registerTool(
+  "studio_status",
+  {
+    title: "Studio status",
+    description: "Compact per-scene summary: storyboard, clip, jobs with status/credits/notes, and pending approvals. The only call needed after a batch.",
+    inputSchema: shapes.studio_status,
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+  },
+  (args) => reply(core.studio_status(args)),
+);
+
 await server.connect(new StdioServerTransport());

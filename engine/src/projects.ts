@@ -42,8 +42,8 @@ function checked(s: string): string {
   if (RESERVED.test(n)) throw new Error(`"${n}" is a reserved name; pick another.`);
   return n;
 }
-const projDir = (project: string) => join(projectsRoot(), checked(project));
-const subDir = (project: string, sub: string) => join(projDir(project), checked(sub));
+export const projDir = (project: string) => join(projectsRoot(), checked(project));
+export const subDir = (project: string, sub: string) => join(projDir(project), checked(sub));
 
 export function createSub(project: string, sub: string, aspect: "9:16" | "16:9" = "9:16"): string {
   const dir = subDir(project, sub);

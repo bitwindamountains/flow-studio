@@ -45,6 +45,10 @@ export class RemoteCore implements Core {
   studio_plan_write = (a: unknown) => call("studio_plan_write", a);
   studio_notes_read = (a: unknown) => call("studio_notes_read", a);
   studio_notes_write = (a: unknown) => call("studio_notes_write", a);
+  studio_storyboard = (a: unknown) => call("studio_storyboard", a);
+  studio_generate = (a: unknown) => call("studio_generate", a);
+  studio_redo = (a: unknown) => call("studio_redo", a);
+  studio_status = (a: unknown) => call("studio_status", a);
   studio_propose_lesson = (a: unknown) => call("studio_propose_lesson", a);
 
   // Long waits are split up so no single HTTP request outlives fetch's header timeout.
