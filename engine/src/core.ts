@@ -11,6 +11,7 @@ import { characterLook, createCharacter, downloadAsset, trashAsset, editCharacte
 import { JobQueue, type Job } from "./queue.js";
 import { HOME_DIR } from "./chrome.js";
 import { BIN, COMPUTER, IS_MAC, IS_WIN, moveToBin } from "./platform.js";
+import { PlanSchema, createSub, listProjects, readNotes, readPlan, writeNotes, writePlan } from "./projects.js";
 import { TECHNIQUES, techniqueById } from "./techniques.js";
 
 export const OUTPUT_ROOT = process.env.FLOW_MCP_OUTPUT ?? join(homedir(), "flow-mcp-out");
@@ -263,6 +264,12 @@ export const shapes = {
     voice: z.string().optional().describe("Flow voice name, e.g. 'Charon' (male, informative) or 'Aoede' (female, breezy)."),
   },
   techniques: { category: z.enum(["camera", "product", "transition", "image"]).optional() },
+  studio_projects: {},
+  studio_new: { project: z.string().min(1), sub: z.string().min(1), aspect: z.enum(["9:16", "16:9"]).default("9:16") },
+  studio_plan_read: { project: z.string().min(1), sub: z.string().min(1) },
+  studio_plan_write: { project: z.string().min(1), sub: z.string().min(1), plan: PlanSchema },
+  studio_notes_read: { project: z.string().min(1), sub: z.string().min(1) },
+  studio_notes_write: { project: z.string().min(1), sub: z.string().min(1), text: z.string() },
 };
 
 type Args<K extends keyof typeof shapes> = z.infer<z.ZodObject<(typeof shapes)[K]>>;
@@ -309,6 +316,12 @@ export interface Core {
   caption_preview(a: Args<"caption_preview">): Promise<unknown>;
   captions(a: Args<"captions">): Promise<unknown>;
   caption_setup(): Promise<unknown>;
+  studio_projects(): Promise<unknown>;
+  studio_new(a: Args<"studio_new">): Promise<unknown>;
+  studio_plan_read(a: Args<"studio_plan_read">): Promise<unknown>;
+  studio_plan_write(a: Args<"studio_plan_write">): Promise<unknown>;
+  studio_notes_read(a: Args<"studio_notes_read">): Promise<unknown>;
+  studio_notes_write(a: Args<"studio_notes_write">): Promise<unknown>;
 }
 
 // Flow's own voices: still offered when giving a character a voice, but narration no longer goes through Flow.
@@ -515,6 +528,20 @@ export class LocalCore implements Core {
 
   async caption_setup() {
     return captionSetup();
+  }
+
+  async studio_projects() { return listProjects(); }
+  async studio_new({ project, sub, aspect }: Args<"studio_new">) { return { dir: createSub(project, sub, aspect) }; }
+  // lessons: Task 7 fills this in.
+  async studio_plan_read({ project, sub }: Args<"studio_plan_read">) { return { ...readPlan(project, sub), lessons: [] as unknown[] }; }
+  async studio_plan_write({ project, sub, plan }: Args<"studio_plan_write">) {
+    writePlan({ ...plan, project, sub });
+    return { ok: true };
+  }
+  async studio_notes_read({ project, sub }: Args<"studio_notes_read">) { return { text: readNotes(project, sub) }; }
+  async studio_notes_write({ project, sub, text }: Args<"studio_notes_write">) {
+    writeNotes(project, sub, text);
+    return { ok: true };
   }
 
   // Everything already downloaded, newest project first, so the panel can show past work after a restart.

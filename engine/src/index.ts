@@ -320,4 +320,70 @@ server.registerTool(
   (args) => reply(patient("flow_captions", core.captions(args))),
 );
 
+server.registerTool(
+  "studio_projects",
+  {
+    title: "List projects",
+    description: "List Flow Studio projects and their sub-projects. Returns immediately.",
+    inputSchema: shapes.studio_projects,
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
+  (args) => reply(core.studio_projects()),
+);
+
+server.registerTool(
+  "studio_new",
+  {
+    title: "Create a sub-project",
+    description: "Create a sub-project (folders, notes.md, empty plan.json) under a project. Fails if it exists. Returns immediately.",
+    inputSchema: shapes.studio_new,
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+  },
+  (args) => reply(core.studio_new(args)),
+);
+
+server.registerTool(
+  "studio_plan_read",
+  {
+    title: "Read a plan",
+    description: "Read plan.json. Returns the plan fields spread at top level plus `lessons` (an array, empty until lessons are wired in). Returns immediately.",
+    inputSchema: shapes.studio_plan_read,
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
+  (args) => reply(core.studio_plan_read(args)),
+);
+
+server.registerTool(
+  "studio_plan_write",
+  {
+    title: "Write a plan",
+    description: "Replace plan.json after validating the whole plan; scene numbers `n` must be unique. Returns immediately.",
+    inputSchema: shapes.studio_plan_write,
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+  },
+  (args) => reply(core.studio_plan_write(args)),
+);
+
+server.registerTool(
+  "studio_notes_read",
+  {
+    title: "Read notes",
+    description: "Read a sub-project's notes.md. Returns immediately.",
+    inputSchema: shapes.studio_notes_read,
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
+  (args) => reply(core.studio_notes_read(args)),
+);
+
+server.registerTool(
+  "studio_notes_write",
+  {
+    title: "Write notes",
+    description: "Replace a sub-project's notes.md. Returns immediately.",
+    inputSchema: shapes.studio_notes_write,
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+  },
+  (args) => reply(core.studio_notes_write(args)),
+);
+
 await server.connect(new StdioServerTransport());
