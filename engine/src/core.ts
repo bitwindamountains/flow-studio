@@ -8,6 +8,7 @@ import { extractLastFrame } from "./chain.js";
 import { burnCaptions, captionedName, captionSetup, previewCaptions, transcribe } from "./captions.js";
 import { characterLook, createCharacter, downloadAsset, trashAsset, editCharacter, getFlowState, listAssets, listCharacters, rememberCharacter, runAgentBatch, runContinue, runEdit, runGeneration } from "./flow.js";
 import { JobQueue, type Job } from "./queue.js";
+import { HOME_DIR } from "./chrome.js";
 import { BIN, COMPUTER, IS_MAC, IS_WIN, moveToBin } from "./platform.js";
 import { TECHNIQUES, techniqueById } from "./techniques.js";
 
@@ -331,7 +332,7 @@ export const VOICES = [
 const BUSY = "A generation is running in the Flow tab. Wait for it to finish (flow_wait), then retry.";
 
 export class LocalCore implements Core {
-  private queue: JobQueue = new JobQueue(async (job) => {
+  readonly queue: JobQueue = new JobQueue(async (job) => {
     const { chain_from, reference_from } = job.params;
     if (reference_from) {
       const still = this.queue.get(reference_from)?.files.find((f) => /\.(jpe?g|png|webp)$/i.test(f));
@@ -347,7 +348,7 @@ export class LocalCore implements Core {
     if (job.params.agent_scenes) return runAgentBatch(job);
     if (job.params.edit_asset) return runEdit(job);
     return runGeneration(job);
-  });
+  }, { file: join(HOME_DIR, "queue.json") });
 
   async status({ detailed }: Args<"status">) {
     const flow = await getFlowState(detailed && !this.queue.busy);

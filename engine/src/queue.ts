@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { readJson, writeJsonAtomic } from "./persist.js";
 
-export type JobStatus = "queued" | "running" | "done" | "failed" | "cancelled";
+export type JobStatus = "held" | "queued" | "running" | "done" | "failed" | "cancelled";
 
 export interface SceneParams {
   prompt: string;
@@ -48,6 +49,8 @@ export interface Job {
   error?: string;
   // Scene numbers a batch still could not make after all its own retries; flow_retry redoes just these.
   failed_scenes?: number[];
+  // Jobs added together share a batch, so one OK from the owner releases them all.
+  batch?: string;
   createdAt: string;
   finishedAt?: string;
 }
@@ -59,26 +62,86 @@ export type JobRunner = (job: Job) => Promise<string[]>;
 const PAUSE_MIN_MS = Number(process.env.FLOW_MCP_PAUSE_MIN_S ?? 25) * 1000;
 const PAUSE_MAX_MS = Number(process.env.FLOW_MCP_PAUSE_MAX_S ?? 70) * 1000;
 
+const STOPPED = "Studio stopped while this was generating — it may have spent credits. Check Flow before retrying.";
+const needsOk = (p: SceneParams) => p.type === "video" || Boolean(p.edit_asset || p.continue_from);
+
 export class JobQueue {
   private jobs = new Map<string, Job>();
   private working = false;
   private lastFinished = 0;
-  pausedReason: string | null = null;
+  private manualPause: string | null = null;
+  private pacing: string | null = null;
+  private pauseMs: [number, number];
 
-  constructor(private runner: JobRunner) {}
+  constructor(private runner: JobRunner, private opts: { file?: string; pauseMs?: [number, number] } = {}) {
+    this.pauseMs = opts.pauseMs ?? [PAUSE_MIN_MS, PAUSE_MAX_MS];
+    if (opts.file) {
+      for (const j of readJson<Job[]>(opts.file, [])) {
+        if (j.status === "running") {
+          j.status = "failed";
+          j.error = STOPPED;
+          j.finishedAt = new Date().toISOString();
+        }
+        this.jobs.set(j.id, j);
+      }
+      this.save();
+      // Deferred: the runner may use fields its owner assigns after this constructor returns.
+      if (this.list().some((j) => j.status === "queued")) queueMicrotask(() => void this.work());
+    }
+  }
 
-  add(params: SceneParams): Job {
+  get pausedReason(): string | null {
+    return this.manualPause ?? this.pacing;
+  }
+
+  private save(): void {
+    if (this.opts.file) writeJsonAtomic(this.opts.file, this.list());
+  }
+
+  pause(reason: string): void {
+    this.manualPause = reason;
+  }
+
+  resume(): void {
+    this.manualPause = null;
+    void this.work();
+  }
+
+  add(params: SceneParams, opts: { batch?: string } = {}): Job {
     const job: Job = {
       id: randomUUID().slice(0, 8),
-      status: "queued",
+      status: needsOk(params) ? "held" : "queued",
       params,
       files: [],
       attempts: 0,
+      batch: opts.batch,
       createdAt: new Date().toISOString(),
     };
     this.jobs.set(job.id, job);
+    this.save();
     void this.work();
     return job;
+  }
+
+  // Only the studio UI may call this (see server.ts): it is what releases jobs that spend credits.
+  approve(target: { batch?: string; job_id?: string }): Job[] {
+    if (!target.batch && !target.job_id) return [];
+    const hit = this.list().filter((j) => j.status === "held" && (j.id === target.job_id || (target.batch && j.batch === target.batch)));
+    for (const j of hit) j.status = "queued";
+    this.save();
+    void this.work();
+    return hit;
+  }
+
+  pendingApproval(): { batch?: string; jobs: Job[]; max_credits: number }[] {
+    const groups = new Map<string, { batch?: string; jobs: Job[]; max_credits: number }>();
+    for (const j of this.list().filter((x) => x.status === "held")) {
+      const g = groups.get(j.batch ?? j.id) ?? { batch: j.batch, jobs: [], max_credits: 0 };
+      g.jobs.push(j);
+      g.max_credits += j.params.max_credits;
+      groups.set(j.batch ?? j.id, g);
+    }
+    return [...groups.values()];
   }
 
   get busy(): boolean {
@@ -97,9 +160,10 @@ export class JobQueue {
   retry(id: string): Job | undefined {
     const job = this.jobs.get(id);
     if (job && (job.status === "failed" || job.status === "cancelled")) {
-      job.status = "queued";
+      job.status = needsOk(job.params) ? "held" : "queued";
       job.error = undefined;
       job.finishedAt = undefined;
+      this.save();
       void this.work();
     }
     return job;
@@ -107,9 +171,10 @@ export class JobQueue {
 
   cancel(id: string): Job | undefined {
     const job = this.jobs.get(id);
-    if (job && job.status === "queued") {
+    if (job && (job.status === "queued" || job.status === "held")) {
       job.status = "cancelled";
       job.finishedAt = new Date().toISOString();
+      this.save();
     }
     return job;
   }
@@ -119,20 +184,22 @@ export class JobQueue {
     this.working = true;
     try {
       for (;;) {
+        if (this.manualPause) return;
         const job = this.list().find((j) => j.status === "queued");
         if (!job) return;
         if (this.lastFinished) {
-          const pause = PAUSE_MIN_MS + Math.random() * (PAUSE_MAX_MS - PAUSE_MIN_MS);
+          const pause = this.pauseMs[0] + Math.random() * (this.pauseMs[1] - this.pauseMs[0]);
           const remaining = this.lastFinished + pause - Date.now();
           if (remaining > 0) {
-            this.pausedReason = `pacing: next generation in ${Math.ceil(remaining / 1000)}s`;
+            this.pacing = `pacing: next generation in ${Math.ceil(remaining / 1000)}s`;
             await new Promise((r) => setTimeout(r, remaining));
-            this.pausedReason = null;
+            this.pacing = null;
           }
         }
-        if (job.status !== "queued") continue;
+        if (job.status !== "queued" || this.manualPause) continue;
         job.status = "running";
         job.attempts++;
+        this.save();
         try {
           job.files = await this.runner(job);
           job.status = "done";
@@ -145,6 +212,7 @@ export class JobQueue {
           job.status = retryable && job.attempts <= (job.params.retries ?? 1) ? "queued" : "failed";
         }
         job.finishedAt = new Date().toISOString();
+        this.save();
         this.lastFinished = Date.now();
       }
     } finally {

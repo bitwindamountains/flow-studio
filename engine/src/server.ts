@@ -1,12 +1,12 @@
 import { randomBytes } from "node:crypto";
 import { createReadStream, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { basename, extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { CACHE_DIR as CAPTIONS_DIR } from "./captions.js";
 import { HOME_DIR } from "./chrome.js";
-import { OUTPUT_ROOT, shapes, type Core } from "./core.js";
+import { LocalCore, OUTPUT_ROOT, shapes, type Core } from "./core.js";
 
 export const PORT = Number(process.env.FLOW_MCP_PORT ?? 8787);
 export const TOKEN_FILE = join(HOME_DIR, "token");
@@ -62,12 +62,17 @@ export type ServerRole = "owner" | "client" | "none";
 
 // Serves the Studio panel and a JSON API on localhost. Returns "client" when another flow-mcp process already
 // owns the port (that process owns the Flow tab and the queue), "none" when the port is taken by something else.
+export let lastServer: Server | undefined; // test hook: lets a test close the listener
+
 export async function startServer(core: Core): Promise<ServerRole> {
   mkdirSync(UPLOAD_DIR, { recursive: true });
   const token = randomBytes(24).toString("hex");
+  // In memory only, never on disk or in the token file: Claude can read the flow token but must not approve credit spend.
+  const uiToken = randomBytes(24).toString("hex");
+
   const allowedHosts = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`]);
 
-  const server = createServer(async (req, res) => {
+  const server = lastServer = createServer(async (req, res) => {
     try {
       // The Host check blocks DNS-rebinding; the token blocks other local pages from driving the queue.
       if (!allowedHosts.has(req.headers.host ?? "")) return json(res, 403, { error: "Bad host." });
@@ -77,12 +82,22 @@ export async function startServer(core: Core): Promise<ServerRole> {
       if (url.pathname === "/favicon.ico") return void res.writeHead(204).end();
       if (req.method === "GET" && url.pathname === "/") {
         res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
-        return res.end(readFileSync(STUDIO_HTML, "utf8").replace("__FLOW_TOKEN__", token));
+        return res.end(readFileSync(STUDIO_HTML, "utf8").replace("__FLOW_TOKEN__", token).replace("__UI_TOKEN__", uiToken));
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/approve") {
+        if (req.headers["x-ui-token"] !== uiToken) return json(res, 403, { error: "Only the studio page can approve credit spending." });
+        if (!(core instanceof LocalCore)) return json(res, 404, { error: "Not found." });
+        const body = JSON.parse((await readBody(req, 64 * 1024)).toString() || "{}") as { batch?: string; job_id?: string };
+        return json(res, 200, { approved: core.queue.approve({ batch: body.batch, job_id: body.job_id }).map((j) => j.id) });
       }
 
       const given = req.headers["x-flow-token"] ?? url.searchParams.get("token");
       if (given !== token) return json(res, 401, { error: "Missing or wrong token." });
 
+      if (req.method === "GET" && url.pathname === "/api/pending") {
+        return core instanceof LocalCore ? json(res, 200, core.queue.pendingApproval()) : json(res, 404, { error: "Not found." });
+      }
       if (req.method === "GET" && url.pathname === "/media") return sendMedia(req, res, url.searchParams.get("path") ?? "");
 
       if (req.method === "POST" && url.pathname === "/api/upload") {
