@@ -10,6 +10,9 @@ import { HOME_DIR } from "./chrome.js";
 import { LocalCore, OUTPUT_ROOT, shapes, type Core } from "./core.js";
 import { loadAccounts } from "./accounts.js";
 import { PtyHub, startClaude } from "./pty.js";
+import { spawn } from "node:child_process";
+import { remotionRoot } from "./handoff.js";
+import { projectsRoot, readPlan, writePlan } from "./projects.js";
 
 export const PORT = Number(process.env.FLOW_MCP_PORT ?? 8787);
 export const TOKEN_FILE = join(HOME_DIR, "token");
@@ -57,7 +60,7 @@ function readBody(req: IncomingMessage, limit: number): Promise<Buffer> {
 const inside = (file: string, dir: string) => resolve(file).startsWith(resolve(dir) + sep);
 
 function sendMedia(req: IncomingMessage, res: ServerResponse, file: string) {
-  if (!(inside(file, OUTPUT_ROOT) || inside(file, UPLOAD_DIR) || inside(file, CAPTIONS_DIR)) || !existsSync(file)) return json(res, 404, { error: "Not found." });
+  if (!(inside(file, OUTPUT_ROOT) || inside(file, UPLOAD_DIR) || inside(file, CAPTIONS_DIR) || inside(file, projectsRoot())) || !existsSync(file)) return json(res, 404, { error: "Not found." });
   const { size } = statSync(file);
   const type = MIME[extname(file).toLowerCase()] ?? "application/octet-stream";
   const range = req.headers.range?.match(/bytes=(\d*)-(\d*)/);
@@ -79,7 +82,15 @@ export type ServerRole = "owner" | "client" | "none";
 // owns the port (that process owns the Flow tab and the queue), "none" when the port is taken by something else.
 export let lastServer: Server | undefined; // test hook: lets a test close the listener
 
-export async function startServer(core: Core, spawner = startClaude): Promise<ServerRole> {
+const REMOTION_URL = "http://localhost:3000";
+export const remotionDefaults = {
+  answering: () => fetch(REMOTION_URL, { signal: AbortSignal.timeout(1500) }).then(() => true, () => false),
+  // Fixed command, cwd only; nothing from a request reaches it. shell:true is needed for npm.cmd on Windows.
+  start: (cwd: string) => void spawn("npm", ["run", "dev"], { cwd, detached: true, stdio: "ignore", shell: process.platform === "win32", windowsHide: true }).unref(),
+};
+
+export async function startServer(core: Core, spawner = startClaude, remotion = remotionDefaults): Promise<ServerRole> {
+  let remotionStarted = false;
   mkdirSync(UPLOAD_DIR, { recursive: true });
   const token = randomBytes(24).toString("hex");
   // In memory only, never on disk or in the token file: Claude can read the flow token but must not approve credit spend.
@@ -134,6 +145,32 @@ export async function startServer(core: Core, spawner = startClaude): Promise<Se
         const b = JSON.parse((await readBody(req, 64 * 1024)).toString() || "{}") as { id?: string; action?: "save" | "discard"; editedText?: string; text?: string; scope?: string };
         if (url.pathname.endsWith("/add")) addLesson(b.text ?? "", b.scope);
         else resolveLesson(b.id ?? "", b.action === "save" ? "save" : "discard", b.editedText);
+        return json(res, 200, { ok: true });
+      }
+
+      // Owner-only actions: UI token, never the flow token Claude can read.
+      if (req.method === "POST" && ["/api/scene", "/api/cancel", "/api/remotion/dev"].includes(url.pathname)) {
+        if (!sameSecret(String(req.headers["x-ui-token"] ?? ""), uiToken)) return json(res, 403, { error: "Only the studio page can do this." });
+        if (url.pathname === "/api/remotion/dev") {
+          if (remotionStarted || await remotion.answering()) return json(res, 200, { started: false });
+          remotionStarted = true;
+          remotion.start(remotionRoot());
+          return json(res, 200, { started: true });
+        }
+        const b = JSON.parse((await readBody(req, 64 * 1024)).toString() || "{}") as { project?: string; sub?: string; n?: number; approved?: unknown; kept?: unknown; id?: string };
+        if (url.pathname === "/api/cancel") {
+          if (!(core instanceof LocalCore)) return json(res, 404, { error: "Not found." });
+          const job = core.queue.list().find((j) => j.id === b.id);
+          if (!job || job.status !== "held") return json(res, 400, { error: "Only a held job can be cancelled." });
+          core.queue.cancel(job.id);
+          return json(res, 200, { ok: true });
+        }
+        const plan = readPlan(String(b.project), String(b.sub));
+        const scene = plan.scenes.find((x) => x.n === b.n);
+        if (!scene) return json(res, 400, { error: "Unknown scene." });
+        if (typeof b.approved === "boolean") scene.approved = b.approved;
+        if (typeof b.kept === "boolean") scene.kept = b.kept;
+        writePlan(plan);
         return json(res, 200, { ok: true });
       }
 

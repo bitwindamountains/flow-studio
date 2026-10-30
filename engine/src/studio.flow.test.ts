@@ -97,3 +97,14 @@ test("storyboard reroll resets approved", async () => {
   await until(() => !!readPlan("P", "g").scenes[0].storyboard);
   assert.equal(readPlan("P", "g").scenes[0].approved, false);
 });
+
+test("plan_write cannot set or clear approved/kept", async () => {
+  const { core, readPlan } = await setup("h", [{ n: 1, prompt: "x", approved: true, kept: false }]);
+  const w = (scenes: object[]) => core.studio_plan_write({ project: "P", sub: "h", plan: { project: "P", sub: "h", aspect: "16:9", scenes } } as never);
+  await w([{ n: 1, prompt: "x", approved: false, kept: true }, { n: 2, prompt: "new", approved: true, kept: true }]);
+  const sc = readPlan("P", "h").scenes;
+  assert.equal(sc[0].approved, true);
+  assert.equal(sc[0].kept, false);
+  assert.equal(sc[1].approved, undefined);
+  assert.equal(sc[1].kept, undefined);
+});

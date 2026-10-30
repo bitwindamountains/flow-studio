@@ -442,6 +442,17 @@ server.registerTool(
 );
 
 server.registerTool(
+  "studio_add_reference",
+  {
+    title: "Add a reference image",
+    description: "Copy a file the owner uploaded in the studio page (inside the uploads folder) into the project's references (or the sub-project's when sub is given).",
+    inputSchema: shapes.studio_add_reference,
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+  },
+  (args) => reply(core.studio_add_reference(args)),
+);
+
+server.registerTool(
   "studio_to_remotion",
   {
     title: "Hand off to Remotion",

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { get } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -105,6 +105,54 @@ test("pty websocket: garbage frames and a throwing spawner never crash the serve
   const status = await new Promise<number>((ok, bad) => get(`http://127.0.0.1:${port}/api/health`, { agent: false }, (r) => { r.resume(); ok(r.statusCode!); }).on("error", bad));
   assert.equal(status, 200);
   ws.terminate();
+  srv.lastServer!.closeAllConnections();
+  await new Promise((r) => srv.lastServer!.close(r));
+});
+
+test("server: scene, cancel and remotion/dev need the UI token and do only their one thing", async () => {
+  const { LocalCore } = await import("./core.js");
+  const srv = await import("./server.js");
+  const { createSub, readPlan, writePlan } = await import("./projects.js");
+  process.env.STUDIO_PROJECTS = join(home, "projects");
+  createSub("P", "s", "9:16");
+  const plan = readPlan("P", "s");
+  plan.scenes = [{ n: 1, prompt: "x" }];
+  writePlan(plan);
+  const core = new LocalCore();
+  const held = core.queue.add({ prompt: "p", type: "video", max_credits: 5 } as never);
+  const starts: string[] = [];
+  let up = false;
+  assert.equal(await srv.startServer(core, undefined, { answering: async () => up, start: (cwd) => void starts.push(cwd) }), "owner");
+  const base = `http://127.0.0.1:${port}`;
+  const html = await (await fetch(base + "/", { headers: { connection: "close" } })).text();
+  const ui = /const UI_TOKEN = "(\w+)"/.exec(html)![1];
+  const flow = /const TOKEN = "(\w+)"/.exec(html)![1];
+  const post = (path: string, body: object, h: Record<string, string>) => fetch(base + path, { method: "POST", headers: h, body: JSON.stringify(body) });
+  const scene = { project: "P", sub: "s", n: 1, approved: true, kept: true };
+  for (const [path, body] of [["/api/scene", scene], ["/api/cancel", { id: held.id }], ["/api/remotion/dev", {}]] as const) {
+    assert.equal((await post(path, body, {})).status, 403, path);
+    assert.equal((await post(path, body, { "x-flow-token": flow })).status, 403, path);
+    assert.equal((await post(path, body, { "x-ui-token": "wrong" })).status, 403, path);
+  }
+  assert.equal(readPlan("P", "s").scenes[0].approved, undefined);
+  assert.equal(core.queue.list().find((j) => j.id === held.id)!.status, "held");
+  assert.deepEqual(starts, []);
+  const h = { "x-ui-token": ui };
+  const media = (p: string) => fetch(`${base}/media?path=${encodeURIComponent(p)}&token=${flow}`).then((r) => r.status);
+  const { projDir } = await import("./projects.js");
+  writeFileSync(join(projDir("P"), "references", "a.png"), "x");
+  assert.equal(await media(join(projDir("P"), "references", "a.png")), 200);
+  assert.equal(await media(join(projDir("P"), "..", "..", "x")), 404);
+  assert.equal((await post("/api/scene", { ...scene, prompt: "hacked" }, h)).status, 200);
+  const s1 = readPlan("P", "s").scenes[0];
+  assert.deepEqual([s1.approved, s1.kept, s1.prompt], [true, true, "x"]);
+  assert.equal((await post("/api/scene", { ...scene, n: 9 }, h)).status, 400);
+  assert.equal((await post("/api/cancel", { id: "nope" }, h)).status, 400);
+  assert.equal((await post("/api/cancel", { id: held.id }, h)).status, 200);
+  assert.equal((await post("/api/cancel", { id: held.id }, h)).status, 400); // no longer held
+  assert.equal((await (await post("/api/remotion/dev", { cmd: "calc" }, h)).json() as { started: boolean }).started, true);
+  assert.equal((await (await post("/api/remotion/dev", {}, h)).json() as { started: boolean }).started, false);
+  assert.equal(starts.length, 1);
   srv.lastServer!.closeAllConnections();
   await new Promise((r) => srv.lastServer!.close(r));
 });

@@ -11,7 +11,7 @@ import { characterLook, createCharacter, downloadAsset, trashAsset, editCharacte
 import { JobQueue, type Job, type JobRunner, type SceneParams } from "./queue.js";
 import { HOME_DIR } from "./chrome.js";
 import { BIN, COMPUTER, IS_MAC, IS_WIN, moveToBin } from "./platform.js";
-import { PlanSchema, projDir, subDir, safeName, createSub, listProjects, readNotes, readPlan, writeNotes, writePlan } from "./projects.js";
+import { PlanSchema, projDir, subDir, safeName, addReference, createSub, listProjects, readNotes, readPlan, writeNotes, writePlan } from "./projects.js";
 import { handoff } from "./handoff.js";
 import { proposeLesson, readLessons } from "./lessons.js";
 import { TECHNIQUES, techniqueById } from "./techniques.js";
@@ -284,6 +284,7 @@ export const shapes = {
   studio_to_remotion: { project: z.string().min(1), sub: z.string().min(1), music: z.string().optional(), voiceover: z.string().optional() },
   studio_propose_lesson: { text: z.string().min(1), scope: z.string().default("global") },
   studio_notes_write: { project: z.string().min(1), sub: z.string().min(1), text: z.string() },
+  studio_add_reference: { project: z.string().min(1), sub: z.string().optional().describe("Omit for a project-level reference."), path: z.string().describe("A file already uploaded through the studio page (inside the uploads folder).") },
 };
 
 type Args<K extends keyof typeof shapes> = z.infer<z.ZodObject<(typeof shapes)[K]>>;
@@ -331,6 +332,7 @@ export interface Core {
   captions(a: Args<"captions">): Promise<unknown>;
   caption_setup(): Promise<unknown>;
   studio_projects(): Promise<unknown>;
+  studio_add_reference(a: Args<"studio_add_reference">): Promise<unknown>;
   studio_new(a: Args<"studio_new">): Promise<unknown>;
   studio_plan_read(a: Args<"studio_plan_read">): Promise<unknown>;
   studio_plan_write(a: Args<"studio_plan_write">): Promise<unknown>;
@@ -569,11 +571,14 @@ export class LocalCore implements Core {
     const old = (() => { try { return readPlan(project, sub); } catch { return undefined; } })();
     const scenes = plan.scenes.map((s) => {
       const o = old?.scenes.find((x) => x.n === s.n);
-      return o ? { ...s, storyboard: s.storyboard ?? o.storyboard, clip: s.clip ?? o.clip } : s;
+      // approved/kept are the owner's decisions (set only through the UI token routes), so Claude cannot flip them.
+      const { approved: _a, kept: _k, ...rest } = s;
+      return o ? { ...rest, storyboard: s.storyboard ?? o.storyboard, clip: s.clip ?? o.clip, approved: o.approved, kept: o.kept } : rest;
     });
     writePlan({ ...plan, scenes, project: safeName(project), sub: safeName(sub) });
     return { ok: true };
   }
+  async studio_add_reference({ project, sub, path }: Args<"studio_add_reference">) { return { path: addReference(project, sub, path) }; }
   async studio_notes_read({ project, sub }: Args<"studio_notes_read">) { return { text: readNotes(project, sub) }; }
   async studio_notes_write({ project, sub, text }: Args<"studio_notes_write">) {
     writeNotes(project, sub, text);
