@@ -149,19 +149,36 @@ function picker(label, onFile, accept) {
 async function savePlan(mut) {
   const { lessons, note, ...plan } = await apiOk("studio_plan_read", cur());
   mut(plan);
-  await apiOk("studio_plan_write", { ...cur(), plan }); // approved/kept are ignored by the engine here
+  // rev: refused if the plan changed between this read and the write. approved/kept/storyboard/clip are ignored here.
+  await apiOk("studio_plan_write", { ...cur(), rev: plan.rev ?? 0, plan });
 }
 const slug = (s) => s.trim().replace(/\s+/g, "-").replace(/[^A-Za-z0-9_-]/g, "");
 
 let view = "plan";
-let data = { plan: null, pending: [], status: null, lessons: [] };
+let data = { plan: null, pending: [], other: [], status: null, lessons: [], notes: null };
 let sig = "";
+// Notes: the page re-reads them on every poll unless the box has focus or a save is pending (then local text wins).
+const notesText = {}, notesRev = {}, notesConflict = {};
+let notesTimer = null, notesSaving = false;
+const notesKey = () => cur().project + "/" + cur().sub;
 async function fetchData() {
-  if (!have()) { data = { plan: null, pending: [], status: null, lessons: [] }; return; }
   const get = (p) => fetch(p, { headers: { "x-flow-token": TOKEN } }).then((r) => r.json());
-  const [plan, pending] = await Promise.all([api("studio_plan_read", cur()), get("/api/pending")]);
+  const pendingAll = await get("/api/pending");
+  const groups = Array.isArray(pendingAll) ? pendingAll : [];
+  if (!have()) { data = { plan: null, pending: [], other: groups, status: null, lessons: [], notes: null }; return; }
+  const plan = await api("studio_plan_read", cur());
   data.plan = plan.error ? null : plan;
-  data.pending = Array.isArray(pending) ? pending.filter((g) => g.jobs.some((j) => j.params.studio && j.params.studio.project === plan.project && j.params.studio.sub === plan.sub)) : [];
+  const mine = (g) => g.jobs.some((j) => j.params.studio && j.params.studio.project === plan.project && j.params.studio.sub === plan.sub);
+  data.pending = groups.filter(mine);
+  data.other = groups.filter((g) => !mine(g)); // non-studio jobs and other sub-projects: still approvable/cancellable here
+  if (view === "plan" && data.plan) {
+    const key = notesKey();
+    if (!notesTimer && !notesSaving && document.activeElement?.id !== "notes") {
+      const r = await api("studio_notes_read", cur());
+      if (r && typeof r.text === "string") { notesText[key] = r.text; notesRev[key] = r.rev; }
+    }
+    data.notes = notesText[key] ?? null;
+  }
   if (view === "generate") {
     const [st, ls] = await Promise.all([api("studio_status", cur()), get("/api/lessons")]);
     data.status = st.error ? null : st;
@@ -189,13 +206,29 @@ document.addEventListener("visibilitychange", () => document.visibilityState ===
 function render() {
   const el = $("view-" + view);
   if (view === "edit") return renderEdit(el);
-  if (!have() && view !== "plan") return el.replaceChildren(h("p", {}, "Pick or create a project first (Plan tab)."));
+  if (!have() && view !== "plan" && view !== "generate") return el.replaceChildren(h("p", {}, "Pick or create a project first (Plan tab)."));
   ({ plan: renderPlan, storyboard: renderBoard, generate: renderGen })[view](el);
 }
 
 // ---- Plan ----
-const notesText = {}, notesLoading = new Set(), lessonText = {};
-let notesTimer;
+const lessonText = {};
+async function saveNotes(key, c) {
+  notesTimer = null;
+  notesSaving = true;
+  const text = notesText[key];
+  try {
+    const r = await apiOk("studio_notes_write", { ...c, text, rev: notesRev[key] });
+    notesRev[key] = r.rev;
+  } catch (e) {
+    // Someone (Claude) changed the notes since this page read them: keep the typed text visible, reload theirs.
+    notesConflict[key] = text;
+    delete notesText[key];
+    toast(String(e.message || e) + " Your unsaved text is shown under Notes.");
+  } finally {
+    notesSaving = false;
+    refresh(true);
+  }
+}
 function renderPlan(el) {
   const p = data.plan, c = cur();
   const np = h("input", { placeholder: "Project", "aria-label": "New project" }), ns = h("input", { placeholder: "Sub-project", "aria-label": "New sub-project" });
@@ -218,27 +251,24 @@ function renderPlan(el) {
         const r = await apiOk("studio_add_reference", { ...c, path: await upload(f) });
         await savePlan((pl) => { const sc = pl.scenes.find((x) => x.n === s.n); sc.references = [...(sc.references || []), r.path]; });
       }), h("small", {}, (s.references || []).length ? ` ${s.references.length} ref` : ""))));
-    const notes = h("textarea", { rows: "6", "aria-label": "Notes", placeholder: "Notes for this sub-project (saved automatically)" });
-    const key = c.project + "/" + c.sub;
+    const notes = h("textarea", { id: "notes", rows: "6", "aria-label": "Notes", placeholder: "Notes for this sub-project (saved automatically)" });
+    const key = notesKey();
     notes.value = notesText[key] ?? "";
-    notes.disabled = !(key in notesText); // never autosave before the saved notes have loaded
+    notes.disabled = !(key in notesText); // never autosave before the saved notes have loaded (the next poll loads them)
     notes.oninput = () => {
       if (!(key in notesText)) return;
       notesText[key] = notes.value;
       clearTimeout(notesTimer);
-      notesTimer = setTimeout(() => api("studio_notes_write", { ...c, text: notesText[key] }).catch(() => {}), 800);
+      notesTimer = setTimeout(() => saveNotes(key, c), 800);
     };
-    if (!(key in notesText) && !notesLoading.has(key)) {
-      notesLoading.add(key);
-      api("studio_notes_read", c).then((r) => { if (r && typeof r.text === "string") notesText[key] = r.text; }).catch(() => {}).finally(() => {
-        // on failure keep the key "loading" a while so a bad read cannot spin
-        setTimeout(() => notesLoading.delete(key), key in notesText ? 0 : 5000);
-        refresh(true);
-      });
-    }
+    const lost = notesConflict[key];
+    const lostBox = lost === undefined ? null : h("div", { class: "lesson" },
+      h("b", {}, "Your unsaved notes (copy what you need, then dismiss):"),
+      (() => { const t = h("textarea", { rows: "4", readonly: true, "aria-label": "Unsaved notes" }); t.value = lost; return t; })(),
+      btn("Dismiss", () => { delete notesConflict[key]; }));
     kids.push(h("h3", {}, `${p.project} / ${p.sub}`), h("div", { class: "row" }, asp, sty),
       p.scenes.length ? h("table", {}, h("thead", {}, h("tr", {}, ...["#", "Prompt", "Camera", "Caption", "Voiceover", "References"].map((t) => h("th", {}, t)))), h("tbody", {}, rows)) : h("p", {}, "No scenes yet. Ask Claude to write the plan."),
-      h("h3", {}, "Notes"), notes,
+      h("h3", {}, "Notes"), notes, lostBox,
       h("h3", {}, "Reference images"), picker("Add project reference", async (f) => { await apiOk("studio_add_reference", { project: c.project, path: await upload(f) }); }));
     if (p.lessons && p.lessons.length) kids.push(h("details", {}, h("summary", {}, `Lessons (${p.lessons.length})`), h("ul", {}, p.lessons.map((l) => h("li", {}, `[${l.scope}] ${l.text}`)))));
   }
@@ -261,9 +291,25 @@ function renderBoard(el) {
 
 // ---- Generate ----
 const credits = (g) => (g.cost_unknown ? "credits unknown" : `up to ${g.max_credits} credits`);
+const cancelJob = (id) => owner("/api/cancel-job", { id });
+// One approval card: what will be made (scene, prompt, first frame) before the owner pays for it. Prompts are
+// untrusted text, so they only ever go in as text nodes (h() appends strings as text).
+function heldCard(g) {
+  const n = g.jobs.length;
+  const items = g.jobs.map((j) => {
+    const st = j.params.studio;
+    const thumb = j.params.first_frame && !j.params.first_frame.startsWith("asset:") ? h("img", { src: media(j.params.first_frame), alt: "First frame" + (st ? ", scene " + st.scene : "") }) : null;
+    return h("div", { class: "card" }, h("b", {}, st ? `Scene ${st.scene}` : j.params.file_stem || j.id), thumb, h("p", {}, j.params.prompt || ""));
+  });
+  return h("div", { class: "held" },
+    btn(`Approve ${n} clip${n === 1 ? "" : "s"} · ${credits(g)}`, () => owner("/api/approve", g.batch ? { batch: g.batch } : { job_id: g.jobs[0].id }), true, "big"),
+    " ", btn("Cancel", async () => { for (const j of g.jobs) await cancelJob(j.id); }, true),
+    h("div", { class: "grid" }, items));
+}
 function renderGen(el) {
   const p = data.plan, c = cur();
-  if (!p) return el.replaceChildren(h("p", {}, "No plan yet."));
+  const other = data.other.length ? [h("h3", {}, "Other held jobs"), ...data.other.map(heldCard)] : [];
+  if (!p) return el.replaceChildren(h("p", {}, "No plan yet."), ...other);
   const dur = h("select", { "aria-label": "Duration" }, ...[4, 6, 8, 10].map((d) => h("option", { value: d, selected: d === 8 }, d + " s")));
   const res = h("select", { "aria-label": "Resolution" }, h("option", { value: "360p" }, "360p"), h("option", { value: "720p", selected: true }, "720p"));
   const kids = [h("div", { class: "row" }, dur, res, btn("Queue approved scenes (held)", () => apiOk("studio_generate", { ...c, duration: Number(dur.value), resolution: res.value })))];
@@ -274,13 +320,14 @@ function renderGen(el) {
       btn("Save", () => owner("/api/lessons/resolve", { id: l.id, action: "save", editedText: txt.value }), true),
       btn("Discard", () => owner("/api/lessons/resolve", { id: l.id, action: "discard" }), true)));
   }
-  for (const g of data.pending) {
-    const n = g.jobs.length;
-    kids.push(h("div", { class: "held" },
-      btn(`Approve ${n} clip${n === 1 ? "" : "s"} · ${credits(g)}`, () => owner("/api/approve", g.batch ? { batch: g.batch } : { job_id: g.jobs[0].id }), true, "big"),
-      " ", btn("Cancel", async () => { for (const j of g.jobs) await owner("/api/cancel", { id: j.id }); }, true)));
-  }
+  for (const g of data.pending) kids.push(heldCard(g));
   const st = data.status ? data.status.scenes : [];
+  // Approved batches still waiting their turn: one button stops what has not started (a running clip finishes).
+  const queued = {};
+  for (const x of st) for (const j of x.jobs) if (j.status === "queued") (queued[j.batch || j.id] ||= []).push(j.id);
+  for (const ids of Object.values(queued))
+    kids.push(h("div", { class: "row" }, btn(`Stop remaining (${ids.length} queued)`, async () => { for (const id of ids) await cancelJob(id); }, true)));
+  kids.push(...other);
   kids.push(h("div", { class: "grid" }, p.scenes.map((s) => {
     const x = st.find((q) => q.n === s.n) || { jobs: [] };
     const last = x.jobs.filter((j) => j.kind === "clip").slice(-1)[0];
@@ -291,6 +338,7 @@ function renderGen(el) {
       s.clip ? h("video", { src: media(s.clip), controls: true, preload: "metadata" }) : null,
       h("div", { class: "row" },
         s.clip ? btn(s.kept ? "Kept (undo)" : "Keep", () => owner("/api/scene", { ...c, n: s.n, kept: !s.kept }), true, s.kept ? "ok" : "") : null,
+        last && (last.status === "held" || last.status === "queued") ? btn("Cancel", () => cancelJob(last.id), true) : null,
         btn("Redo", async () => {
           const change = prompt(`Redo scene ${s.n}: what should change? (optional)`);
           if (change === null) return;

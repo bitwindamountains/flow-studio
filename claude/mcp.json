@@ -5,7 +5,8 @@
       "args": ["D:/flow-studio/engine/dist/index.js"],
       "env": {
         "FLOW_MCP_HOME": "D:/flow-studio/data",
-        "FLOW_MCP_OUTPUT": "D:/flow-studio/projects"
+        "FLOW_MCP_OUTPUT": "D:/flow-studio/projects",
+        "FLOW_MCP_PORT": "8797"
       }
     }
   }

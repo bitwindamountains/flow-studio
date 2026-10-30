@@ -1,16 +1,31 @@
 {
   "permissions": {
     "deny": [
-      "Bash(*127.0.0.1:8787*)",
-      "Bash(*localhost:8787*)",
+      "Bash(*127.0.0.1:8797*)",
+      "Bash(*localhost:8797*)",
       "Bash(curl *)",
-      "PowerShell(*127.0.0.1:8787*)",
-      "PowerShell(*localhost:8787*)",
+      "Bash(*9333*)",
+      "Bash(*dist/index.js*)",
+      "Bash(*dist\\index.js*)",
+      "Bash(*dist/studio.js*)",
+      "Bash(*dist\\studio.js*)",
+      "PowerShell(*127.0.0.1:8797*)",
+      "PowerShell(*localhost:8797*)",
       "PowerShell(Invoke-WebRequest *)",
       "PowerShell(Invoke-RestMethod *)",
       "PowerShell(curl *)",
+      "PowerShell(*9333*)",
+      "PowerShell(*dist/index.js*)",
+      "PowerShell(*dist\\index.js*)",
+      "PowerShell(*dist/studio.js*)",
+      "PowerShell(*dist\\studio.js*)",
       "WebFetch(domain:127.0.0.1)",
-      "WebFetch(domain:localhost)"
+      "WebFetch(domain:localhost)",
+      "Edit(//d/flow-studio/data/**)",
+      "Edit(//d/flow-studio/projects/**/plan.json)",
+      "mcp__flow-studio__flow_generate",
+      "mcp__flow-studio__flow_edit",
+      "mcp__flow-studio__flow_continue"
     ]
   }
 }
