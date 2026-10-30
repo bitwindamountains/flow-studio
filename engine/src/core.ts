@@ -11,7 +11,7 @@ import { characterLook, createCharacter, downloadAsset, trashAsset, editCharacte
 import { JobQueue, type Job, type JobRunner, type SceneParams } from "./queue.js";
 import { HOME_DIR } from "./chrome.js";
 import { BIN, COMPUTER, IS_MAC, IS_WIN, moveToBin } from "./platform.js";
-import { PlanSchema, projDir, subDir, safeName, addReference, createSub, listProjects, readNotes, readPlan, writeNotes, writePlan } from "./projects.js";
+import { PlanSchema, projDir, subDir, safeName, addReference, createSub, listProjects, notesRev, planRev, readNotes, readPlan, uploadsDir, within, writeNotes, writePlan } from "./projects.js";
 import { handoff } from "./handoff.js";
 import { proposeLesson, readLessons } from "./lessons.js";
 import { TECHNIQUES, techniqueById } from "./techniques.js";
@@ -269,7 +269,7 @@ export const shapes = {
   studio_projects: {},
   studio_new: { project: z.string().min(1), sub: z.string().min(1), aspect: z.enum(["9:16", "16:9"]).default("9:16") },
   studio_plan_read: { project: z.string().min(1), sub: z.string().min(1) },
-  studio_plan_write: { project: z.string().min(1), sub: z.string().min(1), plan: PlanSchema },
+  studio_plan_write: { project: z.string().min(1), sub: z.string().min(1), rev: z.number().int().min(0).describe("The plan `rev` from your last studio_plan_read."), plan: PlanSchema },
   studio_notes_read: { project: z.string().min(1), sub: z.string().min(1) },
   studio_storyboard: { project: z.string().min(1), sub: z.string().min(1), scenes: z.array(z.number().int()).optional() },
   studio_generate: {
@@ -283,7 +283,7 @@ export const shapes = {
   studio_status: { project: z.string().min(1), sub: z.string().min(1) },
   studio_to_remotion: { project: z.string().min(1), sub: z.string().min(1), music: z.string().optional(), voiceover: z.string().optional() },
   studio_propose_lesson: { text: z.string().min(1), scope: z.string().default("global") },
-  studio_notes_write: { project: z.string().min(1), sub: z.string().min(1), text: z.string() },
+  studio_notes_write: { project: z.string().min(1), sub: z.string().min(1), text: z.string(), rev: z.string().optional().describe("The notes `rev` from your last studio_notes_read; the write is refused if the notes changed since.") },
   studio_add_reference: { project: z.string().min(1), sub: z.string().optional().describe("Omit for a project-level reference."), path: z.string().describe("A file already uploaded through the studio page (inside the uploads folder).") },
 };
 
@@ -566,27 +566,29 @@ export class LocalCore implements Core {
   }
   // Only proposes: nothing reaches the rulebook until the owner approves in the studio page.
   async studio_propose_lesson({ text, scope }: Args<"studio_propose_lesson">) { return proposeLesson(text, scope); }
-  async studio_plan_write({ project, sub, plan }: Args<"studio_plan_write">) {
-    // The engine owns storyboard/clip paths: a plan without them must not erase what finished jobs recorded.
+  async studio_plan_write({ project, sub, rev, plan }: Args<"studio_plan_write">) {
     const old = (() => { try { return readPlan(project, sub); } catch { return undefined; } })();
+    if (rev !== (old?.rev ?? 0)) throw new Error("Plan changed since you read it — call studio_plan_read again.");
+    const refRoots = [join(projDir(project), "references"), join(subDir(project, sub), "references"), uploadsDir()];
+    for (const s of plan.scenes) for (const r of s.references ?? [])
+      if (!within(r, refRoots)) throw new Error(`Scene ${s.n}: reference ${r} must be inside the project's references folder or the uploads folder (use studio_add_reference).`);
     const scenes = plan.scenes.map((s) => {
       const o = old?.scenes.find((x) => x.n === s.n);
-      // approved/kept are the owner's decisions (set only through the UI token routes), so Claude cannot flip them.
-      const { approved: _a, kept: _k, ...rest } = s;
+      // storyboard/clip are engine-owned (recorded by finished jobs) and approved/kept are the owner's (UI token routes):
+      // whatever the caller sends for them is ignored.
+      const { approved: _a, kept: _k, storyboard: _s, clip: _c, ...rest } = s;
       if (!o) return rest;
       // Approval belongs to what was approved: changing the content clears it.
-      const changed = s.prompt !== o.prompt || s.camera !== o.camera || JSON.stringify(s.references ?? []) !== JSON.stringify(o.references ?? []) || (s.storyboard !== undefined && s.storyboard !== o.storyboard);
-      const clipChanged = s.clip !== undefined && s.clip !== o.clip;
-      return { ...rest, storyboard: s.storyboard ?? o.storyboard, clip: s.clip ?? o.clip, approved: changed ? false : o.approved, kept: clipChanged ? false : o.kept };
+      const changed = s.prompt !== o.prompt || s.camera !== o.camera || JSON.stringify(s.references ?? []) !== JSON.stringify(o.references ?? []);
+      return { ...rest, storyboard: o.storyboard, clip: o.clip, approved: changed ? false : o.approved, kept: o.kept };
     });
     writePlan({ ...plan, scenes, project: safeName(project), sub: safeName(sub) });
-    return { ok: true };
+    return { ok: true, rev: planRev(project, sub) };
   }
   async studio_add_reference({ project, sub, path }: Args<"studio_add_reference">) { return { path: addReference(project, sub, path) }; }
-  async studio_notes_read({ project, sub }: Args<"studio_notes_read">) { return { text: readNotes(project, sub) }; }
-  async studio_notes_write({ project, sub, text }: Args<"studio_notes_write">) {
-    writeNotes(project, sub, text);
-    return { ok: true };
+  async studio_notes_read({ project, sub }: Args<"studio_notes_read">) { const text = readNotes(project, sub); return { text, rev: notesRev(text) }; }
+  async studio_notes_write({ project, sub, text, rev }: Args<"studio_notes_write">) {
+    return { ok: true, rev: writeNotes(project, sub, text, rev) };
   }
 
   private recordDone(job: Job): void {
@@ -623,17 +625,19 @@ export class LocalCore implements Core {
     return [...(scene.references ?? []).map((r) => resolve(r)), ...shared];
   }
 
+  // approvedOnly applies to an explicit list too: unapproved scenes are skipped and reported, never queued.
   private pickScenes(plan: ReturnType<typeof readPlan>, scenes: number[] | undefined, approvedOnly: boolean) {
-    if (scenes) {
-      return scenes.map((n) => {
+    const all = scenes
+      ? scenes.map((n) => {
         const s = plan.scenes.find((x) => x.n === n);
         if (!s) throw new Error(`Unknown scene ${n}.`);
         return s;
-      });
-    }
-    const out = plan.scenes.filter((s) => !approvedOnly || s.approved === true);
-    if (!out.length) throw new Error(approvedOnly ? "No approved scenes - approve storyboard frames first." : "Plan has no scenes.");
-    return out;
+      })
+      : plan.scenes;
+    const picked = all.filter((s) => !approvedOnly || s.approved === true);
+    const skipped = all.filter((s) => !picked.includes(s)).map((s) => s.n);
+    if (!picked.length) throw new Error(approvedOnly ? "No approved scenes - approve storyboard frames first." : "Plan has no scenes.");
+    return { picked, skipped };
   }
 
   private clipJob(plan: ReturnType<typeof readPlan>, scene: ReturnType<typeof readPlan>["scenes"][number], a: { duration: 4 | 6 | 8 | 10; resolution: "360p" | "720p"; model?: string; max_credits: number; prompt?: string }, batch: string) {
@@ -651,7 +655,7 @@ export class LocalCore implements Core {
   async studio_storyboard({ project, sub, scenes }: Args<"studio_storyboard">) {
     const plan = readPlan(project, sub);
     const dir = join(subDir(project, sub), "storyboard");
-    const job_ids = this.pickScenes(plan, scenes, false).map((s) => this.queue.add({
+    const job_ids = this.pickScenes(plan, scenes, false).picked.map((s) => this.queue.add({
       prompt: s.prompt, type: "image", max_credits: 0, aspect_ratio: plan.aspect,
       reference_images: this.studioRefs(project, s),
       output_dir: dir, file_stem: this.freeStem(dir, plan.project, plan.sub, "storyboard", s.n),
@@ -662,15 +666,15 @@ export class LocalCore implements Core {
 
   async studio_generate({ project, sub, scenes, duration, resolution, model, max_credits }: Args<"studio_generate">) {
     const plan = readPlan(project, sub);
-    const picked = this.pickScenes(plan, scenes, true);
+    const { picked, skipped } = this.pickScenes(plan, scenes, true);
     const batch = randomUUID().slice(0, 8);
     for (const s of picked) this.clipJob(plan, s, { duration, resolution, model, max_credits }, batch);
-    return { batch, held: picked.length, quoted_max_credits: max_credits * picked.length };
+    return { batch, held: picked.length, quoted_max_credits: max_credits * picked.length, ...(skipped.length && { skipped_unapproved: skipped }) };
   }
 
   async studio_redo({ project, sub, scene, prompt }: Args<"studio_redo">) {
     const plan = readPlan(project, sub);
-    const s = this.pickScenes(plan, [scene], false)[0];
+    const s = this.pickScenes(plan, [scene], false).picked[0];
     const batch = randomUUID().slice(0, 8);
     const job = this.clipJob(plan, s, { duration: 8, resolution: "720p", max_credits: 20, prompt }, batch);
     return { batch, held: 1, job_id: job.id, quoted_max_credits: 20 };
@@ -682,7 +686,7 @@ export class LocalCore implements Core {
     return {
       scenes: plan.scenes.map((s) => ({
         n: s.n, storyboard: s.storyboard, approved: s.approved, clip: s.clip, kept: s.kept,
-        jobs: mine.filter((j) => j.params.studio!.scene === s.n).map((j) => ({ id: j.id, kind: j.params.studio!.kind, status: j.status, credits: j.credits, note: j.note, error: j.error })),
+        jobs: mine.filter((j) => j.params.studio!.scene === s.n).map((j) => ({ id: j.id, kind: j.params.studio!.kind, status: j.status, batch: j.batch, credits: j.credits, note: j.note, error: j.error })),
       })),
       pending: this.queue.pendingApproval().filter((g) => g.jobs.some((j) => j.params.studio?.project === plan.project && j.params.studio.sub === plan.sub)),
     };
@@ -690,6 +694,10 @@ export class LocalCore implements Core {
 
   async studio_to_remotion({ project, sub, music, voiceover }: Args<"studio_to_remotion">) {
     const plan = readPlan(project, sub);
+    for (const [what, p] of [["music", music], ["voiceover", voiceover]] as const)
+      if (p && !within(p, [uploadsDir()])) throw new Error(`${what} must be a file uploaded through the studio page (inside the uploads folder).`);
+    const clips = join(subDir(project, sub), "clips");
+    for (const s of plan.scenes) if (s.kept && s.clip && !within(s.clip, [clips])) throw new Error(`Scene ${s.n}: kept clip must be inside ${clips}.`);
     return { ...handoff(plan, { music, voiceover }), style: plan.style };
   }
 

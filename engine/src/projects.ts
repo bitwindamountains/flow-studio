@@ -1,4 +1,5 @@
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { basename, extname, join, relative, isAbsolute, resolve } from "node:path";
 import { z } from "zod";
 import { HOME_DIR } from "./chrome.js";
@@ -24,6 +25,8 @@ export const PlanSchema = z.object({
   sub: z.string().min(1),
   aspect: z.enum(["9:16", "16:9"]),
   style: z.enum(["A", "B"]).optional(),
+  // Bumped by every writePlan; studio_plan_write must name the rev it read, so a stale copy cannot overwrite newer work.
+  rev: z.number().int().min(0).optional(),
   scenes: z.array(SceneSchema).refine((s) => new Set(s.map((x) => x.n)).size === s.length, "scene numbers (n) must be unique"),
 });
 export type Scene = z.infer<typeof SceneSchema>;
@@ -70,9 +73,13 @@ function existingSub(project: string, sub: string): string {
   return d;
 }
 
+export const planRev = (project: string, sub: string): number => {
+  try { return readPlan(project, sub).rev ?? 0; } catch { return 0; }
+};
+
 export const writePlan = (plan: Plan): void => {
   existingSub(plan.project, plan.sub);
-  writePlanFile(plan);
+  writePlanFile({ ...plan, rev: planRev(plan.project, plan.sub) + 1 });
 };
 
 export function listProjects(): { project: string; subs: string[] }[] {
@@ -87,14 +94,26 @@ export const readNotes = (project: string, sub: string): string => {
     throw e;
   }
 };
-export const writeNotes = (project: string, sub: string, text: string): void => {
-  writeFileSync(join(existingSub(project, sub), "notes.md"), text);
+// Content hash, not mtime: two writes inside one timestamp tick must still read as different.
+export const notesRev = (text: string): string => createHash("sha256").update(text).digest("hex").slice(0, 16);
+// With a base rev (from a read), refuses to overwrite notes someone else changed since.
+export const writeNotes = (project: string, sub: string, text: string, base?: string): string => {
+  const d = existingSub(project, sub);
+  if (base !== undefined && base !== notesRev(readNotes(project, sub))) throw new Error("Notes changed since you read them — call studio_notes_read again.");
+  writeFileSync(join(d, "notes.md"), text);
+  return notesRev(text);
 };
 
-export function addReference(project: string, sub: string | undefined, srcPath: string, allowedRoots: string[] = [join(HOME_DIR, "uploads")]): string {
-  const src = resolve(srcPath);
-  const ok = allowedRoots.some((r) => { const rel = relative(resolve(r), src); return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel); });
-  if (!ok) throw new Error(`Reference source must be inside ${allowedRoots.join(" or ")}.`);
+export const uploadsDir = () => join(HOME_DIR, "uploads");
+const real = (p: string) => { try { return realpathSync(p); } catch { return resolve(p); } };
+// Realpath containment, so a symlink or junction inside an allowed folder cannot point outside it.
+export function within(file: string, roots: string[]): boolean {
+  const f = real(file);
+  return roots.some((r) => { const rel = relative(real(r), f); return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel); });
+}
+
+export function addReference(project: string, sub: string | undefined, srcPath: string, allowedRoots: string[] = [uploadsDir()]): string {
+  if (!within(srcPath, allowedRoots)) throw new Error(`Reference source must be inside ${allowedRoots.join(" or ")}.`);
   const dir = join(sub ? subDir(project, sub) : projDir(project), "references");
   mkdirSync(dir, { recursive: true });
   const ext = extname(srcPath);

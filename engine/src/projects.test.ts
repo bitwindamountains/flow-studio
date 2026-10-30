@@ -34,7 +34,9 @@ test("writePlan/readPlan round-trip and notes", () => {
   P.createSub("RT", "s");
   const plan = { project: "RT", sub: "s", aspect: "16:9" as const, scenes: [{ n: 1, prompt: "x" }] };
   P.writePlan(plan);
-  assert.deepEqual(P.readPlan("RT", "s"), plan);
+  assert.deepEqual(P.readPlan("RT", "s"), { ...plan, rev: 1 });
+  P.writePlan(P.readPlan("RT", "s"));
+  assert.equal(P.readPlan("RT", "s").rev, 2);
   P.writeNotes("RT", "s", "hi");
   assert.equal(P.readNotes("RT", "s"), "hi");
 });
@@ -80,4 +82,14 @@ test("missing sub: notes/plan throw and create nothing", () => {
 
 test("readPlan('..','x') stays inside root and throws", () => {
   assert.throws(() => P.readPlan("..", "x"), /Invalid name|No plan/);
+});
+
+test("writeNotes with a stale base rev is rejected", () => {
+  P.createSub("Nt", "s");
+  const base = P.notesRev(P.readNotes("Nt", "s"));
+  const next = P.writeNotes("Nt", "s", "first", base);
+  assert.throws(() => P.writeNotes("Nt", "s", "second", base), /changed since you read/);
+  assert.equal(P.readNotes("Nt", "s"), "first");
+  P.writeNotes("Nt", "s", "second", next);
+  assert.equal(P.readNotes("Nt", "s"), "second");
 });

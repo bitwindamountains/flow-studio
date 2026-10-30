@@ -81,7 +81,7 @@ export class JobQueue {
     this.pauseMs = opts.pauseMs ?? [PAUSE_MIN_MS, PAUSE_MAX_MS];
   }
 
-  // Loads the file, fails jobs that were running when the last owner died, and resumes queued work. Call it only in
+  // Loads the file, fails jobs that were running when the last owner died, re-holds approved paid jobs, and resumes queued work. Call it only in
   // the process that drives Flow: a client process that loaded the file would fail the owner's live job and run paid jobs.
   restore(): void {
     if (!this.opts.file) return;
@@ -91,6 +91,8 @@ export class JobQueue {
         j.error = STOPPED;
         j.finishedAt = new Date().toISOString();
       }
+      // An approval does not outlive the process: after a restart the owner looks at paid work again.
+      if (j.status === "queued" && needsOk(j.params)) j.status = "held";
       this.jobs.set(j.id, j);
     }
     this.active = true;

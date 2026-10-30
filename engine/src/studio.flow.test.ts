@@ -25,6 +25,11 @@ async function setup(sub: string, scenes: object[]) {
   writePlan(plan);
   return { core, readPlan };
 }
+// Writes a plan at the current rev, the way a caller that just read it would.
+async function write(core: { studio_plan_write(a: unknown): Promise<unknown> }, sub: string, scenes: object[]) {
+  const { readPlan } = await import("./projects.js");
+  return core.studio_plan_write({ project: "P", sub, rev: readPlan("P", sub).rev ?? 0, plan: { project: "P", sub, aspect: "16:9", scenes } });
+}
 const until = async (f: () => boolean) => { for (let i = 0; i < 200 && !f(); i++) await new Promise((r) => setTimeout(r, 10)); };
 
 test("storyboard queues image jobs that run without approval", async () => {
@@ -78,17 +83,75 @@ test("redo keeps the previous clip file", async () => {
   assert.ok(readPlan("P", "e").scenes[0].clip!.endsWith("scene-01-take-2.mp4"));
 });
 
-test("plan_write keeps engine-owned clip path; explicit clip wins", async () => {
+test("plan_write keeps engine-owned clip/storyboard; incoming (stale) values are ignored, new scenes cannot set them", async () => {
   const { core, readPlan } = await setup("f", [{ n: 1, prompt: "x", approved: true }]);
   const r = (await core.studio_generate({ project: "P", sub: "f", duration: 8, resolution: "720p", max_credits: 20 } as never)) as { batch: string };
   core.queue.approve({ batch: r.batch });
   await until(() => !!readPlan("P", "f").scenes[0].clip);
   const clip = readPlan("P", "f").scenes[0].clip!;
-  await core.studio_plan_write({ project: "P", sub: "f", plan: { project: "P", sub: "f", aspect: "16:9", scenes: [{ n: 1, prompt: "edited" }] } } as never);
+  await write(core, "f", [{ n: 1, prompt: "edited" }]);
   assert.equal(readPlan("P", "f").scenes[0].clip, clip);
   assert.equal(readPlan("P", "f").scenes[0].prompt, "edited");
-  await core.studio_plan_write({ project: "P", sub: "f", plan: { project: "P", sub: "f", aspect: "16:9", scenes: [{ n: 1, prompt: "e", clip: "Z:\other.mp4" }] } } as never);
-  assert.equal(readPlan("P", "f").scenes[0].clip, "Z:\other.mp4");
+  await write(core, "f", [{ n: 1, prompt: "edited", clip: "Z:\\other.mp4", storyboard: "Z:\\old.png" }, { n: 2, prompt: "new", clip: "Z:\\c.mp4", storyboard: "Z:\\s.png" }]);
+  const sc = readPlan("P", "f").scenes;
+  assert.equal(sc[0].clip, clip);
+  assert.equal(sc[0].storyboard, undefined);
+  assert.equal(sc[1].clip, undefined);
+  assert.equal(sc[1].storyboard, undefined);
+});
+
+test("plan_write with a stale rev is rejected and changes nothing", async () => {
+  const { core, readPlan } = await setup("rev", [{ n: 1, prompt: "x" }]);
+  const rev = readPlan("P", "rev").rev!;
+  assert.equal(((await write(core, "rev", [{ n: 1, prompt: "y" }])) as { rev: number }).rev, rev + 1);
+  await assert.rejects(core.studio_plan_write({ project: "P", sub: "rev", rev, plan: { project: "P", sub: "rev", aspect: "16:9", scenes: [{ n: 1, prompt: "stale" }] } } as never), /Plan changed since you read it/);
+  assert.equal(readPlan("P", "rev").scenes[0].prompt, "y");
+  const read = (await core.studio_plan_read({ project: "P", sub: "rev" } as never)) as { rev: number };
+  assert.equal(read.rev, rev + 1);
+});
+
+test("plan_write rejects scene references outside the references/uploads folders", async () => {
+  const { core, readPlan } = await setup("refs", [{ n: 1, prompt: "x" }]);
+  const { projDir } = await import("./projects.js");
+  await assert.rejects(write(core, "refs", [{ n: 1, prompt: "x", references: [join(home, "token")] }]), /reference .* must be inside/);
+  await assert.rejects(write(core, "refs", [{ n: 1, prompt: "x", references: [join(projDir("P"), "references", "..", "..", "x.png")] }]), /must be inside/);
+  const ok = join(projDir("P"), "references", "a.png");
+  writeFileSync(ok, "x");
+  await write(core, "refs", [{ n: 1, prompt: "x", references: [ok, join(home, "uploads", "u.png")] }]);
+  assert.equal(readPlan("P", "refs").scenes[0].references!.length, 2);
+});
+
+test("generate with an explicit scene list still skips (and reports) unapproved scenes", async () => {
+  const { core } = await setup("ap", [{ n: 1, prompt: "x", approved: true }, { n: 2, prompt: "y" }]);
+  const r = (await core.studio_generate({ project: "P", sub: "ap", scenes: [1, 2], duration: 8, resolution: "720p", max_credits: 20 } as never)) as { held: number; skipped_unapproved: number[] };
+  assert.equal(r.held, 1);
+  assert.deepEqual(r.skipped_unapproved, [2]);
+  assert.deepEqual(core.queue.list().map((j) => j.params.studio!.scene), [1]);
+  await assert.rejects(core.studio_generate({ project: "P", sub: "ap", scenes: [2], duration: 8, resolution: "720p", max_credits: 20 } as never), /No approved scenes/);
+});
+
+test("to_remotion only takes music/voiceover from uploads and kept clips from the sub's clips folder", async () => {
+  const { core, readPlan } = await setup("rm", [{ n: 1, prompt: "x" }]);
+  const { writePlan } = await import("./projects.js");
+  process.env.STUDIO_REMOTION = mkdtempSync(join(tmpdir(), "fm-rm-"));
+  const token = join(home, "token");
+  writeFileSync(token, "secret");
+  const call = (a: object) => core.studio_to_remotion({ project: "P", sub: "rm", ...a } as never);
+  const plan = readPlan("P", "rm");
+  plan.scenes[0] = { ...plan.scenes[0], kept: true, clip: token };
+  writePlan(plan);
+  await assert.rejects(call({}), /kept clip must be inside/);
+  const clip = join(home, "projects", "P", "rm", "clips", "scene-01.mp4");
+  writeFileSync(clip, "x");
+  plan.scenes[0].clip = clip;
+  writePlan(plan);
+  await assert.rejects(call({ music: token }), /music must be a file uploaded/);
+  await assert.rejects(call({ voiceover: token }), /voiceover must be a file uploaded/);
+  mkdirSync(join(home, "uploads"), { recursive: true });
+  const song = join(home, "uploads", "song.mp3");
+  writeFileSync(song, "x");
+  const out = (await call({ music: song })) as { files: string[] };
+  assert.deepEqual(out.files, ["a.mp4", "bg.mp3", "captions.json"]);
 });
 
 test("storyboard reroll resets approved", async () => {
@@ -100,7 +163,7 @@ test("storyboard reroll resets approved", async () => {
 
 test("plan_write cannot set or clear approved/kept", async () => {
   const { core, readPlan } = await setup("h", [{ n: 1, prompt: "x", approved: true, kept: false }]);
-  const w = (scenes: object[]) => core.studio_plan_write({ project: "P", sub: "h", plan: { project: "P", sub: "h", aspect: "16:9", scenes } } as never);
+  const w = (scenes: object[]) => write(core, "h", scenes);
   await w([{ n: 1, prompt: "x", approved: false, kept: true }, { n: 2, prompt: "new", approved: true, kept: true }]);
   const sc = readPlan("P", "h").scenes;
   assert.equal(sc[0].approved, true);
@@ -109,14 +172,15 @@ test("plan_write cannot set or clear approved/kept", async () => {
   assert.equal(sc[1].kept, undefined);
 });
 
-test("plan_write: content edits clear approval, unchanged rewrite keeps it, swapped clip clears kept", async () => {
-  const { core, readPlan } = await setup("i", [{ n: 1, prompt: "x", approved: true, kept: true, clip: "C:\a.mp4" }]);
-  const w = (sc: object) => core.studio_plan_write({ project: "P", sub: "i", plan: { project: "P", sub: "i", aspect: "16:9", scenes: [sc] } } as never);
+test("plan_write: content edits clear approval, unchanged rewrite keeps it, an incoming clip cannot swap the kept one", async () => {
+  const { core, readPlan } = await setup("i", [{ n: 1, prompt: "x", approved: true, kept: true, clip: "C:\\a.mp4" }]);
+  const w = (sc: object) => write(core, "i", [sc]);
   await w({ n: 1, prompt: "x" });
   assert.equal(readPlan("P", "i").scenes[0].approved, true);
   assert.equal(readPlan("P", "i").scenes[0].kept, true);
-  await w({ n: 1, prompt: "x", clip: "C:\b.mp4" });
-  assert.equal(readPlan("P", "i").scenes[0].kept, false);
+  await w({ n: 1, prompt: "x", clip: "C:\\b.mp4" });
+  assert.equal(readPlan("P", "i").scenes[0].clip, "C:\\a.mp4");
+  assert.equal(readPlan("P", "i").scenes[0].kept, true);
   assert.equal(readPlan("P", "i").scenes[0].approved, true);
   await w({ n: 1, prompt: "changed" });
   assert.equal(readPlan("P", "i").scenes[0].approved, false);

@@ -7,6 +7,9 @@ import { PLAYBOOK } from "./playbook.js";
 import { RemoteCore } from "./remote.js";
 import { PORT, startServer } from "./server.js";
 
+// This process holds the queue (and maybe a running paid job): log stray errors, never die of them.
+process.on("unhandledRejection", (e) => console.error("flow-mcp: unhandled rejection:", e));
+process.on("uncaughtException", (e) => console.error("flow-mcp: uncaught exception:", e));
 const local = new LocalCore();
 const role = await startServer(local);
 if (role !== "client") local.queue.restore(); // "none" drives Flow itself, so it owns the queue too
@@ -125,7 +128,7 @@ server.registerTool(
   "flow_cancel",
   {
     title: "Cancel a queued Flow job",
-    description: "Cancel a job that has not started yet. A running generation cannot be cancelled.",
+    description: "Cancel a job that has not started yet (held or queued). A running generation cannot be cancelled.",
     inputSchema: shapes.cancel,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
   },
@@ -346,7 +349,7 @@ server.registerTool(
   "studio_plan_read",
   {
     title: "Read a plan",
-    description: "Read plan.json. Returns the plan fields spread at top level plus `lessons` (an array, empty until lessons are wired in). Returns immediately.",
+    description: "Read plan.json. Returns the plan fields spread at top level (including `rev`, the plan's revision number) plus `lessons`. Returns immediately.",
     inputSchema: shapes.studio_plan_read,
     annotations: { readOnlyHint: true, openWorldHint: false },
   },
@@ -357,7 +360,7 @@ server.registerTool(
   "studio_plan_write",
   {
     title: "Write a plan",
-    description: "Replace plan.json after validating the whole plan; scene numbers `n` must be unique. Returns immediately.",
+    description: "Replace plan.json after validating the whole plan; scene numbers `n` must be unique. Pass `rev` from your last studio_plan_read: if the plan changed since (the owner or a finished job wrote it), the write is refused - read again and redo your change. `storyboard` and `clip` are recorded by the engine and `approved`/`kept` by the owner: values you send for them are ignored. Scene `references` must be files inside the project's references folder or the uploads folder (add them with studio_add_reference). Returns { ok, rev } immediately.",
     inputSchema: shapes.studio_plan_write,
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },
@@ -368,7 +371,7 @@ server.registerTool(
   "studio_notes_read",
   {
     title: "Read notes",
-    description: "Read a sub-project's notes.md. Returns immediately.",
+    description: "Read a sub-project's notes.md. Returns { text, rev } immediately; pass that rev to studio_notes_write.",
     inputSchema: shapes.studio_notes_read,
     annotations: { readOnlyHint: true, openWorldHint: false },
   },
@@ -379,7 +382,7 @@ server.registerTool(
   "studio_notes_write",
   {
     title: "Write notes",
-    description: "Replace a sub-project's notes.md. Returns immediately.",
+    description: "Replace a sub-project's notes.md. Pass `rev` from your last studio_notes_read: if the owner changed the notes since, the write is refused - read again and merge. Returns { ok, rev } immediately.",
     inputSchema: shapes.studio_notes_write,
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },
@@ -412,7 +415,7 @@ server.registerTool(
   "studio_generate",
   {
     title: "Generate clips",
-    description: "Queue one video job per approved scene (or the given scenes), held until the owner approves in the Studio page. Returns batch, held and quoted_max_credits. Never spends credits by itself.",
+    description: "Queue one video job per approved scene (or the given scenes - unapproved ones are skipped and listed in skipped_unapproved), held until the owner approves in the Studio page. Returns batch, held and quoted_max_credits. Never spends credits by itself.",
     inputSchema: shapes.studio_generate,
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },

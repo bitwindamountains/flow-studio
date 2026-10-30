@@ -96,3 +96,17 @@ test("pendingApproval flags unknown cost for edit and continue jobs", () => {
   assert.equal(g.find((x) => !x.batch)!.cost_unknown, true);
   assert.equal(g.find((x) => x.batch === "B")!.cost_unknown, false);
 });
+
+test("restore re-holds approved (queued) paid jobs, keeps their batch; free jobs stay queued", async () => {
+  const file = join(dir(), "q.json");
+  const mkJob = (id: string, p: SceneParams): Job => ({ id, status: "queued", params: p, files: [], attempts: 0, batch: "B", createdAt: "x" });
+  writeFileSync(file, JSON.stringify([mkJob("vid", params("video")), mkJob("edt", params("image", { edit_asset: "a" })), mkJob("img", params("image"))]));
+  const q = mk(file);
+  q.restore();
+  assert.equal(q.get("vid")?.status, "held");
+  assert.equal(q.get("vid")?.batch, "B");
+  assert.equal(q.get("edt")?.status, "held");
+  await tick();
+  assert.equal(q.get("img")?.status, "done");
+  assert.equal(q.get("vid")?.status, "held");
+});
