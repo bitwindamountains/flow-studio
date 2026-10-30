@@ -441,4 +441,15 @@ server.registerTool(
   (args) => reply(core.studio_status(args)),
 );
 
+server.registerTool(
+  "studio_to_remotion",
+  {
+    title: "Hand off to Remotion",
+    description: "Copy the kept clips (a.mp4, b.mp4...), optional music (bg.mp3) and voiceover (vo.mp3) plus captions.json into a fresh public/<project>/<letter>/ folder of the owner's Remotion project. Returns { dir, files, style }. Then follow the owner's remotion-style-a / -b skill to add a NEW <Composition> in src/Root.tsx; transcribe vo.mp3 for word timing if present.",
+    inputSchema: shapes.studio_to_remotion,
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+  },
+  (args) => reply(core.studio_to_remotion(args)),
+);
+
 await server.connect(new StdioServerTransport());

@@ -12,6 +12,7 @@ import { JobQueue, type Job, type JobRunner, type SceneParams } from "./queue.js
 import { HOME_DIR } from "./chrome.js";
 import { BIN, COMPUTER, IS_MAC, IS_WIN, moveToBin } from "./platform.js";
 import { PlanSchema, projDir, subDir, safeName, createSub, listProjects, readNotes, readPlan, writeNotes, writePlan } from "./projects.js";
+import { handoff } from "./handoff.js";
 import { proposeLesson, readLessons } from "./lessons.js";
 import { TECHNIQUES, techniqueById } from "./techniques.js";
 
@@ -280,6 +281,7 @@ export const shapes = {
   },
   studio_redo: { project: z.string().min(1), sub: z.string().min(1), scene: z.number().int(), prompt: z.string().optional() },
   studio_status: { project: z.string().min(1), sub: z.string().min(1) },
+  studio_to_remotion: { project: z.string().min(1), sub: z.string().min(1), music: z.string().optional(), voiceover: z.string().optional() },
   studio_propose_lesson: { text: z.string().min(1), scope: z.string().default("global") },
   studio_notes_write: { project: z.string().min(1), sub: z.string().min(1), text: z.string() },
 };
@@ -338,6 +340,7 @@ export interface Core {
   studio_generate(a: Args<"studio_generate">): Promise<unknown>;
   studio_redo(a: Args<"studio_redo">): Promise<unknown>;
   studio_status(a: Args<"studio_status">): Promise<unknown>;
+  studio_to_remotion(a: Args<"studio_to_remotion">): Promise<unknown>;
   studio_propose_lesson(a: Args<"studio_propose_lesson">): Promise<unknown>;
 }
 
@@ -674,6 +677,11 @@ export class LocalCore implements Core {
       })),
       pending: this.queue.pendingApproval().filter((g) => g.jobs.some((j) => j.params.studio?.project === plan.project && j.params.studio.sub === plan.sub)),
     };
+  }
+
+  async studio_to_remotion({ project, sub, music, voiceover }: Args<"studio_to_remotion">) {
+    const plan = readPlan(project, sub);
+    return { ...handoff(plan, { music, voiceover }), style: plan.style };
   }
 
   // Everything already downloaded, newest project first, so the panel can show past work after a restart.
