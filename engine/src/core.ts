@@ -562,7 +562,13 @@ export class LocalCore implements Core {
   // Only proposes: nothing reaches the rulebook until the owner approves in the studio page.
   async studio_propose_lesson({ text, scope }: Args<"studio_propose_lesson">) { return proposeLesson(text, scope); }
   async studio_plan_write({ project, sub, plan }: Args<"studio_plan_write">) {
-    writePlan({ ...plan, project: safeName(project), sub: safeName(sub) });
+    // The engine owns storyboard/clip paths: a plan without them must not erase what finished jobs recorded.
+    const old = (() => { try { return readPlan(project, sub); } catch { return undefined; } })();
+    const scenes = plan.scenes.map((s) => {
+      const o = old?.scenes.find((x) => x.n === s.n);
+      return o ? { ...s, storyboard: s.storyboard ?? o.storyboard, clip: s.clip ?? o.clip } : s;
+    });
+    writePlan({ ...plan, scenes, project: safeName(project), sub: safeName(sub) });
     return { ok: true };
   }
   async studio_notes_read({ project, sub }: Args<"studio_notes_read">) { return { text: readNotes(project, sub) }; }
@@ -578,6 +584,7 @@ export class LocalCore implements Core {
     const scene = plan.scenes.find((x) => x.n === st.scene);
     if (!scene) return;
     scene[st.kind] = job.files[0];
+    if (st.kind === "storyboard") scene.approved = false; // a new still must be looked at again
     writePlan(plan);
   }
 

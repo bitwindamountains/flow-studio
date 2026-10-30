@@ -77,3 +77,23 @@ test("redo keeps the previous clip file", async () => {
   assert.ok(existsSync(first));
   assert.ok(readPlan("P", "e").scenes[0].clip!.endsWith("scene-01-take-2.mp4"));
 });
+
+test("plan_write keeps engine-owned clip path; explicit clip wins", async () => {
+  const { core, readPlan } = await setup("f", [{ n: 1, prompt: "x", approved: true }]);
+  const r = (await core.studio_generate({ project: "P", sub: "f", duration: 8, resolution: "720p", max_credits: 20 } as never)) as { batch: string };
+  core.queue.approve({ batch: r.batch });
+  await until(() => !!readPlan("P", "f").scenes[0].clip);
+  const clip = readPlan("P", "f").scenes[0].clip!;
+  await core.studio_plan_write({ project: "P", sub: "f", plan: { project: "P", sub: "f", aspect: "16:9", scenes: [{ n: 1, prompt: "edited" }] } } as never);
+  assert.equal(readPlan("P", "f").scenes[0].clip, clip);
+  assert.equal(readPlan("P", "f").scenes[0].prompt, "edited");
+  await core.studio_plan_write({ project: "P", sub: "f", plan: { project: "P", sub: "f", aspect: "16:9", scenes: [{ n: 1, prompt: "e", clip: "Z:\other.mp4" }] } } as never);
+  assert.equal(readPlan("P", "f").scenes[0].clip, "Z:\other.mp4");
+});
+
+test("storyboard reroll resets approved", async () => {
+  const { core, readPlan } = await setup("g", [{ n: 1, prompt: "x", approved: true }]);
+  await core.studio_storyboard({ project: "P", sub: "g", scenes: [1] } as never);
+  await until(() => !!readPlan("P", "g").scenes[0].storyboard);
+  assert.equal(readPlan("P", "g").scenes[0].approved, false);
+});
