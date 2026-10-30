@@ -562,7 +562,8 @@ export class LocalCore implements Core {
   async studio_plan_read({ project, sub }: Args<"studio_plan_read">) {
     const lessons = readLessons();
     const note = lessons.length > 60 ? `Lessons has ${lessons.length} rules - propose merges to the owner.` : undefined;
-    return { ...readPlan(project, sub), lessons, ...(note && { note }) };
+    const plan = readPlan(project, sub);
+    return { ...plan, rev: plan.rev ?? 0, lessons, ...(note && { note }) };
   }
   // Only proposes: nothing reaches the rulebook until the owner approves in the studio page.
   async studio_propose_lesson({ text, scope }: Args<"studio_propose_lesson">) { return proposeLesson(text, scope); }
