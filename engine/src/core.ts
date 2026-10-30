@@ -11,7 +11,7 @@ import { characterLook, createCharacter, downloadAsset, trashAsset, editCharacte
 import { JobQueue, type Job } from "./queue.js";
 import { HOME_DIR } from "./chrome.js";
 import { BIN, COMPUTER, IS_MAC, IS_WIN, moveToBin } from "./platform.js";
-import { PlanSchema, createSub, listProjects, readNotes, readPlan, writeNotes, writePlan } from "./projects.js";
+import { PlanSchema, safeName, createSub, listProjects, readNotes, readPlan, writeNotes, writePlan } from "./projects.js";
 import { TECHNIQUES, techniqueById } from "./techniques.js";
 
 export const OUTPUT_ROOT = process.env.FLOW_MCP_OUTPUT ?? join(homedir(), "flow-mcp-out");
@@ -535,7 +535,7 @@ export class LocalCore implements Core {
   // lessons: Task 7 fills this in.
   async studio_plan_read({ project, sub }: Args<"studio_plan_read">) { return { ...readPlan(project, sub), lessons: [] as unknown[] }; }
   async studio_plan_write({ project, sub, plan }: Args<"studio_plan_write">) {
-    writePlan({ ...plan, project, sub });
+    writePlan({ ...plan, project: safeName(project), sub: safeName(sub) });
     return { ok: true };
   }
   async studio_notes_read({ project, sub }: Args<"studio_notes_read">) { return { text: readNotes(project, sub) }; }

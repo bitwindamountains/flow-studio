@@ -41,11 +41,12 @@ test("writePlan/readPlan round-trip and notes", () => {
 
 test("addReference copies, never overwrites", () => {
   P.createSub("Ref", "s");
-  const src = join(mkdtempSync(join(tmpdir(), "fm-src-")), "a.png");
+  const root = mkdtempSync(join(tmpdir(), "fm-src-"));
+  const src = join(root, "a.png");
   writeFileSync(src, "x");
-  const a = P.addReference("Ref", undefined, src);
-  const b = P.addReference("Ref", undefined, src);
-  const c = P.addReference("Ref", "s", src);
+  const a = P.addReference("Ref", undefined, src, [root]);
+  const b = P.addReference("Ref", undefined, src, [root]);
+  const c = P.addReference("Ref", "s", src, [root]);
   assert.ok(existsSync(src) && existsSync(a) && existsSync(b) && existsSync(c));
   assert.notEqual(a, b);
   assert.ok(c.includes(join("s", "references")));
@@ -54,4 +55,29 @@ test("addReference copies, never overwrites", () => {
 test("PlanSchema rejects duplicate scene numbers", () => {
   const bad = { project: "p", sub: "s", aspect: "9:16", scenes: [{ n: 1, prompt: "a" }, { n: 1, prompt: "b" }] };
   assert.equal(P.PlanSchema.safeParse(bad).success, false);
+});
+
+test("addReference rejects a source outside the allowed roots", () => {
+  P.createSub("Ref2", "s");
+  const outside = join(mkdtempSync(join(tmpdir(), "fm-out-")), "b.png");
+  writeFileSync(outside, "x");
+  assert.throws(() => P.addReference("Ref2", undefined, outside, [mkdtempSync(join(tmpdir(), "fm-ok-"))]), /inside/);
+});
+
+test("reserved names rejected", () => {
+  P.createSub("Res", "ok");
+  for (const n of ["references", "References", "con", "NUL", "com1"]) assert.throws(() => P.createSub("Res", n), /reserved/, n);
+  assert.throws(() => P.createSub("con", "x"), /reserved/);
+});
+
+test("missing sub: notes/plan throw and create nothing", () => {
+  const d = join(process.env.STUDIO_PROJECTS!, "Ghost");
+  assert.throws(() => P.readNotes("Ghost", "x"), /No sub-project Ghost\/x/);
+  assert.throws(() => P.writeNotes("Ghost", "x", "t"), /No sub-project/);
+  assert.throws(() => P.writePlan({ project: "Ghost", sub: "x", aspect: "9:16", scenes: [] }), /No sub-project/);
+  assert.ok(!existsSync(d));
+});
+
+test("readPlan('..','x') stays inside root and throws", () => {
+  assert.throws(() => P.readPlan("..", "x"), /Invalid name|No plan/);
 });
