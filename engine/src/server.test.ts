@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { get } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,6 +10,12 @@ const port = 20000 + Math.floor(Math.random() * 20000);
 process.env.FLOW_MCP_PORT = String(port);
 process.env.FLOW_MCP_HOME = home;
 process.env.FLOW_MCP_OUTPUT = join(home, "out");
+const STUDIO = { studio: true };
+// A top-level navigation, the only request that may receive the one-shot UI token. fetch() forces sec-fetch-mode
+// to "cors", so this goes through node:http (with a throwaway agent, since earlier tests' servers are closed).
+const NAV = { "sec-fetch-site": "none", "sec-fetch-mode": "navigate" };
+const page = (headers: Record<string, string> = NAV) => new Promise<string>((ok, bad) =>
+  get(`http://127.0.0.1:${port}/`, { agent: false, headers }, (r) => { let t = ""; r.on("data", (c) => (t += c)); r.on("end", () => ok(t)); }).on("error", bad));
 
 test("server: /api/approve needs the UI token, never the flow token", async () => {
   const { LocalCore } = await import("./core.js");
@@ -18,11 +24,13 @@ test("server: /api/approve needs the UI token, never the flow token", async () =
   const seen: unknown[] = [];
   // Real approve would start Chrome; a spy proves the endpoint reaches core.queue.approve.
   core.queue.approve = (t) => { seen.push(t); return []; };
-  assert.equal(await srv.startServer(core), "owner");
+  assert.equal(await srv.startServer(core, undefined, undefined, STUDIO), "owner");
   const base = `http://127.0.0.1:${port}`;
-  const html = await (await fetch(base + "/")).text();
+  assert.match(await page({}), /const UI_TOKEN = "";/); // not a navigation: no token, and it is not used up
+  assert.match(await page({ "sec-fetch-site": "cross-site", "sec-fetch-mode": "navigate" }), /const UI_TOKEN = "";/);
+  const html = await page();
   const flow = /const TOKEN = "(\w+)"/.exec(html)![1];
-  const second = await (await fetch(base + "/")).text();
+  const second = await page();
   assert.match(second, /const UI_TOKEN = "";/);
   const ui = /const UI_TOKEN = "(\w+)"/.exec(html)![1];
   const post = (h: Record<string, string>) =>
@@ -53,9 +61,8 @@ test("pty websocket: rejects missing token, bad Origin, bad Host; one process pe
     write: (d: string) => void writes.push(d), resize() {}, kill: () => void ev.emit("x"),
   };
   const spawner = () => { spawned++; return fake as never; };
-  assert.equal(await srv.startServer(new LocalCore(), spawner as never), "owner");
-  // node:http with a throwaway agent: fetch's pooled socket from the previous test's server is dead.
-  const html = await new Promise<string>((ok, bad) => get(`http://127.0.0.1:${port}/`, { agent: false }, (r) => { let t = ""; r.on("data", (c) => (t += c)); r.on("end", () => ok(t)); }).on("error", bad));
+  assert.equal(await srv.startServer(new LocalCore(), spawner as never, undefined, STUDIO), "owner");
+  const html = await page();
   const ui = /const UI_TOKEN = "(\w+)"/.exec(html)![1];
   const origin = `http://127.0.0.1:${port}`;
   const socks: { terminate(): void }[] = [];
@@ -93,8 +100,8 @@ test("pty websocket: garbage frames and a throwing spawner never crash the serve
   const { WebSocket } = await import("ws");
   const { LocalCore } = await import("./core.js");
   const srv = await import("./server.js");
-  assert.equal(await srv.startServer(new LocalCore(), (() => { throw new Error("no claude here"); }) as never), "owner");
-  const html = await new Promise<string>((ok, bad) => get(`http://127.0.0.1:${port}/`, { agent: false }, (r) => { let t = ""; r.on("data", (c) => (t += c)); r.on("end", () => ok(t)); }).on("error", bad));
+  assert.equal(await srv.startServer(new LocalCore(), (() => { throw new Error("no claude here"); }) as never, undefined, STUDIO), "owner");
+  const html = await page();
   const ui = /const UI_TOKEN = "(\w+)"/.exec(html)![1];
   const ws = new WebSocket(`ws://127.0.0.1:${port}/pty?ui=${ui}`, { headers: { origin: `http://127.0.0.1:${port}` } });
   const first = await new Promise<string>((ok, bad) => { ws.once("message", (d) => ok(d.toString())); ws.once("error", bad); });
@@ -109,7 +116,7 @@ test("pty websocket: garbage frames and a throwing spawner never crash the serve
   await new Promise((r) => srv.lastServer!.close(r));
 });
 
-test("server: scene, cancel and remotion/dev need the UI token and do only their one thing", async () => {
+test("server: scene, cancel-job and remotion/dev need the UI token and do only their one thing", async () => {
   const { LocalCore } = await import("./core.js");
   const srv = await import("./server.js");
   const { createSub, readPlan, writePlan } = await import("./projects.js");
@@ -122,14 +129,15 @@ test("server: scene, cancel and remotion/dev need the UI token and do only their
   const held = core.queue.add({ prompt: "p", type: "video", max_credits: 5 } as never);
   const starts: string[] = [];
   let up = false;
-  assert.equal(await srv.startServer(core, undefined, { answering: async () => up, start: (cwd: string) => void starts.push(cwd) }), "owner");
+  let ended: ((e?: Error) => void) | undefined;
+  assert.equal(await srv.startServer(core, undefined, { answering: async () => up, start: (cwd: string, onEnd: (e?: Error) => void) => { starts.push(cwd); ended = onEnd; } }, STUDIO), "owner");
   const base = `http://127.0.0.1:${port}`;
-  const html = await (await fetch(base + "/", { headers: { connection: "close" } })).text();
+  const html = await page();
   const ui = /const UI_TOKEN = "(\w+)"/.exec(html)![1];
   const flow = /const TOKEN = "(\w+)"/.exec(html)![1];
   const post = (path: string, body: object, h: Record<string, string>) => fetch(base + path, { method: "POST", headers: h, body: JSON.stringify(body) });
   const scene = { project: "P", sub: "s", n: 1, approved: true, kept: true };
-  for (const [path, body] of [["/api/scene", scene], ["/api/cancel", { id: held.id }], ["/api/remotion/dev", {}]] as const) {
+  for (const [path, body] of [["/api/scene", scene], ["/api/cancel-job", { id: held.id }], ["/api/remotion/dev", {}]] as const) {
     assert.equal((await post(path, body, {})).status, 403, path);
     assert.equal((await post(path, body, { "x-flow-token": flow })).status, 403, path);
     assert.equal((await post(path, body, { "x-ui-token": "wrong" })).status, 403, path);
@@ -148,9 +156,15 @@ test("server: scene, cancel and remotion/dev need the UI token and do only their
   const s1 = readPlan("P", "s").scenes[0];
   assert.deepEqual([s1.approved, s1.kept, s1.prompt], [true, true, "x"]);
   assert.equal((await post("/api/scene", { ...scene, n: 9 }, h)).status, 400);
-  assert.equal((await post("/api/cancel", { id: "nope" }, h)).status, 400);
-  assert.equal((await post("/api/cancel", { id: held.id }, h)).status, 200);
-  assert.equal((await post("/api/cancel", { id: held.id }, h)).status, 400); // no longer held
+  assert.equal((await post("/api/cancel-job", { id: "nope" }, h)).status, 400);
+  assert.equal((await post("/api/cancel-job", { id: held.id }, h)).status, 200);
+  assert.equal((await post("/api/cancel-job", { id: held.id }, h)).status, 400); // no longer held
+  core.queue.pause("test"); // keeps an approved job queued instead of running it
+  const queued = core.queue.add({ prompt: "p", type: "video", max_credits: 5 } as never);
+  core.queue.approve({ job_id: queued.id });
+  assert.equal(queued.status, "queued");
+  assert.equal((await post("/api/cancel-job", { id: queued.id }, h)).status, 200);
+  assert.equal(queued.status, "cancelled");
   process.env.STUDIO_REMOTION = join(home, "no-such-dir");
   assert.equal((await post("/api/remotion/dev", {}, h)).status, 400);
   assert.equal((await fetch(base + "/api/health")).status, 200);
@@ -158,6 +172,60 @@ test("server: scene, cancel and remotion/dev need the UI token and do only their
   assert.equal((await (await post("/api/remotion/dev", { cmd: "calc" }, h)).json() as { started: boolean }).started, true);
   assert.equal((await (await post("/api/remotion/dev", {}, h)).json() as { started: boolean }).started, false);
   assert.equal(starts.length, 1);
+  ended!(); // the dev server exited: the next press starts it again
+  assert.equal((await (await post("/api/remotion/dev", {}, h)).json() as { started: boolean }).started, true);
+  assert.equal(starts.length, 2);
+  srv.lastServer!.closeAllConnections();
+  await new Promise((r) => srv.lastServer!.close(r));
+});
+
+test("server: Claude's (non-studio) server never hands out the UI token", async () => {
+  const { LocalCore } = await import("./core.js");
+  const srv = await import("./server.js");
+  assert.equal(await srv.startServer(new LocalCore()), "owner");
+  assert.match(await page(), /const UI_TOKEN = "";/);
+  assert.match(await page(), /const TOKEN = "\w+";/);
+  srv.lastServer!.closeAllConnections();
+  await new Promise((r) => srv.lastServer!.close(r));
+});
+
+test("media: bad ranges answer 416 and never crash the server", async () => {
+  const { LocalCore } = await import("./core.js");
+  const srv = await import("./server.js");
+  assert.equal(await srv.startServer(new LocalCore()), "owner");
+  const html = await page();
+  const flow = /const TOKEN = "(\w+)"/.exec(html)![1];
+  const dir = join(home, "out", "M");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "empty.mp4"), "");
+  writeFileSync(join(dir, "small.mp4"), "0123456789");
+  const media = (f: string, range: string) => new Promise<number>((ok, bad) =>
+    get(`http://127.0.0.1:${port}/media?token=${flow}&path=${encodeURIComponent(join(dir, f))}`, { agent: false, headers: { range } }, (r) => { r.resume(); ok(r.statusCode!); }).on("error", bad));
+  assert.equal(await media("empty.mp4", "bytes=0-"), 416);
+  assert.equal(await media("small.mp4", "bytes=500-100"), 416);
+  assert.equal(await media("small.mp4", "bytes=7-3"), 416);
+  assert.equal(await media("small.mp4", "bytes=10-"), 416);
+  assert.equal(await media("small.mp4", "bytes=2-5"), 206);
+  await new Promise((r) => setTimeout(r, 100));
+  const health = await new Promise<number>((ok, bad) => get(`http://127.0.0.1:${port}/api/health`, { agent: false }, (r) => { r.resume(); ok(r.statusCode!); }).on("error", bad));
+  assert.equal(health, 200);
+  srv.lastServer!.closeAllConnections();
+  await new Promise((r) => srv.lastServer!.close(r));
+});
+
+test("RemoteCore.cancel (flow_cancel from a client process) reaches the owner with the flow token", async () => {
+  const { LocalCore } = await import("./core.js");
+  const { RemoteCore } = await import("./remote.js");
+  const srv = await import("./server.js");
+  const core = new LocalCore();
+  core.queue.pause("test");
+  assert.equal(await srv.startServer(core), "owner");
+  const held = core.queue.add({ prompt: "p", type: "video", max_credits: 5 } as never);
+  const queued = core.queue.add({ prompt: "p", type: "video", max_credits: 5 } as never);
+  core.queue.approve({ job_id: queued.id });
+  const remote = new RemoteCore();
+  assert.equal(((await remote.cancel({ job_id: held.id })) as { status: string }).status, "cancelled");
+  assert.equal(((await remote.cancel({ job_id: queued.id })) as { status: string }).status, "cancelled");
   srv.lastServer!.closeAllConnections();
   await new Promise((r) => srv.lastServer!.close(r));
 });

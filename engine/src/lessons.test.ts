@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { get } from "node:http";
 import { test } from "node:test";
 
 const home = mkdtempSync(join(tmpdir(), "fm-lessons-"));
@@ -56,9 +57,10 @@ test("resolve endpoint rejects x-flow-token", async () => {
   const { LocalCore } = await import("./core.js");
   const L = await import("./lessons.js");
   const srv = await import("./server.js");
-  assert.equal(await srv.startServer(new LocalCore()), "owner");
+  assert.equal(await srv.startServer(new LocalCore(), undefined, undefined, { studio: true }), "owner");
   const base = `http://127.0.0.1:${port}`;
-  const html = await (await fetch(base + "/")).text();
+  // fetch() forces sec-fetch-mode "cors"; the UI token goes only to a real navigation, so use node:http.
+  const html = await new Promise<string>((ok, bad) => get(base + "/", { agent: false, headers: { "sec-fetch-site": "none", "sec-fetch-mode": "navigate" } }, (r) => { let t = ""; r.on("data", (c) => (t += c)); r.on("end", () => ok(t)); }).on("error", bad));
   const flow = /const TOKEN = "(\w+)"/.exec(html)![1];
   const ui = /const UI_TOKEN = "(\w+)"/.exec(html)![1];
   const p = L.proposeLesson("a rule");

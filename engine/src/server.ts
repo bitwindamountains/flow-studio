@@ -68,11 +68,13 @@ function sendMedia(req: IncomingMessage, res: ServerResponse, file: string) {
   if (range) {
     const start = range[1] ? Number(range[1]) : 0;
     const end = range[2] ? Math.min(Number(range[2]), size - 1) : size - 1;
+    // createReadStream with end < start throws asynchronously and used to take the whole process down.
+    if (size === 0 || start >= size || start > end) return void res.writeHead(416, { "content-range": `bytes */${size}` }).end();
     res.writeHead(206, { "content-type": type, "accept-ranges": "bytes", "content-range": `bytes ${start}-${end}/${size}`, "content-length": end - start + 1 });
-    return createReadStream(file, { start, end }).pipe(res);
+    return void createReadStream(file, { start, end }).on("error", () => res.destroy()).pipe(res);
   }
   res.writeHead(200, { "content-type": type, "accept-ranges": "bytes", "content-length": size });
-  createReadStream(file).pipe(res);
+  createReadStream(file).on("error", () => res.destroy()).pipe(res);
 }
 
 import { addLesson, pendingLessons, readLessons, resolveLesson } from "./lessons.js";
@@ -87,16 +89,17 @@ const REMOTION_URL = "http://localhost:3000";
 export const remotionDefaults = {
   answering: () => fetch(REMOTION_URL, { signal: AbortSignal.timeout(1500) }).then(() => true, () => false),
   // Fixed command, cwd only; nothing from a request reaches it. shell:true is needed for npm.cmd on Windows.
-  start: (cwd: string, onError: (e: Error) => void) => void spawn("npm", ["run", "dev"], { cwd, detached: true, stdio: "ignore", shell: process.platform === "win32", windowsHide: true }).on("error", onError).unref(),
+  start: (cwd: string, onEnd: (e?: Error) => void) => void spawn("npm", ["run", "dev"], { cwd, detached: true, stdio: "ignore", shell: process.platform === "win32", windowsHide: true }).on("error", onEnd).on("exit", () => onEnd()).unref(),
 };
 
-export async function startServer(core: Core, spawner = startClaude, remotion = remotionDefaults): Promise<ServerRole> {
+// opts.studio: only the standalone Studio (studio.ts) hands out the one-shot UI token; Claude's MCP process never does.
+export async function startServer(core: Core, spawner = startClaude, remotion = remotionDefaults, opts: { studio?: boolean } = {}): Promise<ServerRole> {
   let remotionStarted = false;
   mkdirSync(UPLOAD_DIR, { recursive: true });
   const token = randomBytes(24).toString("hex");
   // In memory only, never on disk or in the token file: Claude can read the flow token but must not approve credit spend.
   const uiToken = randomBytes(24).toString("hex");
-  let uiTokenGiven = false; // handed out once: the first page load is the owner's studio tab; later loads get an empty token
+  let uiTokenGiven = !opts.studio; // handed out once: the first page load is the owner's studio tab; later loads get an empty token
 
   const allowedHosts = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`]);
 
@@ -114,8 +117,11 @@ export async function startServer(core: Core, spawner = startClaude, remotion = 
       if (url.pathname === "/favicon.ico") return void res.writeHead(204).end();
       if (req.method === "GET" && url.pathname === "/") {
         res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
-        const html = readFileSync(STUDIO_HTML, "utf8").replace("__FLOW_TOKEN__", token).replace("__UI_TOKEN__", uiTokenGiven ? "" : uiToken);
-        uiTokenGiven = true;
+        // Only a top-level navigation the user typed or launched (not a fetch, frame or link from another page) can get it.
+        const navigated = req.headers["sec-fetch-site"] === "none" && req.headers["sec-fetch-mode"] === "navigate";
+        const give = navigated && !uiTokenGiven;
+        const html = readFileSync(STUDIO_HTML, "utf8").replace("__FLOW_TOKEN__", token).replace("__UI_TOKEN__", give ? uiToken : "");
+        if (give) uiTokenGiven = true;
         return res.end(html);
       }
 
@@ -150,7 +156,7 @@ export async function startServer(core: Core, spawner = startClaude, remotion = 
       }
 
       // Owner-only actions: UI token, never the flow token Claude can read.
-      if (req.method === "POST" && ["/api/scene", "/api/cancel", "/api/remotion/dev"].includes(url.pathname)) {
+      if (req.method === "POST" && ["/api/scene", "/api/cancel-job", "/api/remotion/dev"].includes(url.pathname)) {
         if (!sameSecret(String(req.headers["x-ui-token"] ?? ""), uiToken)) return json(res, 403, { error: "Only the studio page can do this." });
         if (url.pathname === "/api/remotion/dev") {
           if (remotionStarted) return json(res, 200, { started: false });
@@ -158,15 +164,16 @@ export async function startServer(core: Core, spawner = startClaude, remotion = 
           remotionStarted = true; // set before any await so two concurrent calls cannot both spawn
           try {
             if (await remotion.answering()) { remotionStarted = false; return json(res, 200, { started: false }); }
-            remotion.start(remotionRoot(), (e) => { console.error("remotion dev failed:", e.message); remotionStarted = false; });
+            // Reset on error AND on exit, so a dev server that stopped can be started again.
+            remotion.start(remotionRoot(), (e) => { if (e) console.error("remotion dev failed:", e.message); remotionStarted = false; });
           } catch (e) { remotionStarted = false; return json(res, 400, { error: String(e instanceof Error ? e.message : e) }); }
           return json(res, 200, { started: true });
         }
         const b = JSON.parse((await readBody(req, 64 * 1024)).toString() || "{}") as { project?: string; sub?: string; n?: number; approved?: unknown; kept?: unknown; id?: string };
-        if (url.pathname === "/api/cancel") {
+        if (url.pathname === "/api/cancel-job") {
           if (!(core instanceof LocalCore)) return json(res, 404, { error: "Not found." });
           const job = core.queue.list().find((j) => j.id === b.id);
-          if (!job || job.status !== "held") return json(res, 400, { error: "Only a held job can be cancelled." });
+          if (!job || (job.status !== "held" && job.status !== "queued")) return json(res, 400, { error: "Only a held or queued job can be cancelled." });
           core.queue.cancel(job.id);
           return json(res, 200, { ok: true });
         }
@@ -205,7 +212,8 @@ export async function startServer(core: Core, spawner = startClaude, remotion = 
       json(res, 404, { error: "Not found." });
     } catch (err) {
       const message = err instanceof z.ZodError ? err.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") : err instanceof Error ? err.message : String(err);
-      json(res, 400, { error: message });
+      if (res.headersSent) res.destroy(); // a reply already started: writing JSON now would throw again
+      else json(res, 400, { error: message });
     }
   });
 
