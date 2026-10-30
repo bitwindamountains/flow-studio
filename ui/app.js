@@ -12,11 +12,12 @@ let ws;
 const send = (m) => ws && ws.readyState === 1 && ws.send(JSON.stringify(m));
 let retry = 0;
 function connect() {
-  if (ws && ws.readyState <= 1) return;
+  if (!UI_TOKEN || (ws && ws.readyState <= 1)) return;
   ws = new WebSocket(`ws://${location.host}/pty?ui=${encodeURIComponent(UI_TOKEN)}`);
   ws.onopen = () => { retry = 0; fit.fit(); send({ t: "r", cols: term.cols, rows: term.rows }); };
   ws.onmessage = (e) => term.write(e.data);
   ws.onclose = () => {
+    if (retry >= 6) return void term.write("\r\n[disconnected - press Restart to retry]\r\n");
     term.write("\r\n[disconnected - reconnecting]\r\n");
     setTimeout(connect, [1000, 2000, 5000, 10000][Math.min(retry++, 3)]);
   };
@@ -24,6 +25,7 @@ function connect() {
 term.onData((d) => send({ t: "i", d }));
 term.onResize(({ cols, rows }) => send({ t: "r", cols, rows }));
 $("restart").onclick = () => {
+  retry = 0;
   term.reset();
   if (ws && ws.readyState === 1) send({ t: "restart" });
   else connect(); // a fresh connection spawns claude if none is running
@@ -45,6 +47,8 @@ for (const b of document.querySelectorAll("#tabs button")) {
   b.onclick = () => {
     for (const o of document.querySelectorAll("#tabs button")) o.setAttribute("aria-selected", String(o === b));
     for (const s of document.querySelectorAll("#views section")) s.hidden = s.id !== "view-" + b.dataset.view;
+    view = b.dataset.view;
+    refresh(true);
   };
 }
 
@@ -78,10 +82,223 @@ async function loadProjects() {
     fillSubs();
   } catch { /* picker stays empty */ }
 }
-$("project").onchange = fillSubs;
+$("project").onchange = () => { fillSubs(); refresh(true); };
+$("sub").onchange = () => refresh(true);
 loadProjects();
 
 // ---- health banner: stays hidden unless /api/health (Task 10) reports a problem; a 404 changes nothing ----
 fetch("/api/health").then((r) => (r.ok ? r.json() : null)).then((h) => {
   if (h && h.ok === false && h.message) { $("health").textContent = h.message; $("health").hidden = false; }
 }).catch(() => {});
+
+// ======== step views ========
+// Plan text is written by Claude: every string goes in through textContent, never innerHTML.
+const OWNER = !!UI_TOKEN;
+if (!OWNER) $("reloaded").hidden = false;
+function h(tag, props, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(props || {})) {
+    if (k === "class") e.className = v;
+    else if (k.startsWith("on")) e[k] = v;
+    else if (v !== undefined && v !== null && v !== false) e.setAttribute(k, v === true ? "" : v);
+  }
+  for (const k of kids.flat()) if (k !== null && k !== undefined && k !== false) e.append(k);
+  return e;
+}
+let toastTimer;
+function toast(msg) { const t = $("toast"); t.textContent = msg; t.hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => (t.hidden = true), 6000); }
+const btn = (label, onclick, owner = false, cls = "") => {
+  const b = h("button", { type: "button", class: cls }, label);
+  b.onclick = async () => {
+    b.disabled = true;
+    try { await onclick(); } catch (e) { toast(String(e.message || e)); }
+    b.disabled = owner && !OWNER;
+    refresh(true);
+  };
+  if (owner && !OWNER) { b.disabled = true; b.title = "This window was reloaded and cannot approve credits."; }
+  return b;
+};
+const cur = () => ({ project: $("project").value, sub: $("sub").value });
+const have = () => { const c = cur(); return !!(c.project && c.sub); };
+const apiOk = async (method, body) => {
+  const r = await api(method, body);
+  if (r && r.error) throw new Error(r.error);
+  return r;
+};
+const owner = async (path, body) => {
+  const r = await (await fetch(path, { method: "POST", headers: { "x-ui-token": UI_TOKEN, "x-flow-token": TOKEN }, body: JSON.stringify(body) })).json();
+  if (r && r.error) throw new Error(r.error);
+  return r;
+};
+const media = (p) => "/media?token=" + encodeURIComponent(TOKEN) + "&path=" + encodeURIComponent(p);
+async function upload(file) {
+  const r = await (await fetch("/api/upload?name=" + encodeURIComponent(file.name), { method: "POST", headers: { "x-flow-token": TOKEN }, body: file })).json();
+  if (r.error) throw new Error(r.error);
+  return r.path;
+}
+function picker(label, onFile, accept) {
+  const i = h("input", { type: "file", accept: accept || "image/*" });
+  i.onchange = async () => {
+    if (!i.files[0]) return;
+    try { await onFile(i.files[0]); toast("Uploaded " + i.files[0].name); } catch (e) { toast(String(e.message || e)); }
+    i.value = "";
+    refresh(true);
+  };
+  return h("label", { class: "pick" }, label + " ", i);
+}
+async function savePlan(mut) {
+  const { lessons, note, ...plan } = await apiOk("studio_plan_read", cur());
+  mut(plan);
+  await apiOk("studio_plan_write", { ...cur(), plan }); // approved/kept are ignored by the engine here
+}
+const slug = (s) => s.trim().replace(/\s+/g, "-").replace(/[^A-Za-z0-9_-]/g, "");
+
+let view = "plan";
+let data = { plan: null, pending: [], status: null, lessons: [] };
+let sig = "";
+async function fetchData() {
+  if (!have()) { data = { plan: null, pending: [], status: null, lessons: [] }; return; }
+  const get = (p) => fetch(p, { headers: { "x-flow-token": TOKEN } }).then((r) => r.json());
+  const [plan, pending] = await Promise.all([api("studio_plan_read", cur()), get("/api/pending")]);
+  data.plan = plan.error ? null : plan;
+  data.pending = Array.isArray(pending) ? pending.filter((g) => g.jobs.some((j) => j.params.studio && j.params.studio.project === plan.project && j.params.studio.sub === plan.sub)) : [];
+  if (view === "generate") {
+    const [st, ls] = await Promise.all([api("studio_status", cur()), get("/api/lessons")]);
+    data.status = st.error ? null : st;
+    data.lessons = ls.pending || [];
+  }
+}
+const editing = () => { const a = document.activeElement; return !!a && $("views").contains(a) && /INPUT|TEXTAREA|SELECT/.test(a.tagName) && a.type !== "file"; };
+let busy = false;
+async function refresh(force) {
+  if (busy || (!force && (document.visibilityState !== "visible" || editing()))) return;
+  busy = true;
+  try {
+    await fetchData();
+    const s = view + JSON.stringify(data);
+    if (force || s !== sig) { sig = s; render(); }
+  } catch { /* server hiccup: keep what is shown */ }
+  busy = false;
+}
+// Cheap local polling, only while the window is visible.
+setInterval(() => { if (document.visibilityState === "visible") { refresh(false); accounts(); } }, 4000);
+document.addEventListener("visibilitychange", () => document.visibilityState === "visible" && refresh(true));
+
+function render() {
+  const el = $("view-" + view);
+  if (view === "edit") return renderEdit(el);
+  if (!have() && view !== "plan") return el.replaceChildren(h("p", {}, "Pick or create a project first (Plan tab)."));
+  ({ plan: renderPlan, storyboard: renderBoard, generate: renderGen })[view](el);
+}
+
+// ---- Plan ----
+let notesFor = "", notesTimer;
+function renderPlan(el) {
+  const p = data.plan, c = cur();
+  const np = h("input", { placeholder: "Project", "aria-label": "New project" }), ns = h("input", { placeholder: "Sub-project", "aria-label": "New sub-project" });
+  const na = h("select", { "aria-label": "Aspect" }, h("option", { value: "9:16" }, "9:16"), h("option", { value: "16:9" }, "16:9"));
+  const kids = [h("h3", {}, "New project / sub-project"), h("div", { class: "row" }, np, ns, na, btn("New", async () => {
+    await apiOk("studio_new", { project: np.value, sub: ns.value, aspect: na.value });
+    await loadProjects();
+    $("project").value = slug(np.value);
+    fillSubs();
+    $("sub").value = slug(ns.value);
+  }))];
+  if (p) {
+    const asp = h("select", { "aria-label": "Plan aspect" }, ...["9:16", "16:9"].map((v) => h("option", { value: v, selected: v === p.aspect }, v)));
+    asp.onchange = () => savePlan((pl) => (pl.aspect = asp.value)).then(() => refresh(true), (e) => toast(e.message));
+    const sty = h("select", { "aria-label": "Style" }, ...[["", "none"], ["A", "A"], ["B", "B"]].map(([v, t]) => h("option", { value: v, selected: v === (p.style || "") }, "Style " + t)));
+    sty.onchange = () => savePlan((pl) => { if (sty.value) pl.style = sty.value; else delete pl.style; }).then(() => refresh(true), (e) => toast(e.message));
+    const rows = p.scenes.map((s) => h("tr", {},
+      h("td", {}, String(s.n)), h("td", {}, s.prompt), h("td", {}, s.camera || ""), h("td", {}, s.caption || ""), h("td", {}, s.voiceover || ""),
+      h("td", {}, picker("+ ref", async (f) => {
+        const r = await apiOk("studio_add_reference", { ...c, path: await upload(f) });
+        await savePlan((pl) => { const sc = pl.scenes.find((x) => x.n === s.n); sc.references = [...(sc.references || []), r.path]; });
+      }), h("small", {}, (s.references || []).length ? ` ${s.references.length} ref` : ""))));
+    const notes = h("textarea", { rows: "6", "aria-label": "Notes", placeholder: "Notes for this sub-project (saved automatically)" });
+    notes.oninput = () => { clearTimeout(notesTimer); notesTimer = setTimeout(() => api("studio_notes_write", { ...c, text: notes.value }).catch(() => {}), 800); };
+    const key = c.project + "/" + c.sub;
+    if (notesFor !== key) { notesFor = key; api("studio_notes_read", c).then((r) => { if (!notes.value && r.text) notes.value = r.text; }); }
+    kids.push(h("h3", {}, `${p.project} / ${p.sub}`), h("div", { class: "row" }, asp, sty),
+      p.scenes.length ? h("table", {}, h("thead", {}, h("tr", {}, ...["#", "Prompt", "Camera", "Caption", "Voiceover", "References"].map((t) => h("th", {}, t)))), h("tbody", {}, rows)) : h("p", {}, "No scenes yet. Ask Claude to write the plan."),
+      h("h3", {}, "Notes"), notes,
+      h("h3", {}, "Reference images"), picker("Add project reference", async (f) => { await apiOk("studio_add_reference", { project: c.project, path: await upload(f) }); }));
+    if (p.lessons && p.lessons.length) kids.push(h("details", {}, h("summary", {}, `Lessons (${p.lessons.length})`), h("ul", {}, p.lessons.map((l) => h("li", {}, `[${l.scope}] ${l.text}`)))));
+  }
+  el.replaceChildren(...kids);
+}
+
+// ---- Storyboard ----
+function renderBoard(el) {
+  const p = data.plan, c = cur();
+  if (!p) return el.replaceChildren(h("p", {}, "No plan yet."));
+  const cards = p.scenes.map((s) => h("div", { class: "card" },
+    h("b", {}, `Scene ${s.n}`),
+    s.storyboard ? h("img", { src: media(s.storyboard), alt: "Storyboard still, scene " + s.n }) : h("div", { class: "empty" }, "no still yet"),
+    h("p", {}, s.prompt),
+    h("div", { class: "row" },
+      btn("Reroll (free)", () => apiOk("studio_storyboard", { ...c, scenes: [s.n] })),
+      btn(s.approved ? "Approved (undo)" : "Approve scene", () => owner("/api/scene", { ...c, n: s.n, approved: !s.approved }), true, s.approved ? "ok" : ""))));
+  el.replaceChildren(h("div", { class: "row" }, btn("Make all stills (free)", () => apiOk("studio_storyboard", c))), h("div", { class: "grid" }, cards));
+}
+
+// ---- Generate ----
+const credits = (g) => (g.cost_unknown ? "credits unknown" : `up to ${g.max_credits} credits`);
+function renderGen(el) {
+  const p = data.plan, c = cur();
+  if (!p) return el.replaceChildren(h("p", {}, "No plan yet."));
+  const dur = h("select", { "aria-label": "Duration" }, ...[4, 6, 8, 10].map((d) => h("option", { value: d, selected: d === 8 }, d + " s")));
+  const res = h("select", { "aria-label": "Resolution" }, h("option", { value: "360p" }, "360p"), h("option", { value: "720p", selected: true }, "720p"));
+  const kids = [h("div", { class: "row" }, dur, res, btn("Queue approved scenes (held)", () => apiOk("studio_generate", { ...c, duration: Number(dur.value), resolution: res.value })))];
+  for (const l of data.lessons) {
+    const txt = h("input", { value: l.text, "aria-label": "Lesson text" });
+    kids.push(h("div", { class: "lesson" }, h("b", {}, "Learned: "), txt, h("small", {}, ` [${l.scope}] `),
+      btn("Save", () => owner("/api/lessons/resolve", { id: l.id, action: "save", editedText: txt.value }), true),
+      btn("Discard", () => owner("/api/lessons/resolve", { id: l.id, action: "discard" }), true)));
+  }
+  for (const g of data.pending) {
+    const n = g.jobs.length;
+    kids.push(h("div", { class: "held" },
+      btn(`Approve ${n} clip${n === 1 ? "" : "s"} · ${credits(g)}`, () => owner("/api/approve", g.batch ? { batch: g.batch } : { job_id: g.jobs[0].id }), true, "big"),
+      " ", btn("Cancel", async () => { for (const j of g.jobs) await owner("/api/cancel", { id: j.id }); }, true)));
+  }
+  const st = data.status ? data.status.scenes : [];
+  kids.push(h("div", { class: "grid" }, p.scenes.map((s) => {
+    const x = st.find((q) => q.n === s.n) || { jobs: [] };
+    const last = x.jobs.filter((j) => j.kind === "clip").slice(-1)[0];
+    return h("div", { class: "card" },
+      h("b", {}, `Scene ${s.n}`), " ", h("span", { class: "tag" }, last ? last.status : s.clip ? "has clip" : s.approved ? "approved" : "not approved"),
+      last && last.credits != null ? h("small", {}, ` ${last.credits} credits`) : null,
+      last && last.note ? h("p", { class: "dim" }, last.note) : null, last && last.error ? h("p", { class: "err" }, last.error) : null,
+      s.clip ? h("video", { src: media(s.clip), controls: true, preload: "metadata" }) : null,
+      h("div", { class: "row" },
+        s.clip ? btn(s.kept ? "Kept (undo)" : "Keep", () => owner("/api/scene", { ...c, n: s.n, kept: !s.kept }), true, s.kept ? "ok" : "") : null,
+        btn("Redo", async () => {
+          const change = prompt(`Redo scene ${s.n}: what should change? (optional)`);
+          if (change === null) return;
+          await apiOk("studio_redo", { ...c, scene: s.n, ...(change.trim() ? { prompt: change.trim() } : {}) });
+        })));
+  })));
+  el.replaceChildren(...kids);
+}
+
+// ---- Edit ----
+function renderEdit(el) {
+  if (el.dataset.built) return; // keep the iframe and chosen files alive across polls
+  el.dataset.built = "1";
+  const files = {};
+  const out = h("pre", { class: "dim" });
+  const frame = h("iframe", { src: "http://localhost:3000", title: "Remotion Studio", class: "frame" });
+  el.replaceChildren(
+    h("div", { class: "row" }, picker("Music", async (f) => (files.music = await upload(f)), "audio/*"), picker("Voiceover", async (f) => (files.voiceover = await upload(f)), "audio/*")),
+    h("div", { class: "row" },
+      btn("Send kept clips to Remotion", async () => { out.textContent = JSON.stringify(await apiOk("studio_to_remotion", { ...cur(), ...files }), null, 2); }),
+      btn("Start Remotion Studio", async () => {
+        const r = await owner("/api/remotion/dev", {});
+        toast(r.started ? "Starting Remotion Studio..." : "Remotion Studio already running");
+        setTimeout(() => (frame.src = "http://localhost:3000"), 6000);
+      }, true)),
+    out, frame);
+}
+
+refresh(true);
