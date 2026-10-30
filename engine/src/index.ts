@@ -9,6 +9,7 @@ import { PORT, startServer } from "./server.js";
 
 const local = new LocalCore();
 const role = await startServer(local);
+if (role !== "client") local.queue.restore(); // "none" drives Flow itself, so it owns the queue too
 const core: Core = role === "client" ? new RemoteCore() : local;
 const studio = role === "none" ? undefined : `http://127.0.0.1:${PORT}`;
 

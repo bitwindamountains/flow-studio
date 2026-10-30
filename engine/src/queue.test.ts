@@ -47,6 +47,7 @@ test("running job at load becomes failed with may-have-spent message", () => {
   const job: Job = { id: "abc", status: "running", params: params("video"), files: [], attempts: 1, createdAt: "x" };
   writeFileSync(file, JSON.stringify([job]));
   const q = mk(file);
+  q.restore();
   assert.equal(q.get("abc")?.status, "failed");
   assert.equal(q.get("abc")?.error, "Studio stopped while this was generating — it may have spent credits. Check Flow before retrying.");
   assert.equal(JSON.parse(readFileSync(file, "utf8"))[0].status, "failed");
@@ -55,9 +56,12 @@ test("running job at load becomes failed with may-have-spent message", () => {
 test("status changes persist and reload", async () => {
   const file = join(dir(), "sub", "q.json");
   const q = mk(file);
+  q.restore();
   q.add(params("image"));
   await tick();
-  assert.equal(mk(file).list()[0].status, "done");
+  const again = mk(file);
+  again.restore();
+  assert.equal(again.list()[0].status, "done");
 });
 
 test("paused queue does not start jobs until resume", async () => {
@@ -70,4 +74,25 @@ test("paused queue does not start jobs until resume", async () => {
   q.resume();
   await tick();
   assert.equal(j.status, "done");
+});
+
+test("a queue that never called restore() neither reads nor writes the shared file", async () => {
+  const file = join(dir(), "q.json");
+  const job: Job = { id: "abc", status: "running", params: params("video"), files: [], attempts: 1, createdAt: "x" };
+  const bytes = JSON.stringify([job]);
+  writeFileSync(file, bytes);
+  const q = mk(file);
+  q.add(params("image"));
+  await tick();
+  assert.equal(q.get("abc"), undefined);
+  assert.equal(readFileSync(file, "utf8"), bytes);
+});
+
+test("pendingApproval flags unknown cost for edit and continue jobs", () => {
+  const q = mk();
+  q.add(params("video", { max_credits: 0, edit_asset: "x" }));
+  q.add(params("video", { max_credits: 5 }), { batch: "B" });
+  const g = q.pendingApproval();
+  assert.equal(g.find((x) => !x.batch)!.cost_unknown, true);
+  assert.equal(g.find((x) => x.batch === "B")!.cost_unknown, false);
 });

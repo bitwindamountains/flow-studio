@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
@@ -356,6 +357,7 @@ export class LocalCore implements Core {
   }
 
   async generate({ project, scenes }: Args<"generate">) {
+    const batch = randomUUID().slice(0, 8); // one OK releases the whole call
     const invalid = scenes.findIndex((s, i) => s.chain_previous && (i === 0 || s.first_frame || s.type === "image"));
     if (invalid >= 0) {
       throw new Error(`Scene ${invalid + 1}: chain_previous needs a preceding video scene in the same call and cannot be combined with first_frame.`);
@@ -395,10 +397,10 @@ export class LocalCore implements Core {
           reference_from: reference_previous ? jobs[i - 1].id : undefined,
           output_dir,
           file_stem: `scene-${String(offset + i + 1).padStart(2, "0")}`,
-        }),
+        }, { batch }),
       );
     }
-    return { output_dir, jobs: jobs.map(jobView) };
+    return { output_dir, batch, jobs: jobs.map(jobView) };
   }
 
   async wait({ job_ids, timeout_seconds }: Args<"wait">) {
@@ -409,7 +411,8 @@ export class LocalCore implements Core {
     }
     const jobs = pick();
     return {
-      finished: jobs.every((j) => j.status !== "queued" && j.status !== "running"),
+      finished: jobs.every((j) => j.status !== "queued" && j.status !== "running" && j.status !== "held"),
+      awaiting_approval: jobs.filter((j) => j.status === "held").map((j) => j.id),
       pacing: this.queue.pausedReason,
       jobs: jobs.map(jobView),
     };

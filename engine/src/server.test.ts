@@ -21,12 +21,15 @@ test("server: /api/approve needs the UI token, never the flow token", async () =
   const base = `http://127.0.0.1:${port}`;
   const html = await (await fetch(base + "/")).text();
   const flow = /const TOKEN = "(\w+)"/.exec(html)![1];
+  const second = await (await fetch(base + "/")).text();
+  assert.match(second, /const UI_TOKEN = "";/);
   const ui = /const UI_TOKEN = "(\w+)"/.exec(html)![1];
   const post = (h: Record<string, string>) =>
     fetch(base + "/api/approve", { method: "POST", headers: h, body: JSON.stringify({ batch: "A" }) });
 
   assert.equal((await post({ "x-flow-token": flow })).status, 403);
   assert.equal((await post({})).status, 403);
+  assert.equal((await post({ "x-ui-token": "" })).status, 403);
   assert.equal((await post({ "x-flow-token": flow, "x-ui-token": ui })).status, 200);
   assert.deepEqual(seen, [{ batch: "A", job_id: undefined }]);
   assert.equal((await fetch(base + "/api/pending", { headers: { "x-flow-token": flow } })).status, 200);

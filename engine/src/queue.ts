@@ -72,22 +72,29 @@ export class JobQueue {
   private manualPause: string | null = null;
   private pacing: string | null = null;
   private pauseMs: [number, number];
+  // Only the process that owns the Flow tab restores and writes the shared file (see restore()).
+  private active = false;
 
   constructor(private runner: JobRunner, private opts: { file?: string; pauseMs?: [number, number] } = {}) {
     this.pauseMs = opts.pauseMs ?? [PAUSE_MIN_MS, PAUSE_MAX_MS];
-    if (opts.file) {
-      for (const j of readJson<Job[]>(opts.file, [])) {
-        if (j.status === "running") {
-          j.status = "failed";
-          j.error = STOPPED;
-          j.finishedAt = new Date().toISOString();
-        }
-        this.jobs.set(j.id, j);
+  }
+
+  // Loads the file, fails jobs that were running when the last owner died, and resumes queued work. Call it only in
+  // the process that drives Flow: a client process that loaded the file would fail the owner's live job and run paid jobs.
+  restore(): void {
+    if (!this.opts.file) return;
+    for (const j of readJson<Job[]>(this.opts.file, [])) {
+      if (j.status === "running") {
+        j.status = "failed";
+        j.error = STOPPED;
+        j.finishedAt = new Date().toISOString();
       }
-      this.save();
-      // Deferred: the runner may use fields its owner assigns after this constructor returns.
-      if (this.list().some((j) => j.status === "queued")) queueMicrotask(() => void this.work());
+      this.jobs.set(j.id, j);
     }
+    this.active = true;
+    this.save();
+    // Deferred: the runner may use fields its owner assigns after construction.
+    if (this.list().some((j) => j.status === "queued")) queueMicrotask(() => void this.work());
   }
 
   get pausedReason(): string | null {
@@ -95,7 +102,8 @@ export class JobQueue {
   }
 
   private save(): void {
-    if (this.opts.file) writeJsonAtomic(this.opts.file, this.list());
+    if (!this.opts.file || !this.active) return;
+    try { writeJsonAtomic(this.opts.file, this.list()); } catch (e) { console.error(`flow-mcp: could not save ${this.opts.file}: ${(e as Error).message}`); }
   }
 
   pause(reason: string): void {
@@ -133,12 +141,14 @@ export class JobQueue {
     return hit;
   }
 
-  pendingApproval(): { batch?: string; jobs: Job[]; max_credits: number }[] {
-    const groups = new Map<string, { batch?: string; jobs: Job[]; max_credits: number }>();
+  pendingApproval(): { batch?: string; jobs: Job[]; max_credits: number; cost_unknown: boolean }[] {
+    const groups = new Map<string, { batch?: string; jobs: Job[]; max_credits: number; cost_unknown: boolean }>();
     for (const j of this.list().filter((x) => x.status === "held")) {
-      const g = groups.get(j.batch ?? j.id) ?? { batch: j.batch, jobs: [], max_credits: 0 };
+      const g = groups.get(j.batch ?? j.id) ?? { batch: j.batch, jobs: [], max_credits: 0, cost_unknown: false };
       g.jobs.push(j);
       g.max_credits += j.params.max_credits;
+      // Edits and continues have no quote before they run, so their max_credits of 0 is not a price.
+      if (j.params.edit_asset || j.params.continue_from) g.cost_unknown = true;
       groups.set(j.batch ?? j.id, g);
     }
     return [...groups.values()];

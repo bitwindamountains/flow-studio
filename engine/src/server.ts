@@ -69,6 +69,7 @@ export async function startServer(core: Core): Promise<ServerRole> {
   const token = randomBytes(24).toString("hex");
   // In memory only, never on disk or in the token file: Claude can read the flow token but must not approve credit spend.
   const uiToken = randomBytes(24).toString("hex");
+  let uiTokenGiven = false; // handed out once: the first page load is the owner's studio tab; later loads get an empty token
 
   const allowedHosts = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`]);
 
@@ -82,7 +83,9 @@ export async function startServer(core: Core): Promise<ServerRole> {
       if (url.pathname === "/favicon.ico") return void res.writeHead(204).end();
       if (req.method === "GET" && url.pathname === "/") {
         res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
-        return res.end(readFileSync(STUDIO_HTML, "utf8").replace("__FLOW_TOKEN__", token).replace("__UI_TOKEN__", uiToken));
+        const html = readFileSync(STUDIO_HTML, "utf8").replace("__FLOW_TOKEN__", token).replace("__UI_TOKEN__", uiTokenGiven ? "" : uiToken);
+        uiTokenGiven = true;
+        return res.end(html);
       }
 
       if (req.method === "POST" && url.pathname === "/api/approve") {

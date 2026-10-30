@@ -9,7 +9,7 @@ export function readJson<T>(file: string, fallback: T): T {
     throw e;
   }
   try { return JSON.parse(text) as T; } catch (e) {
-    throw new Error(`Cannot read ${file}: ${(e as Error).message}`);
+    throw new Error(`Cannot read ${file}: ${(e as Error).message}. Fix the file or move it aside (the queue will start empty).`);
   }
 }
 
