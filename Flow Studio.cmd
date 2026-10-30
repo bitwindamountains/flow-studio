@@ -17,6 +17,7 @@ timeout /t 1 /nobreak >nul
 goto wait
 :up
 set "BRAVE=%ProgramFiles%\BraveSoftware\Brave-Browser\Application\brave.exe"
+if not exist "%BRAVE%" set "BRAVE=%LOCALAPPDATA%\BraveSoftware\Brave-Browser\Application\brave.exe"
 if exist "%BRAVE%" ( start "" "%BRAVE%" --app=http://127.0.0.1:8787 ) else ( start "" http://127.0.0.1:8787 )
 rem Keep this window open while the server runs.
 pause

@@ -123,14 +123,14 @@ export async function startServer(core: Core, spawner = startClaude): Promise<Se
       }
 
       if (req.method === "POST" && url.pathname === "/api/approve") {
-        if (req.headers["x-ui-token"] !== uiToken) return json(res, 403, { error: "Only the studio page can approve credit spending." });
+        if (!sameSecret(String(req.headers["x-ui-token"] ?? ""), uiToken)) return json(res, 403, { error: "Only the studio page can approve credit spending." });
         if (!(core instanceof LocalCore)) return json(res, 404, { error: "Not found." });
         const body = JSON.parse((await readBody(req, 64 * 1024)).toString() || "{}") as { batch?: string; job_id?: string };
         return json(res, 200, { approved: core.queue.approve({ batch: body.batch, job_id: body.job_id }).map((j) => j.id) });
       }
 
       if (req.method === "POST" && (url.pathname === "/api/lessons/resolve" || url.pathname === "/api/lessons/add")) {
-        if (req.headers["x-ui-token"] !== uiToken) return json(res, 403, { error: "Only the studio page can change lessons." });
+        if (!sameSecret(String(req.headers["x-ui-token"] ?? ""), uiToken)) return json(res, 403, { error: "Only the studio page can change lessons." });
         const b = JSON.parse((await readBody(req, 64 * 1024)).toString() || "{}") as { id?: string; action?: "save" | "discard"; editedText?: string; text?: string; scope?: string };
         if (url.pathname.endsWith("/add")) addLesson(b.text ?? "", b.scope);
         else resolveLesson(b.id ?? "", b.action === "save" ? "save" : "discard", b.editedText);
@@ -175,6 +175,7 @@ export async function startServer(core: Core, spawner = startClaude): Promise<Se
     if (!ok) { socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n"); return; }
     wss.handleUpgrade(req, socket, head, (ws) => hub.attach(ws));
   });
+  process.once("exit", () => hub.kill()); // also covers Ctrl+C / window close paths that end in process.exit
   server.on("close", () => { hub.kill(); for (const c of wss.clients) c.terminate(); wss.close(); });
 
   const listening = await new Promise<boolean>((ok) => {

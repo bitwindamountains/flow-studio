@@ -88,3 +88,23 @@ test("pty websocket: rejects missing token, bad Origin, bad Host; one process pe
   srv.lastServer!.closeAllConnections();
   await new Promise((r) => srv.lastServer!.close(r));
 });
+
+test("pty websocket: garbage frames and a throwing spawner never crash the server", async () => {
+  const { WebSocket } = await import("ws");
+  const { LocalCore } = await import("./core.js");
+  const srv = await import("./server.js");
+  assert.equal(await srv.startServer(new LocalCore(), (() => { throw new Error("no claude here"); }) as never), "owner");
+  const html = await new Promise<string>((ok, bad) => get(`http://127.0.0.1:${port}/`, { agent: false }, (r) => { let t = ""; r.on("data", (c) => (t += c)); r.on("end", () => ok(t)); }).on("error", bad));
+  const ui = /const UI_TOKEN = "(\w+)"/.exec(html)![1];
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/pty?ui=${ui}`, { headers: { origin: `http://127.0.0.1:${port}` } });
+  const first = await new Promise<string>((ok, bad) => { ws.once("message", (d) => ok(d.toString())); ws.once("error", bad); });
+  assert.match(first, /could not start claude: no claude here/);
+  for (const g of ["null", "5", "[]", "garbage", '"x"', '{"t":"i","d":1}', '{"t":"r","cols":-1}']) ws.send(g);
+  ws.send(JSON.stringify({ t: "restart" })); // spawner still throws: reported, not thrown
+  await new Promise((r) => setTimeout(r, 200));
+  const status = await new Promise<number>((ok, bad) => get(`http://127.0.0.1:${port}/api/health`, { agent: false }, (r) => { r.resume(); ok(r.statusCode!); }).on("error", bad));
+  assert.equal(status, 200);
+  ws.terminate();
+  srv.lastServer!.closeAllConnections();
+  await new Promise((r) => srv.lastServer!.close(r));
+});

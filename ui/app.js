@@ -10,15 +10,24 @@ term.loadAddon(fit);
 term.open($("term"));
 let ws;
 const send = (m) => ws && ws.readyState === 1 && ws.send(JSON.stringify(m));
+let retry = 0;
 function connect() {
+  if (ws && ws.readyState <= 1) return;
   ws = new WebSocket(`ws://${location.host}/pty?ui=${encodeURIComponent(UI_TOKEN)}`);
-  ws.onopen = () => { fit.fit(); send({ t: "r", cols: term.cols, rows: term.rows }); };
+  ws.onopen = () => { retry = 0; fit.fit(); send({ t: "r", cols: term.cols, rows: term.rows }); };
   ws.onmessage = (e) => term.write(e.data);
-  ws.onclose = () => term.write("\r\n[disconnected]\r\n");
+  ws.onclose = () => {
+    term.write("\r\n[disconnected - reconnecting]\r\n");
+    setTimeout(connect, [1000, 2000, 5000, 10000][Math.min(retry++, 3)]);
+  };
 }
 term.onData((d) => send({ t: "i", d }));
 term.onResize(({ cols, rows }) => send({ t: "r", cols, rows }));
-$("restart").onclick = () => { term.reset(); send({ t: "restart" }); };
+$("restart").onclick = () => {
+  term.reset();
+  if (ws && ws.readyState === 1) send({ t: "restart" });
+  else connect(); // a fresh connection spawns claude if none is running
+};
 addEventListener("resize", () => fit.fit());
 fit.fit();
 if (UI_TOKEN) connect();

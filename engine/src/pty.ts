@@ -27,16 +27,23 @@ export class PtyHub {
   private sockets = new Set<WebSocket>();
   constructor(private spawner: () => IPty = startClaude) {}
 
-  private ensure(): IPty {
+  private ensure(ws?: WebSocket): IPty | undefined {
     if (this.pty) return this.pty;
-    const p = this.pty = this.spawner();
+    let p: IPty;
+    try { p = this.spawner(); } catch (e) {
+      ws?.send(`\r\n[could not start claude: ${e instanceof Error ? e.message : String(e)}]\r\n`);
+      return undefined;
+    }
+    this.pty = p;
     this.buf = "";
     p.onData((d) => {
+      if (this.pty !== p) return; // late output from a killed pty
       this.buf = (this.buf + d).slice(-SCROLLBACK);
       for (const s of this.sockets) if (s.readyState === 1) s.send(d);
     });
     p.onExit(() => {
-      if (this.pty === p) this.pty = undefined;
+      if (this.pty !== p) return;
+      this.pty = undefined;
       for (const s of this.sockets) if (s.readyState === 1) s.send("\r\n[claude exited - press Restart]\r\n");
     });
     return p;
@@ -44,17 +51,19 @@ export class PtyHub {
 
   attach(ws: WebSocket): void {
     this.sockets.add(ws);
-    const p = this.ensure();
-    if (this.buf) ws.send(this.buf);
+    ws.on("error", () => ws.terminate());
     ws.on("close", () => this.sockets.delete(ws));
+    this.ensure(ws);
+    if (this.buf) ws.send(this.buf);
     ws.on("message", (raw) => {
-      let m: { t?: string; d?: string; cols?: number; rows?: number };
-      try { m = JSON.parse(raw.toString()); } catch { return; }
-      if (m.t === "i" && typeof m.d === "string") this.pty?.write(m.d);
-      else if (m.t === "r" && Number.isInteger(m.cols) && Number.isInteger(m.rows) && m.cols! > 0 && m.rows! > 0) this.pty?.resize(m.cols!, m.rows!);
-      else if (m.t === "restart") { this.kill(); const n = this.ensure(); void n; }
+      try {
+        const m = JSON.parse(raw.toString()) as { t?: string; d?: string; cols?: number; rows?: number } | null;
+        if (!m || typeof m !== "object") return;
+        if (m.t === "i" && typeof m.d === "string") this.pty?.write(m.d);
+        else if (m.t === "r" && Number.isInteger(m.cols) && Number.isInteger(m.rows) && m.cols! > 0 && m.rows! > 0) this.pty?.resize(m.cols!, m.rows!);
+        else if (m.t === "restart") { this.kill(); this.ensure(ws); }
+      } catch { /* bad frame or dead pty: ignore, never crash the queue owner */ }
     });
-    void p;
   }
 
   kill(): void {
