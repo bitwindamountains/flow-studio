@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "deny": [
+      "Bash(*127.0.0.1:8787*)",
+      "Bash(*localhost:8787*)",
+      "Bash(curl *)",
+      "PowerShell(*127.0.0.1:8787*)",
+      "PowerShell(*localhost:8787*)",
+      "PowerShell(Invoke-WebRequest *)",
+      "PowerShell(Invoke-RestMethod *)",
+      "PowerShell(curl *)",
+      "WebFetch(domain:127.0.0.1)",
+      "WebFetch(domain:localhost)"
+    ]
+  }
+}

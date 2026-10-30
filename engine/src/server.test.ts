@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
+import { get } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -35,5 +36,55 @@ test("server: /api/approve needs the UI token, never the flow token", async () =
   assert.equal((await fetch(base + "/api/pending", { headers: { "x-flow-token": flow } })).status, 200);
   assert.equal((await fetch(base + "/api/pending")).status, 401);
   srv.lastServer!.closeAllConnections();
-  srv.lastServer!.close();
+  await new Promise((r) => srv.lastServer!.close(r));
+});
+
+test("pty websocket: rejects missing token, bad Origin, bad Host; one process per session", async () => {
+  const { WebSocket } = await import("ws");
+  const { LocalCore } = await import("./core.js");
+  const srv = await import("./server.js");
+  const { EventEmitter } = await import("node:events");
+  let spawned = 0;
+  const writes: string[] = [];
+  const ev = new EventEmitter();
+  const fake = {
+    onData: (f: (d: string) => void) => { ev.on("d", f); return { dispose() {} }; },
+    onExit: (f: () => void) => { ev.on("x", f); return { dispose() {} }; },
+    write: (d: string) => void writes.push(d), resize() {}, kill: () => void ev.emit("x"),
+  };
+  const spawner = () => { spawned++; return fake as never; };
+  assert.equal(await srv.startServer(new LocalCore(), spawner as never), "owner");
+  // node:http with a throwaway agent: fetch's pooled socket from the previous test's server is dead.
+  const html = await new Promise<string>((ok, bad) => get(`http://127.0.0.1:${port}/`, { agent: false }, (r) => { let t = ""; r.on("data", (c) => (t += c)); r.on("end", () => ok(t)); }).on("error", bad));
+  const ui = /const UI_TOKEN = "(\w+)"/.exec(html)![1];
+  const origin = `http://127.0.0.1:${port}`;
+  const socks: { terminate(): void }[] = [];
+  const open = (path: string, headers: Record<string, string>) => new Promise<string>((ok) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}${path}`, { headers });
+    socks.push(ws);
+    ws.on("open", () => ok("open:" + ws.url));
+    ws.on("unexpected-response", (_q, r) => { ok("rejected:" + r.statusCode); ws.terminate(); });
+    ws.on("error", () => {});
+  });
+  assert.match(await open("/pty", { origin }), /rejected:403/);
+  assert.match(await open("/pty?ui=wrong", { origin }), /rejected:403/);
+  assert.match(await open(`/pty?ui=${ui}`, { origin: "http://evil.example" }), /rejected:403/);
+  assert.match(await open(`/pty?ui=${ui}`, {}), /rejected:403/);
+  assert.match(await open(`/pty?ui=${ui}`, { origin, host: "evil.example" }), /rejected:403/);
+  assert.equal(spawned, 0);
+  const a = await open(`/pty?ui=${ui}`, { origin });
+  const b = await open(`/pty?ui=${ui}`, { origin });
+  assert.match(a, /^open:/); assert.match(b, /^open:/);
+  assert.equal(spawned, 1);
+  // fetch cannot set Host; node:http can.
+  const status = (path: string, host?: string) => new Promise<number>((ok, bad) =>
+    get(`http://127.0.0.1:${port}${path}`, { agent: false, headers: host ? { host } : {} }, (r) => { r.resume(); ok(r.statusCode!); }).on("error", bad));
+  assert.equal(await status("/api/accounts"), 200);
+  assert.equal(await status("/api/accounts", "evil.example"), 403);
+  assert.equal(await status("/vendor/..%2fpackage.json"), 404);
+  assert.equal(await status("/vendor/constructor"), 404);
+  assert.equal(await status("/vendor/xterm.js"), 200);
+  for (const w of socks) w.terminate();
+  srv.lastServer!.closeAllConnections();
+  await new Promise((r) => srv.lastServer!.close(r));
 });

@@ -13,5 +13,5 @@ if (role === "none") {
   process.exit(1);
 }
 console.log(role === "owner" ? `Flow Studio running at ${url} (Ctrl+C to stop)` : `Flow Studio is already served by Claude's flow-mcp at ${url}`);
-openUrl(url);
+if (!process.env.FLOW_STUDIO_NO_OPEN) openUrl(url); // the launcher opens its own app window first, so it gets the one-shot UI token
 if (role === "client") process.exit(0);
