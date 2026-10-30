@@ -386,4 +386,15 @@ server.registerTool(
   (args) => reply(core.studio_notes_write(args)),
 );
 
+server.registerTool(
+  "studio_propose_lesson",
+  {
+    title: "Propose lesson",
+    description: "Propose a one-line rule for the lessons rulebook. It is only a proposal: the owner approves or discards it in the Studio page.",
+    inputSchema: shapes.studio_propose_lesson,
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+  },
+  (args) => reply(core.studio_propose_lesson(args)),
+);
+
 await server.connect(new StdioServerTransport());

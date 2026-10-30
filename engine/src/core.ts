@@ -12,6 +12,7 @@ import { JobQueue, type Job } from "./queue.js";
 import { HOME_DIR } from "./chrome.js";
 import { BIN, COMPUTER, IS_MAC, IS_WIN, moveToBin } from "./platform.js";
 import { PlanSchema, safeName, createSub, listProjects, readNotes, readPlan, writeNotes, writePlan } from "./projects.js";
+import { proposeLesson, readLessons } from "./lessons.js";
 import { TECHNIQUES, techniqueById } from "./techniques.js";
 
 export const OUTPUT_ROOT = process.env.FLOW_MCP_OUTPUT ?? join(homedir(), "flow-mcp-out");
@@ -269,6 +270,7 @@ export const shapes = {
   studio_plan_read: { project: z.string().min(1), sub: z.string().min(1) },
   studio_plan_write: { project: z.string().min(1), sub: z.string().min(1), plan: PlanSchema },
   studio_notes_read: { project: z.string().min(1), sub: z.string().min(1) },
+  studio_propose_lesson: { text: z.string().min(1), scope: z.string().default("global") },
   studio_notes_write: { project: z.string().min(1), sub: z.string().min(1), text: z.string() },
 };
 
@@ -322,6 +324,7 @@ export interface Core {
   studio_plan_write(a: Args<"studio_plan_write">): Promise<unknown>;
   studio_notes_read(a: Args<"studio_notes_read">): Promise<unknown>;
   studio_notes_write(a: Args<"studio_notes_write">): Promise<unknown>;
+  studio_propose_lesson(a: Args<"studio_propose_lesson">): Promise<unknown>;
 }
 
 // Flow's own voices: still offered when giving a character a voice, but narration no longer goes through Flow.
@@ -532,8 +535,13 @@ export class LocalCore implements Core {
 
   async studio_projects() { return listProjects(); }
   async studio_new({ project, sub, aspect }: Args<"studio_new">) { return { dir: createSub(project, sub, aspect) }; }
-  // lessons: Task 7 fills this in.
-  async studio_plan_read({ project, sub }: Args<"studio_plan_read">) { return { ...readPlan(project, sub), lessons: [] as unknown[] }; }
+  async studio_plan_read({ project, sub }: Args<"studio_plan_read">) {
+    const lessons = readLessons();
+    const note = lessons.length > 60 ? `Lessons has ${lessons.length} rules - propose merges to the owner.` : undefined;
+    return { ...readPlan(project, sub), lessons, ...(note && { note }) };
+  }
+  // Only proposes: nothing reaches the rulebook until the owner approves in the studio page.
+  async studio_propose_lesson({ text, scope }: Args<"studio_propose_lesson">) { return proposeLesson(text, scope); }
   async studio_plan_write({ project, sub, plan }: Args<"studio_plan_write">) {
     writePlan({ ...plan, project: safeName(project), sub: safeName(sub) });
     return { ok: true };

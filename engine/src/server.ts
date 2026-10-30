@@ -58,6 +58,8 @@ function sendMedia(req: IncomingMessage, res: ServerResponse, file: string) {
   createReadStream(file).pipe(res);
 }
 
+import { addLesson, pendingLessons, readLessons, resolveLesson } from "./lessons.js";
+
 export type ServerRole = "owner" | "client" | "none";
 
 // Serves the Studio panel and a JSON API on localhost. Returns "client" when another flow-mcp process already
@@ -95,12 +97,21 @@ export async function startServer(core: Core): Promise<ServerRole> {
         return json(res, 200, { approved: core.queue.approve({ batch: body.batch, job_id: body.job_id }).map((j) => j.id) });
       }
 
+      if (req.method === "POST" && (url.pathname === "/api/lessons/resolve" || url.pathname === "/api/lessons/add")) {
+        if (req.headers["x-ui-token"] !== uiToken) return json(res, 403, { error: "Only the studio page can change lessons." });
+        const b = JSON.parse((await readBody(req, 64 * 1024)).toString() || "{}") as { id?: string; action?: "save" | "discard"; editedText?: string; text?: string; scope?: string };
+        if (url.pathname.endsWith("/add")) addLesson(b.text ?? "", b.scope);
+        else resolveLesson(b.id ?? "", b.action === "save" ? "save" : "discard", b.editedText);
+        return json(res, 200, { ok: true });
+      }
+
       const given = req.headers["x-flow-token"] ?? url.searchParams.get("token");
       if (given !== token) return json(res, 401, { error: "Missing or wrong token." });
 
       if (req.method === "GET" && url.pathname === "/api/pending") {
         return core instanceof LocalCore ? json(res, 200, core.queue.pendingApproval()) : json(res, 404, { error: "Not found." });
       }
+      if (req.method === "GET" && url.pathname === "/api/lessons") return json(res, 200, { lessons: readLessons(), pending: pendingLessons() });
       if (req.method === "GET" && url.pathname === "/media") return sendMedia(req, res, url.searchParams.get("path") ?? "");
 
       if (req.method === "POST" && url.pathname === "/api/upload") {
