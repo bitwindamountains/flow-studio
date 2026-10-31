@@ -17,8 +17,8 @@ test("createSub makes the folder layout and 9:16 default", () => {
 });
 
 test("createSub twice throws", () => {
-  P.createSub("Dup", "a");
-  assert.throws(() => P.createSub("Dup", "a"), /exists/);
+  P.createSub("Dup", "aa");
+  assert.throws(() => P.createSub("Dup", "aa"), /exists/);
 });
 
 test("safeName", () => {
@@ -32,36 +32,36 @@ test("path traversal: safeName('../x') has no '..' or separators", () => {
 });
 
 test("writePlan/readPlan round-trip and notes", () => {
-  P.createSub("RT", "s");
-  const plan = { project: "RT", sub: "s", aspect: "16:9" as const, scenes: [{ n: 1, prompt: "x" }] };
+  P.createSub("RT", "ss");
+  const plan = { project: "RT", sub: "ss", aspect: "16:9" as const, scenes: [{ n: 1, prompt: "x" }] };
   P.writePlan(plan);
-  assert.deepEqual(P.readPlan("RT", "s"), { ...plan, rev: 1 });
-  P.writePlan(P.readPlan("RT", "s"));
-  assert.equal(P.readPlan("RT", "s").rev, 2);
-  P.writeNotes("RT", "s", "hi");
-  assert.equal(P.readNotes("RT", "s"), "hi");
+  assert.deepEqual(P.readPlan("RT", "ss"), { ...plan, rev: 1 });
+  P.writePlan(P.readPlan("RT", "ss"));
+  assert.equal(P.readPlan("RT", "ss").rev, 2);
+  P.writeNotes("RT", "ss", "hi");
+  assert.equal(P.readNotes("RT", "ss"), "hi");
 });
 
 test("addReference copies, never overwrites", () => {
-  P.createSub("Ref", "s");
+  P.createSub("Ref", "ss");
   const root = mkdtempSync(join(tmpdir(), "fm-src-"));
   const src = join(root, "a.png");
   writeFileSync(src, "x");
   const a = P.addReference("Ref", undefined, src, [root]);
   const b = P.addReference("Ref", undefined, src, [root]);
-  const c = P.addReference("Ref", "s", src, [root]);
+  const c = P.addReference("Ref", "ss", src, [root]);
   assert.ok(existsSync(src) && existsSync(a) && existsSync(b) && existsSync(c));
   assert.notEqual(a, b);
-  assert.ok(c.includes(join("s", "references")));
+  assert.ok(c.includes(join("ss", "references")));
 });
 
 test("PlanSchema rejects duplicate scene numbers", () => {
-  const bad = { project: "p", sub: "s", aspect: "9:16", scenes: [{ n: 1, prompt: "a" }, { n: 1, prompt: "b" }] };
+  const bad = { project: "p", sub: "ss", aspect: "9:16", scenes: [{ n: 1, prompt: "aa" }, { n: 1, prompt: "b" }] };
   assert.equal(P.PlanSchema.safeParse(bad).success, false);
 });
 
 test("addReference rejects a source outside the allowed roots", () => {
-  P.createSub("Ref2", "s");
+  P.createSub("Ref2", "ss");
   const outside = join(mkdtempSync(join(tmpdir(), "fm-out-")), "b.png");
   writeFileSync(outside, "x");
   assert.throws(() => P.addReference("Ref2", undefined, outside, [mkdtempSync(join(tmpdir(), "fm-ok-"))]), /inside/);
@@ -70,7 +70,8 @@ test("addReference rejects a source outside the allowed roots", () => {
 test("reserved names rejected", () => {
   P.createSub("Res", "ok");
   for (const n of ["references", "References", "con", "NUL", "com1"]) assert.throws(() => P.createSub("Res", n), /reserved/, n);
-  assert.throws(() => P.createSub("con", "x"), /reserved/);
+  assert.throws(() => P.createSub("con", "xx"), /reserved/);
+  assert.throws(() => P.createSub("Aqua", "b"), /too short/);
 });
 
 test("missing sub: notes/plan throw and create nothing", () => {
@@ -86,11 +87,11 @@ test("readPlan('..','x') stays inside root and throws", () => {
 });
 
 test("writeNotes with a stale base rev is rejected", () => {
-  P.createSub("Nt", "s");
-  const base = P.notesRev(P.readNotes("Nt", "s"));
-  const next = P.writeNotes("Nt", "s", "first", base);
-  assert.throws(() => P.writeNotes("Nt", "s", "second", base), /changed since you read/);
-  assert.equal(P.readNotes("Nt", "s"), "first");
-  P.writeNotes("Nt", "s", "second", next);
-  assert.equal(P.readNotes("Nt", "s"), "second");
+  P.createSub("Nt", "ss");
+  const base = P.notesRev(P.readNotes("Nt", "ss"));
+  const next = P.writeNotes("Nt", "ss", "first", base);
+  assert.throws(() => P.writeNotes("Nt", "ss", "second", base), /changed since you read/);
+  assert.equal(P.readNotes("Nt", "ss"), "first");
+  P.writeNotes("Nt", "ss", "second", next);
+  assert.equal(P.readNotes("Nt", "ss"), "second");
 });

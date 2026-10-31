@@ -80,6 +80,8 @@ export const projDir = (project: string) => join(projectsRoot(), checked(project
 export const subDir = (project: string, sub: string) => join(projDir(project), checked(sub));
 
 export function createSub(project: string, sub: string, aspect: "9:16" | "16:9" = "9:16"): string {
+  // One letter collides with the old handoff folders (public/<P>/a, b, ...) next to Remotion's public/<P>/<sub>.
+  if (/^[a-z]$/i.test(safeName(sub))) throw new Error(`Sub-project name "${sub}" is too short: use two or more characters.`);
   const dir = subDir(project, sub);
   if (existsSync(dir)) throw new Error(`Sub-project ${safeName(project)}/${safeName(sub)} already exists.`);
   mkdirSync(join(projDir(project), "references"), { recursive: true });

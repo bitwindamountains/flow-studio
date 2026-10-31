@@ -55,3 +55,20 @@ test("validation: no kept, missing clip, missing music throw before anything is 
   assert.throws(() => handoff(p, { music: join(tmp, "gone.mp3") }), /music/);
   assert.ok(!existsSync(join(subPublicDir("Bad", "s"), "captions.json")));
 });
+
+test("audio: only audio extensions, never the same file twice, both moves or neither, studio captions only", () => {
+  const p = mk("Aud2");
+  const txt = join(tmp, "notes.txt"); writeFileSync(txt, "t");
+  assert.throws(() => handoff(p, { music: txt }), /audio file/);
+  const m = join(tmp, "m2.mp3"); writeFileSync(m, "m");
+  assert.throws(() => handoff(p, { music: m, voiceover: m }), /same file/);
+  // vo.mp3 already there: refused before anything moves, so the music stays in uploads.
+  mkdirSync(subPublicDir("Aud2", "s"), { recursive: true });
+  writeFileSync(join(subPublicDir("Aud2", "s"), "vo.mp3"), "old");
+  const v = join(tmp, "v2.mp3"); writeFileSync(v, "v");
+  assert.throws(() => handoff(p, { music: m, voiceover: v }), /already exists/);
+  assert.ok(existsSync(m) && existsSync(v) && !existsSync(join(subPublicDir("Aud2", "s"), "bg.mp3")));
+  // A captions.json the studio did not write is never overwritten.
+  writeFileSync(join(subPublicDir("Aud2", "s"), "captions.json"), '{"owner":true}');
+  assert.throws(() => handoff(p, {}), /not written by the studio/);
+});

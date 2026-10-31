@@ -136,8 +136,8 @@ test("server: scene and cancel-job need the UI token and do only their one thing
   const srv = await import("./server.js");
   const { createSub, readPlan, writePlan } = await import("./projects.js");
   process.env.STUDIO_PROJECTS = join(home, "projects");
-  createSub("P", "s", "9:16");
-  const plan = readPlan("P", "s");
+  createSub("P", "ss", "9:16");
+  const plan = readPlan("P", "ss");
   plan.scenes = [{ n: 1, prompt: "x" }];
   writePlan(plan);
   const core = new LocalCore();
@@ -148,14 +148,14 @@ test("server: scene and cancel-job need the UI token and do only their one thing
   const ui = /fs_ui=([0-9a-f]+)/.exec(lastSet)![1];
   const flow = /data-token="(\w+)"/.exec(html)![1];
   const post = (path: string, body: object, h: Record<string, string>) => fetch(base + path, { method: "POST", headers: h, body: JSON.stringify(body) });
-  const scene = { project: "P", sub: "s", n: 1, approved: true, kept: true };
+  const scene = { project: "P", sub: "ss", n: 1, approved: true, kept: true };
   for (const [path, body] of [["/api/scene", scene], ["/api/cancel-job", { id: held.id }]] as const) {
     assert.equal((await post(path, body, {})).status, 403, path);
     assert.equal((await post(path, body, { "x-flow-token": flow })).status, 403, path);
     assert.equal((await post(path, body, { cookie: "fs_ui=wrong", origin: base })).status, 403, path);
     assert.equal((await post(path, body, { cookie: "fs_ui=" + ui, origin: "http://evil.example" })).status, 403, path);
   }
-  assert.equal(readPlan("P", "s").scenes[0].approved, undefined);
+  assert.equal(readPlan("P", "ss").scenes[0].approved, undefined);
   assert.equal(core.queue.list().find((j) => j.id === held.id)!.status, "held");
   const h = { cookie: "fs_ui=" + ui, origin: base };
   const media = (p: string) => fetch(`${base}/media?path=${encodeURIComponent(p)}&token=${flow}`).then((r) => r.status);
@@ -174,7 +174,7 @@ test("server: scene and cancel-job need the UI token and do only their one thing
   assert.equal((await post("/api/remotion/dev", {}, { ...h, "x-flow-token": flow })).status, 404); // the owner route is gone
   // Remotion public (clips) and out (renders) are served too; never HTML there either.
   for (const d of ["public", "out"]) {
-    const dir = join(home, "remotion", d, "P", "s");
+    const dir = join(home, "remotion", d, "P", "ss");
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "v1.mp4"), "vid");
     writeFileSync(join(dir, "x.html"), "<script>1</script>");
@@ -184,7 +184,7 @@ test("server: scene and cancel-job need the UI token and do only their one thing
   writeFileSync(join(home, "remotion", "Root.mp4"), "x");
   assert.equal(await media(join(home, "remotion", "Root.mp4")), 404); // the Remotion root itself is not served
   assert.equal((await post("/api/scene", { ...scene, prompt: "hacked" }, h)).status, 200);
-  const s1 = readPlan("P", "s").scenes[0];
+  const s1 = readPlan("P", "ss").scenes[0];
   assert.deepEqual([s1.approved, s1.kept, s1.prompt], [true, true, "x"]);
   assert.equal((await post("/api/scene", { ...scene, n: 9 }, h)).status, 400);
   assert.equal((await post("/api/cancel-job", { id: "nope" }, h)).status, 400);

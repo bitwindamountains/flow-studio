@@ -34,67 +34,67 @@ async function write(core: { studio_plan_write(a: unknown): Promise<unknown> }, 
 const until = async (f: () => boolean) => { for (let i = 0; i < 200 && !f(); i++) await new Promise((r) => setTimeout(r, 10)); };
 
 test("storyboard queues image jobs that run without approval", async () => {
-  const { core, readPlan } = await setup("a", [{ n: 1, prompt: "x" }, { n: 2, prompt: "y" }]);
-  const r = (await core.studio_storyboard({ project: "P", sub: "a" } as never)) as { job_ids: string[] };
+  const { core, readPlan } = await setup("aa", [{ n: 1, prompt: "x" }, { n: 2, prompt: "y" }]);
+  const r = (await core.studio_storyboard({ project: "P", sub: "aa" } as never)) as { job_ids: string[] };
   assert.equal(r.job_ids.length, 2);
-  await until(() => !!readPlan("P", "a").scenes[1].storyboard);
-  const p = readPlan("P", "a");
+  await until(() => !!readPlan("P", "aa").scenes[1].storyboard);
+  const p = readPlan("P", "aa");
   assert.ok(p.scenes[0].storyboard!.endsWith("scene-01.png") && existsSync(p.scenes[0].storyboard!));
   assert.ok(p.scenes[1].storyboard!.endsWith("scene-02.png"));
 });
 
 test("generate creates one held batch with the plan's aspect", async () => {
-  const { core } = await setup("b", [{ n: 1, prompt: "x", approved: true }, { n: 2, prompt: "y" }, { n: 3, prompt: "z", approved: true }]);
-  const r = (await core.studio_generate({ project: "P", sub: "b", duration: 8, resolution: "720p", max_credits: 20 } as never)) as { batch: string; held: number; quoted_max_credits: number };
+  const { core } = await setup("bb", [{ n: 1, prompt: "x", approved: true }, { n: 2, prompt: "y" }, { n: 3, prompt: "z", approved: true }]);
+  const r = (await core.studio_generate({ project: "P", sub: "bb", duration: 8, resolution: "720p", max_credits: 20 } as never)) as { batch: string; held: number; quoted_max_credits: number };
   assert.equal(r.held, 2);
   assert.equal(r.quoted_max_credits, 40);
   const jobs = core.queue.list();
   assert.ok(jobs.every((j) => j.status === "held" && j.batch === r.batch && j.params.aspect_ratio === "16:9"));
   assert.deepEqual(jobs.map((j) => j.params.file_stem), ["scene-01", "scene-03"]);
-  await assert.rejects(core.studio_generate({ project: "P", sub: "b", scenes: [9], duration: 8, resolution: "720p", max_credits: 20 } as never), /Unknown scene 9/);
+  await assert.rejects(core.studio_generate({ project: "P", sub: "bb", scenes: [9], duration: 8, resolution: "720p", max_credits: 20 } as never), /Unknown scene 9/);
 });
 
 test("generate uses the storyboard still as first_frame", async () => {
-  const { core } = await setup("c", [{ n: 1, prompt: "x", approved: true, storyboard: "C:\\s\\scene-01.png" }]);
-  await core.studio_generate({ project: "P", sub: "c", duration: 8, resolution: "720p", max_credits: 20 } as never);
+  const { core } = await setup("cc", [{ n: 1, prompt: "x", approved: true, storyboard: "C:\\s\\scene-01.png" }]);
+  await core.studio_generate({ project: "P", sub: "cc", duration: 8, resolution: "720p", max_credits: 20 } as never);
   assert.equal(core.queue.list()[0].params.first_frame, "C:\\s\\scene-01.png");
 });
 
 test("finished job writes clip path into plan.json", async () => {
-  const { core, readPlan } = await setup("d", [{ n: 1, prompt: "x", approved: true }]);
-  const r = (await core.studio_generate({ project: "P", sub: "d", duration: 8, resolution: "720p", max_credits: 20 } as never)) as { batch: string };
+  const { core, readPlan } = await setup("dd", [{ n: 1, prompt: "x", approved: true }]);
+  const r = (await core.studio_generate({ project: "P", sub: "dd", duration: 8, resolution: "720p", max_credits: 20 } as never)) as { batch: string };
   core.queue.approve({ batch: r.batch });
-  await until(() => !!readPlan("P", "d").scenes[0].clip);
-  assert.ok(readPlan("P", "d").scenes[0].clip!.endsWith("scene-01.mp4"));
-  const st = (await core.studio_status({ project: "P", sub: "d" } as never)) as { scenes: { jobs: { status: string }[] }[]; pending: unknown[] };
+  await until(() => !!readPlan("P", "dd").scenes[0].clip);
+  assert.ok(readPlan("P", "dd").scenes[0].clip!.endsWith("scene-01.mp4"));
+  const st = (await core.studio_status({ project: "P", sub: "dd" } as never)) as { scenes: { jobs: { status: string }[] }[]; pending: unknown[] };
   assert.equal(st.scenes[0].jobs[0].status, "done");
   assert.equal(st.pending.length, 0);
 });
 
 test("redo keeps the previous clip file", async () => {
-  const { core, readPlan } = await setup("e", [{ n: 1, prompt: "x", approved: true }]);
-  const r = (await core.studio_generate({ project: "P", sub: "e", duration: 8, resolution: "720p", max_credits: 20 } as never)) as { batch: string };
+  const { core, readPlan } = await setup("ee", [{ n: 1, prompt: "x", approved: true }]);
+  const r = (await core.studio_generate({ project: "P", sub: "ee", duration: 8, resolution: "720p", max_credits: 20 } as never)) as { batch: string };
   core.queue.approve({ batch: r.batch });
-  await until(() => !!readPlan("P", "e").scenes[0].clip);
-  const first = readPlan("P", "e").scenes[0].clip!;
-  const d = (await core.studio_redo({ project: "P", sub: "e", scene: 1, prompt: "new" } as never)) as { batch: string };
+  await until(() => !!readPlan("P", "ee").scenes[0].clip);
+  const first = readPlan("P", "ee").scenes[0].clip!;
+  const d = (await core.studio_redo({ project: "P", sub: "ee", scene: 1, prompt: "new" } as never)) as { batch: string };
   core.queue.approve({ batch: d.batch });
-  await until(() => readPlan("P", "e").scenes[0].clip !== first);
+  await until(() => readPlan("P", "ee").scenes[0].clip !== first);
   assert.ok(existsSync(first));
-  assert.ok(readPlan("P", "e").scenes[0].clip!.endsWith("scene-01-take-2.mp4"));
+  assert.ok(readPlan("P", "ee").scenes[0].clip!.endsWith("scene-01-take-2.mp4"));
 });
 
 test("plan_write keeps engine-owned clip/storyboard; incoming (stale) values are ignored, new scenes cannot set them", async () => {
-  const { core, readPlan } = await setup("f", [{ n: 1, prompt: "x", approved: true }]);
-  const r = (await core.studio_generate({ project: "P", sub: "f", duration: 8, resolution: "720p", max_credits: 20 } as never)) as { batch: string };
+  const { core, readPlan } = await setup("ff", [{ n: 1, prompt: "x", approved: true }]);
+  const r = (await core.studio_generate({ project: "P", sub: "ff", duration: 8, resolution: "720p", max_credits: 20 } as never)) as { batch: string };
   core.queue.approve({ batch: r.batch });
-  await until(() => !!readPlan("P", "f").scenes[0].clip);
-  const clip = readPlan("P", "f").scenes[0].clip!;
-  await write(core, "f", [{ n: 1, prompt: "edited" }]);
-  assert.equal(readPlan("P", "f").scenes[0].clip, clip);
-  assert.equal(readPlan("P", "f").scenes[0].prompt, "edited");
-  await write(core, "f", [{ n: 1, prompt: "edited", clip: "Z:\\other.mp4", storyboard: "Z:\\old.png" }, { n: 2, prompt: "new", clip: "Z:\\c.mp4", storyboard: "Z:\\s.png" }]);
-  const sc = readPlan("P", "f").scenes;
+  await until(() => !!readPlan("P", "ff").scenes[0].clip);
+  const clip = readPlan("P", "ff").scenes[0].clip!;
+  await write(core, "ff", [{ n: 1, prompt: "edited" }]);
+  assert.equal(readPlan("P", "ff").scenes[0].clip, clip);
+  assert.equal(readPlan("P", "ff").scenes[0].prompt, "edited");
+  await write(core, "ff", [{ n: 1, prompt: "edited", clip: "Z:\\other.mp4", storyboard: "Z:\\old.png" }, { n: 2, prompt: "new", clip: "Z:\\c.mp4", storyboard: "Z:\\s.png" }]);
+  const sc = readPlan("P", "ff").scenes;
   assert.equal(sc[0].clip, clip);
   assert.equal(sc[0].storyboard, undefined);
   assert.equal(sc[1].clip, undefined);
@@ -176,17 +176,17 @@ test("clip jobs download straight into the Remotion public clips folder", async 
 });
 
 test("storyboard reroll resets approved", async () => {
-  const { core, readPlan } = await setup("g", [{ n: 1, prompt: "x", approved: true }]);
-  await core.studio_storyboard({ project: "P", sub: "g", scenes: [1] } as never);
-  await until(() => !!readPlan("P", "g").scenes[0].storyboard);
-  assert.equal(readPlan("P", "g").scenes[0].approved, false);
+  const { core, readPlan } = await setup("gg", [{ n: 1, prompt: "x", approved: true }]);
+  await core.studio_storyboard({ project: "P", sub: "gg", scenes: [1] } as never);
+  await until(() => !!readPlan("P", "gg").scenes[0].storyboard);
+  assert.equal(readPlan("P", "gg").scenes[0].approved, false);
 });
 
 test("plan_write cannot set or clear approved/kept", async () => {
-  const { core, readPlan } = await setup("h", [{ n: 1, prompt: "x", approved: true, kept: false }]);
-  const w = (scenes: object[]) => write(core, "h", scenes);
+  const { core, readPlan } = await setup("hh", [{ n: 1, prompt: "x", approved: true, kept: false }]);
+  const w = (scenes: object[]) => write(core, "hh", scenes);
   await w([{ n: 1, prompt: "x", approved: false, kept: true }, { n: 2, prompt: "new", approved: true, kept: true }]);
-  const sc = readPlan("P", "h").scenes;
+  const sc = readPlan("P", "hh").scenes;
   assert.equal(sc[0].approved, true);
   assert.equal(sc[0].kept, false);
   assert.equal(sc[1].approved, undefined);
@@ -194,17 +194,17 @@ test("plan_write cannot set or clear approved/kept", async () => {
 });
 
 test("plan_write: content edits clear approval, unchanged rewrite keeps it, an incoming clip cannot swap the kept one", async () => {
-  const { core, readPlan } = await setup("i", [{ n: 1, prompt: "x", approved: true, kept: true, clip: "C:\\a.mp4" }]);
-  const w = (sc: object) => write(core, "i", [sc]);
+  const { core, readPlan } = await setup("ii", [{ n: 1, prompt: "x", approved: true, kept: true, clip: "C:\\a.mp4" }]);
+  const w = (sc: object) => write(core, "ii", [sc]);
   await w({ n: 1, prompt: "x" });
-  assert.equal(readPlan("P", "i").scenes[0].approved, true);
-  assert.equal(readPlan("P", "i").scenes[0].kept, true);
+  assert.equal(readPlan("P", "ii").scenes[0].approved, true);
+  assert.equal(readPlan("P", "ii").scenes[0].kept, true);
   await w({ n: 1, prompt: "x", clip: "C:\\b.mp4" });
-  assert.equal(readPlan("P", "i").scenes[0].clip, "C:\\a.mp4");
-  assert.equal(readPlan("P", "i").scenes[0].kept, true);
-  assert.equal(readPlan("P", "i").scenes[0].approved, true);
+  assert.equal(readPlan("P", "ii").scenes[0].clip, "C:\\a.mp4");
+  assert.equal(readPlan("P", "ii").scenes[0].kept, true);
+  assert.equal(readPlan("P", "ii").scenes[0].approved, true);
   await w({ n: 1, prompt: "changed" });
-  assert.equal(readPlan("P", "i").scenes[0].approved, false);
+  assert.equal(readPlan("P", "ii").scenes[0].approved, false);
 });
 
 test("sceneSettings: overrides > scene > defaults; Veo forces 8s and no resolution", async () => {
@@ -518,6 +518,19 @@ test("studio_render_done moves into out/<P>/<sub>/vN (one copy); registers a vN 
   assert.equal(readFileSync(r1.path, "utf8"), "one");
   assert.deepEqual(readdirSync(rendersDir("P", "rd")).sort(), ["v1.mp4", "v2.mp4", "v3.mp4"]);
   assert.deepEqual(((await core.studio_renders({ project: "P", sub: "rd" } as never)) as { renders: { version: number }[] }).renders.map((r) => r.version), [1, 2, 3]);
+  // A non-vN file already in this sub's renders folder is renamed to the next vN there.
+  const loose = join(rendersDir("P", "rd"), "final.mp4");
+  writeFileSync(loose, "four");
+  assert.equal((await done(loose)).path, join(rendersDir("P", "rd"), "v4.mp4"));
+  assert.ok(!existsSync(loose));
+  // The owner's other out/ folders and other projects' renders are never touched.
+  for (const rel of [["fan", "x.mp4"], ["OtherProject", "sub", "v1.mp4"]]) {
+    const p = join(root, "out", ...rel);
+    mkdirSync(join(p, ".."), { recursive: true });
+    writeFileSync(p, "owner");
+    await assert.rejects(done(p), /other out\/ folders are never touched/);
+    assert.equal(readFileSync(p, "utf8"), "owner");
+  }
   const outside = join(root, "outside.mp4");
   writeFileSync(outside, "x");
   await assert.rejects(done(outside), /inside/);

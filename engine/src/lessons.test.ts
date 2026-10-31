@@ -11,6 +11,7 @@ const port = 20000 + Math.floor(Math.random() * 20000);
 process.env.FLOW_MCP_PORT = String(port);
 process.env.FLOW_MCP_HOME = home;
 process.env.FLOW_MCP_OUTPUT = join(home, "out");
+process.env.STUDIO_REMOTION = join(home, "remotion");
 const fresh = () => { process.env.STUDIO_LESSONS = join(mkdtempSync(join(tmpdir(), "fm-l-")), "lessons.md"); };
 
 test("proposed lesson is not in readLessons until saved", async () => {

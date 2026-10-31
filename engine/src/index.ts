@@ -448,7 +448,7 @@ server.registerTool(
   "studio_render_done",
   {
     title: "Register finished render",
-    description: "Call after rendering the edited video, ideally straight to my-video/out/<project>/<sub>/v<N>.mp4. The file must be inside the Remotion project's out/ folder (mp4/webm/mov). A vN already in out/<project>/<sub>/ is registered as is; any other file is MOVED there (no copy) as the next free v<N>; never overwrites earlier versions. Returns { version, path }. project/sub default to the owner's selection.",
+    description: "Call after rendering the edited video, ideally straight to my-video/out/<project>/<sub>/v<N>.mp4. The file (mp4/webm/mov) must be in out/<project>/<sub>/ (a vN there is registered as is; any other name is renamed to the next free v<N>) or at the top level of out/ (MOVED in as the next free v<N>, no copy). Every other out/ subfolder is refused. Never overwrites earlier versions. Returns { version, path }. project/sub default to the owner's selection.",
     inputSchema: shapes.studio_render_done,
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },
