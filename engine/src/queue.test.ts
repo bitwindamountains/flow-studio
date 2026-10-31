@@ -171,3 +171,12 @@ test("restore: a chained job whose prior was running when the studio stopped is 
   assert.equal(q.get("c")!.status, "cancelled");
   assert.match(q.get("c")!.note!, /failed.*Nothing spent/);
 });
+
+test("image jobs use the shorter image pause; video keeps the long one", async () => {
+  const q = new JobQueue(async () => ["f"], { pauseMs: [60_000, 60_000], imagePauseMs: [0, 0] });
+  const a = q.add(params("image"));
+  const b = q.add(params("image", { file_stem: "scene-02" }));
+  await tick();
+  assert.equal(a.status, "done");
+  assert.equal(b.status, "done"); // with the 60 s video pause this would still be queued
+});

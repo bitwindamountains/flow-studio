@@ -14,6 +14,8 @@ set "FLOW_MCP_OUTPUT=D:\flow-studio\projects"
 rem 8787 is often taken by another local service, so the studio uses 8797. claude\mcp.json uses the same port.
 set "FLOW_MCP_PORT=8797"
 set "FLOW_STUDIO_NO_OPEN=1"
+rem ffmpeg (continue-from-last-frame) installed by winget may not be on this window's PATH yet.
+if not defined FLOW_MCP_FFMPEG for /d %%P in ("%LOCALAPPDATA%\Microsoft\WinGet\Packages\Gyan.FFmpeg*") do for /d %%V in ("%%P\*") do if exist "%%V\bin\ffmpeg.exe" set "FLOW_MCP_FFMPEG=%%V\bin\ffmpeg.exe"
 rem Flow runs in Brave (owner's choice) with the studio's own profile under data\, never the everyday Brave profile.
 if not defined FLOW_MCP_CHROME if exist "%ProgramFiles%\BraveSoftware\Brave-Browser\Application\brave.exe" set "FLOW_MCP_CHROME=%ProgramFiles%\BraveSoftware\Brave-Browser\Application\brave.exe"
 start "Flow Studio server" /b node dist\studio.js

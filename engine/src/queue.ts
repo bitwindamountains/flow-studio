@@ -76,6 +76,9 @@ export class Requeue extends Error {}
 // randomised pause between them.
 const PAUSE_MIN_MS = Number(process.env.FLOW_MCP_PAUSE_MIN_S ?? 25) * 1000;
 const PAUSE_MAX_MS = Number(process.env.FLOW_MCP_PAUSE_MAX_S ?? 70) * 1000;
+// Free image jobs (storyboard stills) are quick and cheap for Flow, so they wait less (owner's choice, 2026-10-31).
+const IMAGE_PAUSE_MIN_MS = Number(process.env.FLOW_MCP_IMAGE_PAUSE_MIN_S ?? 5) * 1000;
+const IMAGE_PAUSE_MAX_MS = Number(process.env.FLOW_MCP_IMAGE_PAUSE_MAX_S ?? 15) * 1000;
 
 const STOPPED = "Studio stopped while this was generating — it may have spent credits. Check Flow before retrying.";
 const needsOk = (p: SceneParams) => p.type === "video" || Boolean(p.edit_asset || p.continue_from);
@@ -87,13 +90,15 @@ export class JobQueue {
   private manualPause: string | null = null;
   private pacing: string | null = null;
   private pauseMs: [number, number];
+  private imagePauseMs: [number, number];
   // Only the process that owns the Flow tab restores and writes the shared file (see restore()).
   private active = false;
   // Note text a Requeue added, removed again when the job next runs (it no longer describes the job).
   private requeueNote = new Map<string, string>();
 
-  constructor(private runner: JobRunner, private opts: { file?: string; pauseMs?: [number, number]; onDone?: (job: Job) => void } = {}) {
+  constructor(private runner: JobRunner, private opts: { file?: string; pauseMs?: [number, number]; imagePauseMs?: [number, number]; onDone?: (job: Job) => void } = {}) {
     this.pauseMs = opts.pauseMs ?? [PAUSE_MIN_MS, PAUSE_MAX_MS];
+    this.imagePauseMs = opts.imagePauseMs ?? (opts.pauseMs ? this.pauseMs : [IMAGE_PAUSE_MIN_MS, IMAGE_PAUSE_MAX_MS]);
   }
 
   // Loads the file, fails jobs that were running when the last owner died, re-holds approved paid jobs, and resumes queued work. Call it only in
@@ -248,7 +253,8 @@ export class JobQueue {
         const job = this.list().find((j) => j.status === "queued" && !this.waiting(j));
         if (!job) return;
         if (this.lastFinished) {
-          const pause = this.pauseMs[0] + Math.random() * (this.pauseMs[1] - this.pauseMs[0]);
+          const [lo, hi] = job.params.type === "image" ? this.imagePauseMs : this.pauseMs;
+          const pause = lo + Math.random() * (hi - lo);
           const remaining = this.lastFinished + pause - Date.now();
           if (remaining > 0) {
             this.pacing = `pacing: next generation in ${Math.ceil(remaining / 1000)}s`;
