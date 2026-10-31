@@ -147,9 +147,11 @@ function picker(label, onFile, accept) {
   return h("label", { class: "pick" }, label + " ", i);
 }
 // Per-scene duration; saves through the plan (settings changes do not clear approval).
+const isVeo = (s) => /^veo/i.test(s.model || "");
 function durationPick(s) {
+  if (isVeo(s)) return h("span", {}, "8 s · fixed"); // Flow fixes Veo clips at 8 s
   const sel = h("select", { "aria-label": `Scene ${s.n} duration` }, ...[4, 6, 8, 10].map((d) => h("option", { value: d, selected: d === (s.duration || 8) }, d + " s")));
-  sel.onchange = () => savePlan((pl) => { pl.scenes.find((x) => x.n === s.n).duration = Number(sel.value); }).then(() => refresh(true), (e) => toast(e.message));
+  sel.onchange = () => savePlan((pl) => { pl.scenes.find((x) => x.n === s.n).duration = Number(sel.value); }).then(() => refresh(true), (e) => { toast(e.message); refresh(true); });
   return sel;
 }
 async function savePlan(mut) {
@@ -252,7 +254,7 @@ function renderPlan(el) {
     const sty = h("select", { "aria-label": "Style" }, ...[["", "none"], ["A", "A"], ["B", "B"]].map(([v, t]) => h("option", { value: v, selected: v === (p.style || "") }, "Style " + t)));
     sty.onchange = () => savePlan((pl) => { if (sty.value) pl.style = sty.value; else delete pl.style; }).then(() => refresh(true), (e) => toast(e.message));
     const rows = p.scenes.map((s) => h("tr", {},
-      h("td", {}, String(s.n)), h("td", {}, s.prompt), h("td", {}, s.camera || ""), h("td", {}, durationPick(s)), h("td", {}, `${s.model || "Omni 1.1 Flash"} · ${s.resolution || "720p"}`), h("td", {}, s.caption || ""), h("td", {}, s.voiceover || ""),
+      h("td", {}, String(s.n)), h("td", {}, s.prompt), h("td", {}, s.camera || ""), h("td", {}, durationPick(s)), h("td", {}, isVeo(s) ? s.model : `${s.model || "Omni 1.1 Flash"} · ${s.resolution || "720p"}`), h("td", {}, s.caption || ""), h("td", {}, s.voiceover || ""),
       h("td", {}, picker("+ ref", async (f) => {
         const r = await apiOk("studio_add_reference", { ...c, path: await upload(f) });
         await savePlan((pl) => { const sc = pl.scenes.find((x) => x.n === s.n); sc.references = [...(sc.references || []), r.path]; });
