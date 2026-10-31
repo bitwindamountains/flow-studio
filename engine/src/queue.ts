@@ -230,7 +230,11 @@ export class JobQueue {
             this.pacing = null;
           }
         }
-        await this.gate;
+        // Re-check: another whileIdle may have replaced the gate while we waited. Capped so a hung read can't stall the queue forever.
+        for (let g = this.gate; ; g = this.gate) {
+          await Promise.race([g, new Promise((r) => setTimeout(r, 60_000).unref())]);
+          if (g === this.gate) break;
+        }
         if (job.status !== "queued" || this.manualPause) continue;
         job.status = "running";
         job.attempts++;

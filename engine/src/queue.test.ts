@@ -133,3 +133,28 @@ test("a Requeue error puts the job back in line, adds to its note, and the note 
   assert.equal(job.status, "done");
   assert.equal(job.note, "acct 0 out of credits → acct 1");
 });
+
+test("queued job waits for every whileIdle read, including one that replaced the gate", async () => {
+  const q = mk();
+  let releaseA!: () => void, releaseB!: () => void;
+  void q.whileIdle(() => new Promise<void>((r) => (releaseA = r)));
+  const job = q.add(params("image"));
+  await tick();
+  assert.equal(job.status, "queued");
+  void q.whileIdle(() => new Promise<void>((r) => (releaseB = r)));
+  releaseA();
+  await tick();
+  assert.equal(job.status, "queued");
+  releaseB();
+  await tick();
+  assert.equal(job.status, "done");
+});
+
+test("whileIdle declines while a job runs", async () => {
+  let finish!: () => void;
+  const q = new JobQueue(() => new Promise<string[]>((r) => (finish = () => r(["f.jpg"]))), { pauseMs: [0, 0] });
+  q.add(params("image"));
+  await tick();
+  assert.equal(await q.whileIdle(async () => "read"), undefined);
+  finish();
+});
