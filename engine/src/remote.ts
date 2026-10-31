@@ -52,6 +52,7 @@ export class RemoteCore implements Core {
   studio_to_remotion = (a: unknown) => call("studio_to_remotion", a);
   studio_add_reference = (a: unknown) => call("studio_add_reference", a);
   studio_propose_lesson = (a: unknown) => call("studio_propose_lesson", a);
+  studio_accounts_refresh = () => call("studio_accounts_refresh", {});
 
   // Long waits are split up so no single HTTP request outlives fetch's header timeout.
   async wait(a: { job_ids?: string[]; timeout_seconds: number }): Promise<unknown> {

@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { JobQueue, type Job, type SceneParams } from "./queue.js";
+import { JobQueue, Requeue, type Job, type SceneParams } from "./queue.js";
 
 const dir = () => mkdtempSync(join(tmpdir(), "fm-queue-"));
 const params = (type: "video" | "image", extra: Partial<SceneParams> = {}): SceneParams => ({
@@ -109,4 +109,14 @@ test("restore re-holds approved (queued) paid jobs, keeps their batch; free jobs
   await tick();
   assert.equal(q.get("img")?.status, "done");
   assert.equal(q.get("vid")?.status, "held");
+});
+
+test("a Requeue error puts the job back in line and leaves the queue paused", async () => {
+  const q = new JobQueue(async () => { q.pause("All accounts are out of credits."); throw new Requeue("no account left"); }, { pauseMs: [0, 0] });
+  const job = q.add(params("image"));
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(job.status, "queued");
+  assert.equal(job.attempts, 0);
+  assert.equal(job.finishedAt, undefined);
+  assert.equal(q.pausedReason, "All accounts are out of credits.");
 });

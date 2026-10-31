@@ -59,6 +59,10 @@ export interface Job {
 
 export type JobRunner = (job: Job) => Promise<string[]>;
 
+// Thrown by a runner that gave up before generating anything and wants the job run again later (e.g. every account is
+// out of credits and the queue was paused): the job goes back to "queued" instead of "failed".
+export class Requeue extends Error {}
+
 // Flow is driven like a careful person would: one generation at a time, with a
 // randomised pause between them.
 const PAUSE_MIN_MS = Number(process.env.FLOW_MCP_PAUSE_MIN_S ?? 25) * 1000;
@@ -220,6 +224,14 @@ export class JobQueue {
           job.error = undefined;
           try { this.opts.onDone?.(job); } catch (e) { console.error(`flow-mcp: onDone failed: ${(e as Error).message}`); }
         } catch (err) {
+          if (err instanceof Requeue) {
+            job.status = "queued";
+            job.attempts--;
+            job.note = err.message;
+            if (!this.manualPause) this.manualPause = err.message; // never spin on a job that cannot run
+            this.save();
+            continue; // the loop's pause check stops here until resume()
+          }
           job.error = err instanceof Error ? err.message : String(err);
           // Failed tiles are already retried inside Flow (its own Retry button); only an agent that produced nothing
           // is re-queued here. Timeouts are never retried automatically: they may still have spent credits.

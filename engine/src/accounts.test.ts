@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pickAccount, earliestRefresh, markExhausted, loadAccounts, saveAccounts, type Account } from "./accounts.js";
+import { pickAccount, earliestRefresh, markExhausted, loadAccounts, saveAccounts, parseRefreshTime, nextRefresh, mergeAccounts, type Account } from "./accounts.js";
 import { readJson, writeJsonAtomic } from "./persist.js";
 
 const now = new Date("2026-10-31T10:00:00");
@@ -26,7 +26,7 @@ test("earliestRefresh returns the soonest exhaustedUntil", () => {
   assert.equal(earliestRefresh(a, now)?.toISOString(), soon);
   assert.equal(earliestRefresh([{ index: 0, email: "a" }], now), undefined);
 });
-test("markExhausted sets next local midnight", () => {
+test("markExhausted without refreshTime sets next local midnight", () => {
   const a: Account = { index: 0, email: "a" };
   markExhausted(a, now);
   assert.equal(a.exhaustedUntil, new Date("2026-11-01T00:00:00").toISOString());
@@ -41,4 +41,37 @@ test("writeJsonAtomic then readJson round-trips; missing file returns fallback",
     saveAccounts(f, [{ index: 0, email: "a" }]);
     assert.equal(loadAccounts(f)[0].email, "a");
   } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test("parseRefreshTime reads Flow's panel text", () => {
+  assert.equal(parseRefreshTime("Credits refresh daily at 4:59 AM"), "4:59 AM");
+  assert.equal(parseRefreshTime("Credits refresh daily at 12:05 pm"), "12:05 PM");
+  assert.equal(parseRefreshTime("nothing here"), undefined);
+});
+test("nextRefresh is the next local occurrence of the time", () => {
+  assert.equal(nextRefresh("4:59 AM", now)?.getTime(), new Date("2026-11-01T04:59:00").getTime());
+  assert.equal(nextRefresh("5:38 PM", now)?.getTime(), new Date("2026-10-31T17:38:00").getTime());
+  assert.equal(nextRefresh("12:10 AM", now)?.getTime(), new Date("2026-11-01T00:10:00").getTime());
+  assert.equal(nextRefresh("12:30 PM", now)?.getTime(), new Date("2026-10-31T12:30:00").getTime());
+  assert.equal(nextRefresh("10:00 AM", now)?.getTime(), new Date("2026-11-01T10:00:00").getTime());
+  assert.equal(nextRefresh("garbage", now), undefined);
+});
+test("markExhausted uses the account's refreshTime", () => {
+  const a: Account = { index: 0, email: "a", refreshTime: "8:22 AM" };
+  markExhausted(a, now);
+  assert.equal(a.exhaustedUntil, new Date("2026-11-01T08:22:00").toISOString());
+});
+test("mergeAccounts keys by email, takes fresh index/credits, keeps exhaustedUntil, drops accounts no longer signed in", () => {
+  const old: Account[] = [
+    { index: 0, email: "a@x.test", credits: 1, exhaustedUntil: future },
+    { index: 1, email: "gone@x.test", credits: 9 },
+  ];
+  const found: Account[] = [
+    { index: 1, email: "a@x.test", credits: 50, refreshTime: "4:59 AM", checkedAt: "t" },
+    { index: 0, email: "new@x.test", credits: 20 },
+  ];
+  assert.deepEqual(mergeAccounts(old, found), [
+    { index: 0, email: "new@x.test", credits: 20 },
+    { index: 1, email: "a@x.test", credits: 50, refreshTime: "4:59 AM", checkedAt: "t", exhaustedUntil: future },
+  ]);
 });

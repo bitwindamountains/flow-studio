@@ -87,7 +87,12 @@ async function closeAgentSettings(page: Page): Promise<void> {
 }
 
 // The balance only shows inside the account panel. That panel also holds "Sign out": never touch anything else in it.
-async function readCredits(page: Page): Promise<number | undefined> {
+export async function readCredits(page: Page): Promise<number | undefined> {
+  return (await readAccountPanel(page)).credits;
+}
+
+// Balance plus the panel's "Credits refresh daily at <h:mm AM/PM>" line (per account; see docs/flow-account-map.md).
+export async function readAccountPanel(page: Page): Promise<{ credits?: number; refresh?: string }> {
   await dismissOverlays(page);
   await scrollToTop(page);
   await page.getByRole("button", { name: "Account details" }).click({ timeout: 5000 });
@@ -95,7 +100,8 @@ async function readCredits(page: Page): Promise<number | undefined> {
   try {
     await link.waitFor({ state: "visible", timeout: 5000 });
     const n = Number((await link.innerText()).replace(/[^\d]/g, ""));
-    return Number.isNaN(n) ? undefined : n;
+    const refresh = await page.getByText(/Credits refresh/).first().textContent({ timeout: 2000 }).catch(() => null);
+    return { credits: Number.isNaN(n) ? undefined : n, refresh: refresh ?? undefined };
   } finally {
     await dismissOverlays(page);
     await pause(page, 300);
@@ -359,7 +365,7 @@ async function pickModel(page: Page, model: string): Promise<void> {
 }
 
 // Applies the scene settings and returns the credit cost Flow quotes for them.
-async function applySettings(page: Page, job: Job): Promise<number> {
+export async function applySettings(page: Page, job: Job): Promise<number> {
   const s = job.params;
   const framesMode = Boolean(s.first_frame || s.last_frame);
   await openSettings(page);
@@ -754,9 +760,9 @@ async function showAllMedia(page: Page, thorough = false): Promise<void> {
   await clearBackdrops(page);
 }
 
-async function ensureProjectGrid(page: Page): Promise<void> {
+export async function ensureProjectGrid(page: Page): Promise<void> {
   await dismissOverlays(page);
-  const root = page.url().match(/^https:\/\/[^/]+\/project\/[0-9a-f-]{36}/)?.[0];
+  const root = page.url().match(/^https:\/\/[^/]+(\/u\/\d+)?\/project\/[0-9a-f-]{36}/)?.[0];
   // Compared by path: an address ending in ?hl=en is already the grid.
   if (root && new URL(page.url()).pathname !== new URL(root).pathname) {
     await page.goto(inEnglish(root), { waitUntil: "domcontentloaded" });
@@ -768,7 +774,9 @@ async function ensureProjectGrid(page: Page): Promise<void> {
 }
 
 // Drives one generation in the Flow tab and returns the downloaded file paths.
-export async function runGeneration(job: Job): Promise<string[]> {
+// `afford` runs once the cost is quoted and before anything is uploaded; it may switch Google account and project
+// (see switcher.ts), after which it has already re-applied the settings on the new page.
+export async function runGeneration(job: Job, afford?: (page: Page) => Promise<unknown>): Promise<string[]> {
   const state = await getFlowState();
   if (!state.signedIn || !state.inProject) throw new Error(state.hint);
   const page = await getFlowPage();
@@ -786,6 +794,7 @@ export async function runGeneration(job: Job): Promise<string[]> {
       `Flow quotes ${job.credits} credits for this scene, above max_credits=${s.max_credits}. Nothing was generated. Raise max_credits or pick a cheaper model/duration/variants.`,
     );
   }
+  if (afford) await afford(page);
 
   if (s.first_frame) {
     await attachAsset(page, page.getByRole("button", { name: "Start", exact: true }), await uploadAsset(page, job, s.first_frame, "start"));

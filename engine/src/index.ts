@@ -324,6 +324,17 @@ server.registerTool(
 );
 
 server.registerTool(
+  "studio_accounts_refresh",
+  {
+    title: "Refresh Google accounts",
+    description: "Walk the Google accounts signed in to Flow (/u/0/, /u/1/ ...) and record each one's credits and daily refresh time, for automatic account switching. Read-only, spends 0 credits, refused while a job is running. Takes ~10 s per account. Returns [{ index, credits, refreshTime, exhaustedUntil }] (no emails).",
+    inputSchema: shapes.studio_accounts_refresh,
+    annotations: { readOnlyHint: true, openWorldHint: true },
+  },
+  () => reply(patient("studio_accounts_refresh", core.studio_accounts_refresh())),
+);
+
+server.registerTool(
   "studio_projects",
   {
     title: "List projects",

@@ -9,7 +9,8 @@ import { extractLastFrame } from "./chain.js";
 import { burnCaptions, captionedName, captionSetup, previewCaptions, transcribe } from "./captions.js";
 import { characterLook, createCharacter, downloadAsset, trashAsset, editCharacter, getFlowState, listAssets, listCharacters, rememberCharacter, runAgentBatch, runContinue, runEdit, runGeneration } from "./flow.js";
 import { JobQueue, type Job, type JobRunner, type SceneParams } from "./queue.js";
-import { HOME_DIR } from "./chrome.js";
+import { HOME_DIR, getFlowPage } from "./chrome.js";
+import { ACCOUNTS_FILE, discoverAccounts, ensureAffordable } from "./switcher.js";
 import { BIN, COMPUTER, IS_MAC, IS_WIN, moveToBin } from "./platform.js";
 import { PlanSchema, projDir, subDir, safeName, addReference, createSub, listProjects, notesRev, planRev, readNotes, readPlan, uploadsDir, within, writeNotes, writePlan } from "./projects.js";
 import { handoff } from "./handoff.js";
@@ -283,6 +284,7 @@ export const shapes = {
   studio_status: { project: z.string().min(1), sub: z.string().min(1) },
   studio_to_remotion: { project: z.string().min(1), sub: z.string().min(1), music: z.string().optional(), voiceover: z.string().optional() },
   studio_propose_lesson: { text: z.string().min(1), scope: z.string().default("global") },
+  studio_accounts_refresh: {},
   studio_notes_write: { project: z.string().min(1), sub: z.string().min(1), text: z.string(), rev: z.string().optional().describe("The notes `rev` from your last studio_notes_read; the write is refused if the notes changed since.") },
   studio_add_reference: { project: z.string().min(1), sub: z.string().optional().describe("Omit for a project-level reference."), path: z.string().describe("A file already uploaded through the studio page (inside the uploads folder).") },
 };
@@ -344,6 +346,7 @@ export interface Core {
   studio_status(a: Args<"studio_status">): Promise<unknown>;
   studio_to_remotion(a: Args<"studio_to_remotion">): Promise<unknown>;
   studio_propose_lesson(a: Args<"studio_propose_lesson">): Promise<unknown>;
+  studio_accounts_refresh(): Promise<unknown>;
 }
 
 // Flow's own voices: still offered when giving a character a voice, but narration no longer goes through Flow.
@@ -388,7 +391,7 @@ export class LocalCore implements Core {
     if (job.params.continue_from) return runContinue(job);
     if (job.params.agent_scenes) return runAgentBatch(job);
     if (job.params.edit_asset) return runEdit(job);
-    return runGeneration(job);
+    return runGeneration(job, (page) => ensureAffordable(page, job, ACCOUNTS_FILE, this.queue));
   };
 
   async status({ detailed }: Args<"status">) {
@@ -567,6 +570,20 @@ export class LocalCore implements Core {
   }
   // Only proposes: nothing reaches the rulebook until the owner approves in the studio page.
   async studio_propose_lesson({ text, scope }: Args<"studio_propose_lesson">) { return proposeLesson(text, scope); }
+  // Walks the signed-in Google accounts in the Flow tab (read-only, 0 credits). The queue is held meanwhile so no job
+  // drives the same tab; emails stay out of the answer.
+  async studio_accounts_refresh() {
+    if (this.queue.busy) throw new Error(BUSY);
+    const prior = this.queue.pausedReason;
+    const hold = !prior || prior.startsWith("pacing:");
+    if (hold) this.queue.pause("Reading Google accounts…");
+    try {
+      const accounts = await discoverAccounts(await getFlowPage(), ACCOUNTS_FILE);
+      return accounts.map(({ index, credits, refreshTime, exhaustedUntil }) => ({ index, credits, refreshTime, exhaustedUntil }));
+    } finally {
+      if (hold) this.queue.resume();
+    }
+  }
   async studio_plan_write({ project, sub, rev, plan }: Args<"studio_plan_write">) {
     const old = (() => { try { return readPlan(project, sub); } catch { return undefined; } })();
     if (rev !== (old?.rev ?? 0)) throw new Error("Plan changed since you read it — call studio_plan_read again.");
