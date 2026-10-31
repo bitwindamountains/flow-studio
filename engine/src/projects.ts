@@ -30,8 +30,8 @@ export const SceneSchema = z.object({
   // Engine-owned: where the storyboard still / clip sits in Flow (hashed account id + Flow project path).
   storyboard_flow: z.object({ account: z.string(), flowProject: z.string() }).optional(),
   clip_flow: z.object({ account: z.string(), flowProject: z.string() }).optional(),
-  // Engine-owned: the scene it continues from was redone, so this clip no longer joins it.
-  stale: z.boolean().optional(),
+  // Engine-owned: the scene whose clip changed after this clip was made, so this clip no longer joins it.
+  stale: z.number().int().optional(),
 });
 export const OptionSchema = z.object({ id: z.string().min(1), title: z.string(), hook: z.string(), story: z.string(), scenes: z.number().int().min(1) });
 export const PlanSchema = z.object({

@@ -276,11 +276,11 @@ async function chainSetup(sub: string, scenes: object[], fail?: (job: { params: 
   const { LocalCore } = await import("./core.js");
   const { createSub, readPlan, writePlan } = await import("./projects.js");
   const ran: { scene?: number; first_frame?: string }[] = [];
-  const runner = async (job: { params: { output_dir: string; file_stem: string; first_frame?: string; studio?: { scene: number } } }) => {
+  const runner = async (job: { params: { output_dir: string; file_stem: string; type: string; first_frame?: string; studio?: { scene: number } } }) => {
     ran.push({ scene: job.params.studio?.scene, first_frame: job.params.first_frame });
     if (fail?.(job)) throw new Error("Flow reported a failure");
     mkdirSync(job.params.output_dir, { recursive: true });
-    const f = join(job.params.output_dir, job.params.file_stem + ".mp4");
+    const f = join(job.params.output_dir, job.params.file_stem + (job.params.type === "image" ? ".png" : ".mp4"));
     writeFileSync(f, "x");
     return [f];
   };
@@ -356,24 +356,89 @@ test("generate: a source scene outside the batch uses its finished clip; none at
   assert.equal(n.core.queue.list().length, 0);
 });
 
-test("redo marks continuing scenes stale transitively; their own redo clears it", async () => {
+test("a finished redo marks continuing scenes stale transitively; a dependent redo on the new clip clears it", async () => {
   const { core, readPlan } = await chainSetup("ch6", [
     { n: 1, prompt: "x", clip: "C:\\c\\1.mp4" },
     { n: 2, prompt: "y", clip: "C:\\c\\2.mp4", start: cont(1) },
     { n: 3, prompt: "z", clip: "C:\\c\\3.mp4", start: cont(2) },
     { n: 4, prompt: "w", clip: "C:\\c\\4.mp4" },
   ]);
-  const r = (await core.studio_redo({ project: "P", sub: "ch6", scene: 1 } as never)) as { batch: string; stale: number[] };
-  assert.deepEqual(r.stale, [2, 3]);
-  assert.deepEqual(readPlan("P", "ch6").scenes.map((s) => s.stale), [undefined, true, true, undefined]);
-  // Redoing scene 2 before scene 1's redo finished chains to that live job, not to the old clip.
+  const r = (await core.studio_redo({ project: "P", sub: "ch6", scene: 1 } as never)) as { batch: string };
+  assert.deepEqual(readPlan("P", "ch6").scenes.map((s) => s.stale), [undefined, undefined, undefined, undefined]); // nothing changed yet
+  // Redoing scene 2 before scene 1's redo finished chains to that live job, not to the old clip, and is not cancelled.
   const r2 = (await core.studio_redo({ project: "P", sub: "ch6", scene: 2 } as never)) as { batch: string };
   const [j1, j2] = core.queue.list();
   assert.equal(j2.params.chain_from, j1.id);
   core.queue.approve({ batch: r.batch });
+  await until(() => readPlan("P", "ch6").scenes[2].stale !== undefined);
+  assert.deepEqual(readPlan("P", "ch6").scenes.map((s) => s.stale), [undefined, 1, 1, undefined]);
   core.queue.approve({ batch: r2.batch });
   await until(() => readPlan("P", "ch6").scenes[1].stale === undefined);
   const sc = readPlan("P", "ch6").scenes;
+  assert.equal(j2.status, "done");
   assert.equal(sc[1].stale, undefined);
-  assert.equal(sc[2].stale, true);
+  assert.equal(sc[2].stale, 2); // now scene 2 is the one that changed under it
+});
+
+test("a cancelled source redo leaves no stale marks", async () => {
+  const { core, readPlan } = await chainSetup("ch7", [{ n: 1, prompt: "x", clip: "C:\\c\\1.mp4" }, { n: 2, prompt: "y", clip: "C:\\c\\2.mp4", start: cont(1) }]);
+  const r = (await core.studio_redo({ project: "P", sub: "ch7", scene: 1 } as never)) as { job_id: string };
+  core.queue.cancel(r.job_id);
+  await new Promise((res) => setTimeout(res, 50));
+  assert.equal(readPlan("P", "ch7").scenes[1].stale, undefined);
+});
+
+test("a held dependent chained to the old clip is cancelled when the source redo finishes", async () => {
+  const { core, readPlan } = await chainSetup("ch8", [{ n: 1, prompt: "x", clip: "C:\\c\\1.mp4" }, { n: 2, prompt: "y", clip: "C:\\c\\2.mp4", start: cont(1) }]);
+  await core.studio_redo({ project: "P", sub: "ch8", scene: 2 } as never); // starts on the old clip of scene 1
+  const r = (await core.studio_redo({ project: "P", sub: "ch8", scene: 1 } as never)) as { batch: string };
+  const [dep] = core.queue.list();
+  assert.equal(dep.params.chain_file, "C:\\c\\1.mp4");
+  core.queue.approve({ batch: r.batch });
+  await until(() => dep.status === "cancelled");
+  assert.equal(dep.status, "cancelled");
+  assert.match(dep.note!, /Scene 1 changed after this was approved - redo it\. Nothing spent\./);
+  assert.equal(readPlan("P", "ch8").scenes[1].stale, 1);
+});
+
+test("a dependent finishing on an outdated source keeps stale", async () => {
+  const { core, readPlan } = await chainSetup("ch9", [{ n: 1, prompt: "x", clip: "C:\\c\\1.mp4" }, { n: 2, prompt: "y", clip: "C:\\c\\2.mp4", start: cont(1) }]);
+  const { writePlan } = await import("./projects.js");
+  const r = (await core.studio_redo({ project: "P", sub: "ch9", scene: 2 } as never)) as { batch: string };
+  // Scene 1's clip changes while this one is already under way (a running job is never cancelled).
+  const plan = readPlan("P", "ch9");
+  plan.scenes[0].clip = "C:\\c\\1-take-2.mp4";
+  plan.scenes[1].stale = 1;
+  writePlan(plan);
+  core.queue.approve({ batch: r.batch });
+  await until(() => readPlan("P", "ch9").scenes[1].clip !== "C:\\c\\2.mp4");
+  assert.equal(readPlan("P", "ch9").scenes[1].stale, 1);
+});
+
+test("regenerating a scene through studio_generate marks its dependents", async () => {
+  const { core, readPlan } = await chainSetup("ch10", [{ n: 1, prompt: "x", approved: true, clip: "C:\\c\\1.mp4" }, { n: 2, prompt: "y", clip: "C:\\c\\2.mp4", start: cont(1) }]);
+  const r = (await core.studio_generate({ project: "P", sub: "ch10" } as never)) as { batch: string; skipped_unapproved: number[] };
+  assert.deepEqual(r.skipped_unapproved, [2]);
+  core.queue.approve({ batch: r.batch });
+  await until(() => readPlan("P", "ch10").scenes[1].stale !== undefined);
+  assert.equal(readPlan("P", "ch10").scenes[1].stale, 1);
+});
+
+test("plan_write drops stale when a scene stops continuing; prepare does not repeat a reference still", async () => {
+  const { core, readPlan } = await chainSetup("ch11", [{ n: 1, prompt: "x" }, { n: 2, prompt: "y", start: cont(1) }]);
+  const { writePlan } = await import("./projects.js");
+  const plan = readPlan("P", "ch11");
+  plan.scenes[1].stale = 1;
+  writePlan(plan);
+  await write(core, "ch11", [{ n: 1, prompt: "x" }, { n: 2, prompt: "y", start: cont(1) }]);
+  assert.equal(readPlan("P", "ch11").scenes[1].stale, 1);
+  await write(core, "ch11", [{ n: 1, prompt: "x" }, { n: 2, prompt: "y" }]);
+  assert.equal(readPlan("P", "ch11").scenes[1].stale, undefined);
+
+  const prev = core.queue.add({ prompt: "a", type: "image", max_credits: 0, output_dir: join(home, "out", "ref"), file_stem: "scene-01" });
+  await until(() => prev.status === "done");
+  const still = prev.files[0];
+  const next = core.queue.add({ prompt: "b", type: "image", max_credits: 0, output_dir: join(home, "out", "ref"), file_stem: "scene-02", reference_from: prev.id, reference_images: [still] });
+  await until(() => next.status === "done");
+  assert.deepEqual(next.params.reference_images, [still]);
 });

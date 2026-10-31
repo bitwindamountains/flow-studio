@@ -407,7 +407,8 @@ export class LocalCore implements Core {
     if (reference_from) {
       const still = this.queue.get(reference_from)?.files.find((f) => /\.(jpe?g|png|webp)$/i.test(f));
       if (!still) throw new Error(`reference_previous: the previous scene (${reference_from}) produced no image.`);
-      job.params.reference_images = [still, ...(job.params.reference_images ?? [])].slice(0, 3);
+      const refs = job.params.reference_images ?? [];
+      if (!refs.includes(still)) job.params.reference_images = [still, ...refs].slice(0, 3);
     }
     const clip = chain_file ?? (chain_from ? this.queue.get(chain_from)?.files.find((f) => /\.(mp4|webm|mov)$/i.test(f)) : undefined);
     if ((chain_from || chain_file) && !clip) throw new Error(`chain_previous: the previous scene (${chain_from}) produced no video, so this scene was skipped.`);
@@ -668,13 +669,13 @@ export class LocalCore implements Core {
     const same = (a: unknown, b: unknown) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
     const scenes = plan.scenes.map((s) => {
       const o = old?.scenes.find((x) => x.n === s.n);
-      // storyboard/clip/stale are engine-owned (recorded by finished jobs and redos) and approved/kept are the owner's
+      // storyboard/clip/stale are engine-owned (recorded by finished jobs) and approved/kept are the owner's
       // (UI token routes): whatever the caller sends for them is ignored.
       const { approved: _a, kept: _k, storyboard: _s, clip: _c, storyboard_flow: _sf, clip_flow: _cf, stale: _st, ...rest } = s;
       if (!o) return rest;
       // Approval belongs to what was approved: changing the content clears it.
       const changed = s.prompt !== o.prompt || s.camera !== o.camera || s.frame_prompt !== o.frame_prompt || !same(s.start ?? { kind: "frame" }, o.start ?? { kind: "frame" }) || !same(s.references ?? [], o.references ?? []);
-      return { ...rest, storyboard: o.storyboard, clip: o.clip, storyboard_flow: o.storyboard_flow, clip_flow: o.clip_flow, stale: o.stale, approved: changed ? false : o.approved, kept: o.kept };
+      return { ...rest, storyboard: o.storyboard, clip: o.clip, storyboard_flow: o.storyboard_flow, clip_flow: o.clip_flow, stale: rest.start?.kind === "continue" ? o.stale : undefined, approved: changed ? false : o.approved, kept: o.kept };
     });
     writePlan({ ...plan, scenes, project: safeName(project), sub: safeName(sub) });
     return { ok: true, rev: planRev(project, sub) };
@@ -696,8 +697,45 @@ export class LocalCore implements Core {
     scene[st.kind] = job.files[0];
     scene[`${st.kind}_flow`] = job.flow;
     if (st.kind === "storyboard") scene.approved = false; // a new still must be looked at again
-    else delete scene.stale; // a fresh clip joins whatever its source is now
+    else this.clipChanged(plan, scene, job);
     writePlan(plan);
+  }
+
+  // The clip a chained job started from (its source job's video, or a finished clip on disk).
+  private chainedClip(j: Job): string | undefined {
+    return j.params.chain_file ?? (j.params.chain_from ? this.queue.get(j.params.chain_from)?.files.find((f) => /\.(mp4|webm|mov)$/i.test(f)) : undefined);
+  }
+
+  // A clip for scene N just finished (redo or generate). Only now has N really changed, so a cancelled or never-approved
+  // redo changes nothing. Mutates plan; the caller writes it.
+  private clipChanged(plan: ReturnType<typeof readPlan>, scene: ReturnType<typeof readPlan>["scenes"][number], job: Job): void {
+    // This clip joins its source only if it started on the source scene's current clip.
+    if (scene.start?.kind === "continue") {
+      const from = scene.start.from;
+      const current = plan.scenes.find((x) => x.n === from)?.clip;
+      if (current && this.chainedClip(job) === current) delete scene.stale;
+      else scene.stale = scene.stale ?? from;
+    } else delete scene.stale;
+    // Every scene continuing from this one (directly or through others) with a clip no longer joins it.
+    const deps: number[] = [];
+    for (let grew = true; grew;) {
+      grew = false;
+      for (const x of plan.scenes)
+        if (x.start?.kind === "continue" && (x.start.from === scene.n || deps.includes(x.start.from)) && !deps.includes(x.n)) { deps.push(x.n); grew = true; }
+    }
+    for (const x of plan.scenes) if (deps.includes(x.n) && x.clip) x.stale = scene.n;
+    // Held or queued clips of the direct dependents that would start on an older clip of this scene: cancelled before
+    // they spend anything (theirs in turn by the queue). Waiting on a newer, still-live take of this scene is fine.
+    const live = (id?: string) => { const s = id ? this.queue.get(id)?.status : undefined; return s === "held" || s === "queued" || s === "running"; };
+    for (const x of plan.scenes) {
+      if (x.start?.kind !== "continue" || x.start.from !== scene.n) continue;
+      for (const j of this.studioJobs(plan.project, plan.sub, "clip", x.n)) {
+        if (j.status !== "held" && j.status !== "queued") continue;
+        const p = j.params;
+        const outdated = (p.chain_file !== undefined && p.chain_file !== job.files[0]) || (p.chain_from !== undefined && p.chain_from !== job.id && !live(p.chain_from));
+        if (outdated) this.queue.cancel(j.id, `Scene ${scene.n} changed after this was approved - redo it. Nothing spent.`);
+      }
+    }
   }
 
   private studioJobs(project: string, sub: string, kind: "storyboard" | "clip", scene: number) {
@@ -808,18 +846,7 @@ export class LocalCore implements Core {
     const s = this.pickScenes(plan, [scene], false).picked[0];
     const batch = randomUUID().slice(0, 8);
     const job = this.clipJob(plan, s, { duration, resolution, model, prompt }, batch);
-    // Every scene continuing from this one (directly or through others) no longer joins it.
-    const stale: number[] = [];
-    for (let grew = true; grew;) {
-      grew = false;
-      for (const x of plan.scenes)
-        if (x.start?.kind === "continue" && (x.start.from === scene || stale.includes(x.start.from)) && !stale.includes(x.n)) { stale.push(x.n); grew = true; }
-    }
-    if (stale.length) {
-      for (const x of plan.scenes) if (stale.includes(x.n)) x.stale = true;
-      writePlan(plan);
-    }
-    return { batch, held: 1, job_id: job.id, quoted_max_credits: job.params.max_credits, ...(stale.length && { stale: stale.sort((p, q) => p - q) }) };
+    return { batch, held: 1, job_id: job.id, quoted_max_credits: job.params.max_credits };
   }
 
   async studio_status(a: Args<"studio_status">) {

@@ -44,12 +44,14 @@ else term.write("This window is not the owner's studio window. Close it and reop
 // ---- resizable split: terminal at the bottom, height remembered (storage may be blocked, so every access is guarded) ----
 const TERM_H = "flow-studio-term-height";
 function setTermHeight(px, save) {
-  const hgt = Math.round(Math.min(Math.max(120, px), innerHeight - 200));
+  const hgt = Math.round(Math.max(120, Math.min(px, innerHeight - 200)));
   $("term-wrap").style.height = hgt + "px";
   fit.fit();
   if (save) try { localStorage.setItem(TERM_H, String(hgt)); } catch { /* not remembered */ }
 }
 try { const saved = Number(localStorage.getItem(TERM_H)); if (saved > 0) setTermHeight(saved, false); } catch { /* default height */ }
+// A smaller window must not leave the terminal covering the tabs (or the tabs covering it).
+addEventListener("resize", () => setTermHeight($("term-wrap").offsetHeight, false));
 $("split").onpointerdown = (e) => {
   $("split").setPointerCapture(e.pointerId);
   $("split").onpointermove = (m) => setTermHeight(innerHeight - m.clientY, false);
@@ -273,7 +275,8 @@ function renderIdeas(el) {
       h("p", {}, h("i", {}, o.hook)), h("p", {}, o.story), h("small", { class: "dim" }, `${o.scenes} scene${o.scenes === 1 ? "" : "s"}`)))));
 }
 const isCont = (s) => s.start && s.start.kind === "continue";
-const staleNote = (s) => (s.stale && isCont(s) ? h("p", { class: "stale" }, `Scene ${s.start.from} changed - redo this scene`) : null);
+// stale holds the scene whose clip changed (it may sit further up the chain than start.from).
+const staleNote = (s) => (s.stale && isCont(s) ? h("p", { class: "stale" }, `Scene ${typeof s.stale === "number" ? s.stale : s.start.from} changed - redo this scene`) : null);
 
 // ---- Plan ----
 const lessonText = {};
@@ -363,6 +366,12 @@ const credits = (g) => (g.cost_unknown ? "credits unknown" : `up to ${g.max_cred
 const cancelJob = (id) => owner("/api/cancel-job", { id });
 // One approval card: what will be made (scene, prompt, first frame) before the owner pays for it. Prompts are
 // untrusted text, so they only ever go in as text nodes (h() appends strings as text).
+// The job a continue clip waits for: held ones come from /api/pending, the rest from studio_status (with its status).
+function sourceJob(id) {
+  for (const g of [...data.pending, ...data.other]) for (const j of g.jobs) if (j.id === id) return { status: j.status, batch: j.batch };
+  for (const x of (data.status && data.status.scenes) || []) for (const j of x.jobs) if (j.id === id) return j;
+  return null;
+}
 function heldCard(g) {
   const n = g.jobs.length;
   const items = g.jobs.map((j) => {
@@ -370,8 +379,10 @@ function heldCard(g) {
     // A continue clip's first frame does not exist yet: it is cut from its source clip's end just before it runs.
     const chained = j.params.chain_from || j.params.chain_file;
     const src = st && st.from ? "scene " + st.from : "the previous scene";
+    const from = j.params.chain_from && sourceJob(j.params.chain_from);
     const thumb = chained
-      ? h("p", { class: "dim" }, j.params.chain_file ? `First frame: last frame of ${src}'s finished clip.` : `First frame: last frame of ${src} (not visible until it finishes).`)
+      ? h("p", { class: "dim" }, j.params.chain_file || (from && from.status === "done") ? `First frame: last frame of ${src}'s finished clip.`
+        : `First frame: last frame of ${src} (not visible until it finishes).` + (from && from.status === "held" && from.batch !== g.batch ? ` Waits for ${src}'s clip in another batch, which also needs approval.` : ""))
       : j.params.first_frame && !j.params.first_frame.startsWith("asset:") ? h("img", { src: media(j.params.first_frame), alt: "First frame" + (st ? ", scene " + st.scene : "") }) : null;
     return h("div", { class: "card" }, h("b", {}, st ? `Scene ${st.scene}` : j.params.file_stem || j.id), thumb,
       h("small", {}, [j.params.model || "Flow's current model", j.params.duration ? j.params.duration + " s" : "", j.params.resolution || ""].filter(Boolean).join(" · ")),

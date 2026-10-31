@@ -199,10 +199,11 @@ export class JobQueue {
     return job;
   }
 
-  cancel(id: string): Job | undefined {
+  cancel(id: string, note?: string): Job | undefined {
     const job = this.jobs.get(id);
     if (job && (job.status === "queued" || job.status === "held")) {
       job.status = "cancelled";
+      if (note) job.note = [job.note, note].filter(Boolean).join(" · ");
       job.finishedAt = new Date().toISOString();
       this.dropDependents(job);
       this.save();

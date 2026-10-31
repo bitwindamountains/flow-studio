@@ -459,7 +459,7 @@ server.registerTool(
   "studio_redo",
   {
     title: "Redo clip",
-    description: "Queue one held video job for a scene as a new take; earlier clips are kept. Reuses the scene's own model/duration/resolution unless you pass duration, resolution or model. Optional new prompt. Every scene that continues from this one (directly or transitively) is marked stale (returned in `stale`) until it is redone too. project/sub are optional: when omitted they default to the project the owner selected in the studio (studio_current); with no selection the call fails.",
+    description: "Queue one held video job for a scene as a new take; earlier clips are kept. Reuses the scene's own model/duration/resolution unless you pass duration, resolution or model. Optional new prompt. When the new clip finishes, every scene that continues from this one (directly or transitively) is marked `stale` (the scene number that changed) until it is redone, and their held or queued clips that would start on the old clip are cancelled (nothing spent). project/sub are optional: when omitted they default to the project the owner selected in the studio (studio_current); with no selection the call fails.",
     inputSchema: shapes.studio_redo,
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },
