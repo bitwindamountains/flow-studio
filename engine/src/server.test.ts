@@ -26,13 +26,13 @@ test("server: /api/approve needs the UI token, never the flow token", async () =
   core.queue.approve = (t) => { seen.push(t); return []; };
   assert.equal(await srv.startServer(core, undefined, undefined, STUDIO), "owner");
   const base = `http://127.0.0.1:${port}`;
-  assert.match(await page({}), /const UI_TOKEN = "";/); // not a navigation: no token, and it is not used up
-  assert.match(await page({ "sec-fetch-site": "cross-site", "sec-fetch-mode": "navigate" }), /const UI_TOKEN = "";/);
+  assert.match(await page({}), /data-ui=""/); // not a navigation: no token, and it is not used up
+  assert.match(await page({ "sec-fetch-site": "cross-site", "sec-fetch-mode": "navigate" }), /data-ui=""/);
   const html = await page();
-  const flow = /const TOKEN = "(\w+)"/.exec(html)![1];
+  const flow = /data-token="(\w+)"/.exec(html)![1];
   const second = await page();
-  assert.match(second, /const UI_TOKEN = "";/);
-  const ui = /const UI_TOKEN = "(\w+)"/.exec(html)![1];
+  assert.match(second, /data-ui=""/);
+  const ui = /data-ui="(\w+)"/.exec(html)![1];
   const post = (h: Record<string, string>) =>
     fetch(base + "/api/approve", { method: "POST", headers: h, body: JSON.stringify({ batch: "A" }) });
 
@@ -63,7 +63,7 @@ test("pty websocket: rejects missing token, bad Origin, bad Host; one process pe
   const spawner = () => { spawned++; return fake as never; };
   assert.equal(await srv.startServer(new LocalCore(), spawner as never, undefined, STUDIO), "owner");
   const html = await page();
-  const ui = /const UI_TOKEN = "(\w+)"/.exec(html)![1];
+  const ui = /data-ui="(\w+)"/.exec(html)![1];
   const origin = `http://127.0.0.1:${port}`;
   const socks: { terminate(): void }[] = [];
   const open = (path: string, headers: Record<string, string>) => new Promise<string>((ok) => {
@@ -102,7 +102,7 @@ test("pty websocket: garbage frames and a throwing spawner never crash the serve
   const srv = await import("./server.js");
   assert.equal(await srv.startServer(new LocalCore(), (() => { throw new Error("no claude here"); }) as never, undefined, STUDIO), "owner");
   const html = await page();
-  const ui = /const UI_TOKEN = "(\w+)"/.exec(html)![1];
+  const ui = /data-ui="(\w+)"/.exec(html)![1];
   const ws = new WebSocket(`ws://127.0.0.1:${port}/pty?ui=${ui}`, { headers: { origin: `http://127.0.0.1:${port}` } });
   const first = await new Promise<string>((ok, bad) => { ws.once("message", (d) => ok(d.toString())); ws.once("error", bad); });
   assert.match(first, /could not start claude: no claude here/);
@@ -133,8 +133,8 @@ test("server: scene, cancel-job and remotion/dev need the UI token and do only t
   assert.equal(await srv.startServer(core, undefined, { answering: async () => up, start: (cwd: string, onEnd: (e?: Error) => void) => { starts.push(cwd); ended = onEnd; } }, STUDIO), "owner");
   const base = `http://127.0.0.1:${port}`;
   const html = await page();
-  const ui = /const UI_TOKEN = "(\w+)"/.exec(html)![1];
-  const flow = /const TOKEN = "(\w+)"/.exec(html)![1];
+  const ui = /data-ui="(\w+)"/.exec(html)![1];
+  const flow = /data-token="(\w+)"/.exec(html)![1];
   const post = (path: string, body: object, h: Record<string, string>) => fetch(base + path, { method: "POST", headers: h, body: JSON.stringify(body) });
   const scene = { project: "P", sub: "s", n: 1, approved: true, kept: true };
   for (const [path, body] of [["/api/scene", scene], ["/api/cancel-job", { id: held.id }], ["/api/remotion/dev", {}]] as const) {
@@ -152,6 +152,12 @@ test("server: scene, cancel-job and remotion/dev need the UI token and do only t
   assert.equal(await media(join(projDir("P"), "references", "a.png")), 200);
   writeFileSync(join(home, "outside.txt"), "x");
   assert.equal(await media(join(home, "outside.txt")), 404);
+  writeFileSync(join(projDir("P"), "references", "x.html"), "<script>1</script>");
+  assert.equal(await media(join(projDir("P"), "references", "x.html")), 404); // inside the projects folder, but not image/video/audio
+  const png = await fetch(`${base}/media?path=${encodeURIComponent(join(projDir("P"), "references", "a.png"))}&token=${flow}`);
+  assert.equal(png.headers.get("x-content-type-options"), "nosniff");
+  const root = await fetch(base + "/");
+  assert.match(root.headers.get("content-security-policy") ?? "", /frame-src http:\/\/localhost:3000/);
   assert.equal((await post("/api/scene", { ...scene, prompt: "hacked" }, h)).status, 200);
   const s1 = readPlan("P", "s").scenes[0];
   assert.deepEqual([s1.approved, s1.kept, s1.prompt], [true, true, "x"]);
@@ -183,8 +189,8 @@ test("server: Claude's (non-studio) server never hands out the UI token", async 
   const { LocalCore } = await import("./core.js");
   const srv = await import("./server.js");
   assert.equal(await srv.startServer(new LocalCore()), "owner");
-  assert.match(await page(), /const UI_TOKEN = "";/);
-  assert.match(await page(), /const TOKEN = "\w+";/);
+  assert.match(await page(), /data-ui=""/);
+  assert.match(await page(), /data-token="\w+"/);
   srv.lastServer!.closeAllConnections();
   await new Promise((r) => srv.lastServer!.close(r));
 });
@@ -194,7 +200,7 @@ test("media: bad ranges answer 416 and never crash the server", async () => {
   const srv = await import("./server.js");
   assert.equal(await srv.startServer(new LocalCore()), "owner");
   const html = await page();
-  const flow = /const TOKEN = "(\w+)"/.exec(html)![1];
+  const flow = /data-token="(\w+)"/.exec(html)![1];
   const dir = join(home, "out", "M");
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, "empty.mp4"), "");

@@ -13,6 +13,7 @@ import { HOME_DIR, getFlowPage } from "./chrome.js";
 import { ACCOUNTS_FILE, currentLocation, discoverAccounts, ensureAffordable, findSource, goToSource } from "./switcher.js";
 import { BIN, COMPUTER, IS_MAC, IS_WIN, moveToBin } from "./platform.js";
 import { PlanSchema, sceneSettings, projDir, subDir, safeName, addReference, createSub, listProjects, notesRev, planRev, readNotes, readPlan, uploadsDir, within, writeNotes, writePlan } from "./projects.js";
+import { readJson, writeJsonAtomic } from "./persist.js";
 import { handoff } from "./handoff.js";
 import { proposeLesson, readLessons } from "./lessons.js";
 import { TECHNIQUES, techniqueById } from "./techniques.js";
@@ -98,6 +99,10 @@ const captionFields = {
     ),
 };
 
+const PS = {
+  project: z.string().min(1).optional().describe("Optional: defaults to the project the owner selected in the studio (see studio_current)."),
+  sub: z.string().min(1).optional().describe("Optional: defaults to the sub-project the owner selected in the studio."),
+};
 export const shapes = {
   status: { detailed: z.boolean().default(true).describe("false skips the plan/credits readout, which briefly opens Flow's account panel.") },
   generate: {
@@ -268,30 +273,33 @@ export const shapes = {
   },
   techniques: { category: z.enum(["camera", "product", "transition", "image"]).optional() },
   studio_projects: {},
+  studio_select: { project: z.string().min(1), sub: z.string().min(1) },
+  studio_current: {},
+  studio_references: { ...PS },
   studio_new: { project: z.string().min(1), sub: z.string().min(1), aspect: z.enum(["9:16", "16:9"]).default("9:16") },
-  studio_plan_read: { project: z.string().min(1), sub: z.string().min(1) },
-  studio_plan_write: { project: z.string().min(1), sub: z.string().min(1), rev: z.number().int().min(0).describe("The plan `rev` from your last studio_plan_read."), plan: PlanSchema },
-  studio_notes_read: { project: z.string().min(1), sub: z.string().min(1) },
-  studio_storyboard: { project: z.string().min(1), sub: z.string().min(1), scenes: z.array(z.number().int()).optional() },
+  studio_plan_read: { ...PS },
+  studio_plan_write: { ...PS, rev: z.number().int().min(0).describe("The plan `rev` from your last studio_plan_read."), plan: PlanSchema },
+  studio_notes_read: { ...PS },
+  studio_storyboard: { ...PS, scenes: z.array(z.number().int()).optional() },
   studio_generate: {
-    project: z.string().min(1), sub: z.string().min(1), scenes: z.array(z.number().int()).optional(),
+    ...PS, scenes: z.array(z.number().int()).optional(),
     duration: z.union([z.literal(4), z.literal(6), z.literal(8), z.literal(10)]).optional().describe("Override for every scene. Normally leave unset: each scene's own duration/resolution/model (set in the plan) apply, then the default Omni 1.1 Flash / 8 s / 720p."),
     resolution: z.enum(["360p", "720p"]).optional(),
     model: z.string().optional(),
     max_credits: z.number().min(0).optional().describe("Cap per clip. Default depends on the model (Omni 20, Veo Lite 15, Fast 25, Quality 110)."),
   },
   studio_redo: {
-    project: z.string().min(1), sub: z.string().min(1), scene: z.number().int(), prompt: z.string().optional(),
+    ...PS, scene: z.number().int(), prompt: z.string().optional(),
     duration: z.union([z.literal(4), z.literal(6), z.literal(8), z.literal(10)]).optional().describe("Defaults to the scene's own duration."),
     resolution: z.enum(["360p", "720p"]).optional().describe("Defaults to the scene's own resolution."),
     model: z.string().optional().describe("Defaults to the scene's own model."),
   },
-  studio_status: { project: z.string().min(1), sub: z.string().min(1) },
-  studio_to_remotion: { project: z.string().min(1), sub: z.string().min(1), music: z.string().optional(), voiceover: z.string().optional() },
+  studio_status: { ...PS },
+  studio_to_remotion: { ...PS, music: z.string().optional(), voiceover: z.string().optional() },
   studio_propose_lesson: { text: z.string().min(1), scope: z.string().default("global") },
   studio_accounts_refresh: {},
-  studio_notes_write: { project: z.string().min(1), sub: z.string().min(1), text: z.string(), rev: z.string().optional().describe("The notes `rev` from your last studio_notes_read; the write is refused if the notes changed since.") },
-  studio_add_reference: { project: z.string().min(1), sub: z.string().optional().describe("Omit for a project-level reference."), path: z.string().describe("A file already uploaded through the studio page (inside the uploads folder).") },
+  studio_notes_write: { ...PS, text: z.string(), rev: z.string().optional().describe("The notes `rev` from your last studio_notes_read; the write is refused if the notes changed since.") },
+  studio_add_reference: { project: PS.project, sub: z.string().optional().describe("Omit for a project-level reference."), path: z.string().describe("A file already uploaded through the studio page (inside the uploads folder).") },
 };
 
 type Args<K extends keyof typeof shapes> = z.infer<z.ZodObject<(typeof shapes)[K]>>;
@@ -339,6 +347,9 @@ export interface Core {
   captions(a: Args<"captions">): Promise<unknown>;
   caption_setup(): Promise<unknown>;
   studio_projects(): Promise<unknown>;
+  studio_select(a: Args<"studio_select">): Promise<unknown>;
+  studio_current(): Promise<unknown>;
+  studio_references(a: Args<"studio_references">): Promise<unknown>;
   studio_add_reference(a: Args<"studio_add_reference">): Promise<unknown>;
   studio_new(a: Args<"studio_new">): Promise<unknown>;
   studio_plan_read(a: Args<"studio_plan_read">): Promise<unknown>;
@@ -373,12 +384,16 @@ export const VOICES = [
   { name: "Iapetus", description: "male, clear, mid-low pitch" },
 ];
 
+const SELECTION_FILE = join(HOME_DIR, "selection.json");
+const NO_SELECTION = "No project selected in the studio - ask the owner to pick one.";
 const READING_ACCOUNTS = "Reading Google accounts…";
 const BUSY = "A generation is running in the Flow tab. Wait for it to finish (flow_wait), then retry.";
 
 export class LocalCore implements Core {
   readonly queue: JobQueue;
+  private selection: { project: string; sub: string } | null;
   constructor(init: { runner?: JobRunner; queueOpts?: { file?: string; pauseMs?: [number, number] } } = {}) {
+    try { this.selection = readJson(SELECTION_FILE, null); } catch { this.selection = null; }
     this.queue = new JobQueue(init.runner ?? this.defaultRunner, { file: join(HOME_DIR, "queue.json"), onDone: (j) => this.recordDone(j), ...init.queueOpts });
   }
 
@@ -581,8 +596,33 @@ export class LocalCore implements Core {
   }
 
   async studio_projects() { return listProjects(); }
+  // What the owner has open in the studio page. Harmless, so any caller may set it; kept in memory and on disk.
+  async studio_select({ project, sub }: Args<"studio_select">) {
+    this.selection = { project: safeName(project), sub: safeName(sub) };
+    writeJsonAtomic(SELECTION_FILE, this.selection);
+    return { ok: true };
+  }
+  async studio_current() { return this.selection; }
+  private pickProject(p?: string): string {
+    const r = p ?? this.selection?.project;
+    if (!r) throw new Error(NO_SELECTION);
+    return r;
+  }
+  // Omitted project/sub fall back to the owner's selection (a sub only if it belongs to the same project).
+  private pick(a: { project?: string; sub?: string }): { project: string; sub: string } {
+    const project = this.pickProject(a.project);
+    const sub = a.sub ?? (this.selection?.project === project ? this.selection.sub : undefined);
+    if (!sub) throw new Error(NO_SELECTION);
+    return { project, sub };
+  }
+  async studio_references(a: Args<"studio_references">) {
+    const { project, sub } = this.pick(a);
+    const ls = (d: string) => (existsSync(d) ? readdirSync(d).filter((f) => statSync(join(d, f)).isFile()).map((f) => join(d, f)) : []);
+    return { project: ls(join(projDir(project), "references")), sub: ls(join(subDir(project, sub), "references")) };
+  }
   async studio_new({ project, sub, aspect }: Args<"studio_new">) { return { dir: createSub(project, sub, aspect) }; }
-  async studio_plan_read({ project, sub }: Args<"studio_plan_read">) {
+  async studio_plan_read(a: Args<"studio_plan_read">) {
+    const { project, sub } = this.pick(a);
     const lessons = readLessons();
     const note = lessons.length > 60 ? `Lessons has ${lessons.length} rules - propose merges to the owner.` : undefined;
     const plan = readPlan(project, sub);
@@ -605,7 +645,8 @@ export class LocalCore implements Core {
       if (hold && this.queue.pausedReason === READING_ACCOUNTS) this.queue.resume();
     }
   }
-  async studio_plan_write({ project, sub, rev, plan }: Args<"studio_plan_write">) {
+  async studio_plan_write(a: Args<"studio_plan_write">) {
+    const { project, sub } = this.pick(a); const { rev, plan } = a;
     const old = (() => { try { return readPlan(project, sub); } catch { return undefined; } })();
     if (rev !== (old?.rev ?? 0)) throw new Error("Plan changed since you read it — call studio_plan_read again.");
     const refRoots = [join(projDir(project), "references"), join(subDir(project, sub), "references"), uploadsDir()];
@@ -624,9 +665,11 @@ export class LocalCore implements Core {
     writePlan({ ...plan, scenes, project: safeName(project), sub: safeName(sub) });
     return { ok: true, rev: planRev(project, sub) };
   }
-  async studio_add_reference({ project, sub, path }: Args<"studio_add_reference">) { return { path: addReference(project, sub, path) }; }
-  async studio_notes_read({ project, sub }: Args<"studio_notes_read">) { const text = readNotes(project, sub); return { text, rev: notesRev(text) }; }
-  async studio_notes_write({ project, sub, text, rev }: Args<"studio_notes_write">) {
+  async studio_add_reference(a: Args<"studio_add_reference">) { return { path: addReference(this.pickProject(a.project), a.sub, a.path) }; }
+  async studio_notes_read(a: Args<"studio_notes_read">) {
+    const { project, sub } = this.pick(a); const text = readNotes(project, sub); return { text, rev: notesRev(text) }; }
+  async studio_notes_write(a: Args<"studio_notes_write">) {
+    const { project, sub } = this.pick(a); const { text, rev } = a;
     return { ok: true, rev: writeNotes(project, sub, text, rev) };
   }
 
@@ -693,7 +736,8 @@ export class LocalCore implements Core {
     return this.queue.add(params, { batch });
   }
 
-  async studio_storyboard({ project, sub, scenes }: Args<"studio_storyboard">) {
+  async studio_storyboard(a: Args<"studio_storyboard">) {
+    const { project, sub } = this.pick(a); const { scenes } = a;
     const plan = readPlan(project, sub);
     const dir = join(subDir(project, sub), "storyboard");
     const job_ids = this.pickScenes(plan, scenes, false).picked.map((s) => this.queue.add({
@@ -705,7 +749,8 @@ export class LocalCore implements Core {
     return { job_ids };
   }
 
-  async studio_generate({ project, sub, scenes, duration, resolution, model, max_credits }: Args<"studio_generate">) {
+  async studio_generate(a: Args<"studio_generate">) {
+    const { project, sub } = this.pick(a); const { scenes, duration, resolution, model, max_credits } = a;
     const plan = readPlan(project, sub);
     const { picked, skipped } = this.pickScenes(plan, scenes, true);
     const batch = randomUUID().slice(0, 8);
@@ -713,7 +758,8 @@ export class LocalCore implements Core {
     return { batch, held: picked.length, quoted_max_credits: jobs.reduce((n, j) => n + j.params.max_credits, 0), ...(skipped.length && { skipped_unapproved: skipped }) };
   }
 
-  async studio_redo({ project, sub, scene, prompt, duration, resolution, model }: Args<"studio_redo">) {
+  async studio_redo(a: Args<"studio_redo">) {
+    const { project, sub } = this.pick(a); const { scene, prompt, duration, resolution, model } = a;
     const plan = readPlan(project, sub);
     const s = this.pickScenes(plan, [scene], false).picked[0];
     const batch = randomUUID().slice(0, 8);
@@ -721,7 +767,8 @@ export class LocalCore implements Core {
     return { batch, held: 1, job_id: job.id, quoted_max_credits: job.params.max_credits };
   }
 
-  async studio_status({ project, sub }: Args<"studio_status">) {
+  async studio_status(a: Args<"studio_status">) {
+    const { project, sub } = this.pick(a);
     const plan = readPlan(project, sub);
     const mine = this.queue.list().filter((j) => j.params.studio?.project === plan.project && j.params.studio.sub === plan.sub);
     return {
@@ -733,7 +780,8 @@ export class LocalCore implements Core {
     };
   }
 
-  async studio_to_remotion({ project, sub, music, voiceover }: Args<"studio_to_remotion">) {
+  async studio_to_remotion(a: Args<"studio_to_remotion">) {
+    const { project, sub } = this.pick(a); const { music, voiceover } = a;
     const plan = readPlan(project, sub);
     for (const [what, p] of [["music", music], ["voiceover", voiceover]] as const)
       if (p && !within(p, [uploadsDir()])) throw new Error(`${what} must be a file uploaded through the studio page (inside the uploads folder).`);

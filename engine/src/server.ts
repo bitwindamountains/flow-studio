@@ -29,6 +29,7 @@ const VENDOR: Record<string, [string, string]> = {
   "app.js": [UI_DIR + "app.js", "text/javascript"],
 };
 const sameSecret = (a: string, b: string) => timingSafeEqual(createHash("sha256").update(a).digest(), createHash("sha256").update(b).digest());
+const CSP = `default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self'; connect-src 'self' ws://127.0.0.1:${PORT} ws://localhost:${PORT}; frame-src http://localhost:3000; base-uri 'none'; form-action 'none'`;
 const MAX_UPLOAD = 200 * 1024 * 1024;
 
 const MIME: Record<string, string> = {
@@ -64,17 +65,18 @@ const inside = (file: string, dir: string) => real(file).startsWith(real(dir) + 
 function sendMedia(req: IncomingMessage, res: ServerResponse, file: string) {
   if (!(inside(file, OUTPUT_ROOT) || inside(file, UPLOAD_DIR) || inside(file, CAPTIONS_DIR) || inside(file, projectsRoot())) || !existsSync(file)) return json(res, 404, { error: "Not found." });
   const { size } = statSync(file);
-  const type = MIME[extname(file).toLowerCase()] ?? "application/octet-stream";
+  const type = MIME[extname(file).toLowerCase()];
+  if (!type) return json(res, 404, { error: "Not found." }); // images, video and audio only: never HTML/JS/SVG
   const range = req.headers.range?.match(/bytes=(\d*)-(\d*)/);
   if (range) {
     const start = range[1] ? Number(range[1]) : 0;
     const end = range[2] ? Math.min(Number(range[2]), size - 1) : size - 1;
     // createReadStream with end < start throws asynchronously and used to take the whole process down.
     if (size === 0 || start >= size || start > end) return void res.writeHead(416, { "content-range": `bytes */${size}` }).end();
-    res.writeHead(206, { "content-type": type, "accept-ranges": "bytes", "content-range": `bytes ${start}-${end}/${size}`, "content-length": end - start + 1 });
+    res.writeHead(206, { "content-type": type, "x-content-type-options": "nosniff", "accept-ranges": "bytes", "content-range": `bytes ${start}-${end}/${size}`, "content-length": end - start + 1 });
     return void createReadStream(file, { start, end }).on("error", () => res.destroy()).pipe(res);
   }
-  res.writeHead(200, { "content-type": type, "accept-ranges": "bytes", "content-length": size });
+  res.writeHead(200, { "content-type": type, "x-content-type-options": "nosniff", "accept-ranges": "bytes", "content-length": size });
   createReadStream(file).on("error", () => res.destroy()).pipe(res);
 }
 
@@ -117,7 +119,7 @@ export async function startServer(core: Core, spawner = startClaude, remotion = 
       if (req.method === "GET" && url.pathname === "/api/health") return json(res, 200, { name: "flow-mcp" });
       if (url.pathname === "/favicon.ico") return void res.writeHead(204).end();
       if (req.method === "GET" && url.pathname === "/") {
-        res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "content-security-policy": CSP, "x-content-type-options": "nosniff" });
         // Only a top-level navigation the user typed or launched (not a fetch, frame or link from another page) can get it.
         const navigated = req.headers["sec-fetch-site"] === "none" && req.headers["sec-fetch-mode"] === "navigate";
         const give = navigated && !uiTokenGiven;

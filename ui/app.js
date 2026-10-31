@@ -1,4 +1,9 @@
-// Plain JS, no build step. TOKEN / UI_TOKEN come from the inline script in index.html.
+// Plain JS, no build step. The server writes the tokens into data attributes on <body> (no inline script, for the CSP).
+const TOKEN = document.body.dataset.token;
+// The one-shot UI token is only given on the first load. Keep it in this tab's sessionStorage so F5 does not lock the owner out.
+let UI_TOKEN = document.body.dataset.ui || "";
+try { if (UI_TOKEN) sessionStorage.setItem("flowUi", UI_TOKEN); else UI_TOKEN = sessionStorage.getItem("flowUi") || ""; } catch { /* no storage: reload shows the banner */ }
+addEventListener("beforeunload", (e) => { e.preventDefault(); e.returnValue = ""; });
 const $ = (id) => document.getElementById(id);
 const api = (method, body = {}) =>
   fetch("/api/" + method, { method: "POST", headers: { "x-flow-token": TOKEN }, body: JSON.stringify(body) }).then((r) => r.json());
@@ -14,7 +19,7 @@ let retry = 0;
 function connect() {
   if (!UI_TOKEN || (ws && ws.readyState <= 1)) return;
   ws = new WebSocket(`ws://${location.host}/pty?ui=${encodeURIComponent(UI_TOKEN)}`);
-  ws.onopen = () => { retry = 0; fit.fit(); send({ t: "r", cols: term.cols, rows: term.rows }); };
+  ws.onopen = () => { retry = 0; term.reset(); /* the server replays its scrollback */ fit.fit(); send({ t: "r", cols: term.cols, rows: term.rows }); };
   ws.onmessage = (e) => term.write(e.data);
   ws.onclose = () => {
     if (retry >= 6) return void term.write("\r\n[disconnected - press Restart to retry]\r\n");
@@ -80,7 +85,12 @@ async function loadProjects() {
     projects = Array.isArray(r) ? r : [];
     $("project").replaceChildren(...projects.map((p) => new Option(p.project, p.project)));
     fillSubs();
+    // Follow what the engine already has selected (e.g. after a reload) instead of defaulting to the first project.
+    const s = await api("studio_current");
+    const p = s && projects.find((x) => x.project === s.project);
+    if (p && p.subs.includes(s.sub)) { $("project").value = s.project; fillSubs(); $("sub").value = s.sub; }
   } catch { /* picker stays empty */ }
+  refresh(true);
 }
 $("project").onchange = () => { fillSubs(); refresh(true); };
 $("sub").onchange = () => refresh(true);
@@ -169,7 +179,10 @@ let sig = "";
 const notesText = {}, notesRev = {}, notesConflict = {};
 let notesTimer = null, notesSaving = false;
 const notesKey = () => cur().project + "/" + cur().sub;
+let reported = "";
 async function fetchData() {
+  // Tell the engine (and so Claude) which project/sub the owner has selected.
+  if (have() && reported !== notesKey()) { reported = notesKey(); api("studio_select", cur()).catch(() => { reported = ""; }); }
   const get = (p) => fetch(p, { headers: { "x-flow-token": TOKEN } }).then((r) => r.json());
   const pendingAll = await get("/api/pending");
   const groups = Array.isArray(pendingAll) ? pendingAll : [];
@@ -186,6 +199,8 @@ async function fetchData() {
       if (r && typeof r.text === "string") { notesText[key] = r.text; notesRev[key] = r.rev; }
     }
     data.notes = notesText[key] ?? null;
+    const refs = await api("studio_references", cur());
+    data.refs = refs && !refs.error ? [...refs.project, ...refs.sub] : [];
   }
   if (view === "generate") {
     const [st, ls] = await Promise.all([api("studio_status", cur()), get("/api/lessons")]);
@@ -277,7 +292,8 @@ function renderPlan(el) {
     kids.push(h("h3", {}, `${p.project} / ${p.sub}`), h("div", { class: "row" }, asp, sty),
       p.scenes.length ? h("table", {}, h("thead", {}, h("tr", {}, ...["#", "Prompt", "Camera", "Duration", "Model · res", "Caption", "Voiceover", "References"].map((t) => h("th", {}, t)))), h("tbody", {}, rows)) : h("p", {}, "No scenes yet. Ask Claude to write the plan."),
       h("h3", {}, "Notes"), notes, lostBox,
-      h("h3", {}, "Reference images"), picker("Add project reference", async (f) => { await apiOk("studio_add_reference", { project: c.project, path: await upload(f) }); }));
+      h("h3", {}, "Reference images"), picker("Add project reference", async (f) => { await apiOk("studio_add_reference", { project: c.project, path: await upload(f) }); }),
+      h("div", { class: "refs" }, (data.refs || []).map((r) => { const name = r.split(/[\\/]/).pop(); return h("figure", {}, h("img", { src: media(r), alt: name }), h("figcaption", {}, name)); })));
     if (p.lessons && p.lessons.length) kids.push(h("details", {}, h("summary", {}, `Lessons (${p.lessons.length})`), h("ul", {}, p.lessons.map((l) => h("li", {}, `[${l.scope}] ${l.text}`)))));
   }
   el.replaceChildren(...kids);

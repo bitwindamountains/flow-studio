@@ -40,6 +40,9 @@ export class RemoteCore implements Core {
   captions = (a: unknown) => call("captions", a);
   caption_setup = () => call("caption_setup", {});
   studio_projects = () => call("studio_projects", {});
+  studio_select = (a: unknown) => call("studio_select", a);
+  studio_current = () => call("studio_current", {});
+  studio_references = (a: unknown) => call("studio_references", a);
   studio_new = (a: unknown) => call("studio_new", a);
   studio_plan_read = (a: unknown) => call("studio_plan_read", a);
   studio_plan_write = (a: unknown) => call("studio_plan_write", a);

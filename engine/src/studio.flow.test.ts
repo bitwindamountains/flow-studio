@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { test } from "node:test";
 
 const home = mkdtempSync(join(tmpdir(), "fm-sf-"));
@@ -219,4 +219,24 @@ test("changing only video settings in plan_write keeps approved", async () => {
   const s = readPlan("P", "set3").scenes[0];
   assert.equal(s.approved, true);
   assert.equal(s.duration, 6);
+});
+
+test("studio selection: omitted project/sub follow it, none errors, survives a core reload; references are listed", async () => {
+  const { core } = await setup("sel", [{ n: 1, prompt: "x" }]);
+  const { LocalCore } = await import("./core.js");
+  assert.equal(await core.studio_current(), null);
+  await assert.rejects(core.studio_status({} as never), /No project selected in the studio - ask the owner to pick one\./);
+  await core.studio_select({ project: "P", sub: "sel" });
+  assert.deepEqual(await core.studio_current(), { project: "P", sub: "sel" });
+  assert.equal(((await core.studio_status({} as never)) as { scenes: unknown[] }).scenes.length, 1);
+  assert.equal(((await core.studio_plan_read({} as never)) as { sub: string }).sub, "sel");
+  const { projDir, subDir } = await import("./projects.js");
+  mkdirSync(join(subDir("P", "sel"), "references"), { recursive: true });
+  writeFileSync(join(projDir("P"), "references", "p.png"), "x");
+  writeFileSync(join(subDir("P", "sel"), "references", "s.png"), "x");
+  const refs = (await core.studio_references({} as never)) as { project: string[]; sub: string[] };
+  const names = (l: string[]) => l.map((f) => basename(f));
+  assert.ok(names(refs.project).includes("p.png"));
+  assert.deepEqual(names(refs.sub), ["s.png"]);
+  assert.deepEqual(await new LocalCore().studio_current(), { project: "P", sub: "sel" }); // persisted to selection.json
 });

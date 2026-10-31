@@ -61,8 +61,8 @@ test("resolve endpoint rejects x-flow-token", async () => {
   const base = `http://127.0.0.1:${port}`;
   // fetch() forces sec-fetch-mode "cors"; the UI token goes only to a real navigation, so use node:http.
   const html = await new Promise<string>((ok, bad) => get(base + "/", { agent: false, headers: { "sec-fetch-site": "none", "sec-fetch-mode": "navigate" } }, (r) => { let t = ""; r.on("data", (c) => (t += c)); r.on("end", () => ok(t)); }).on("error", bad));
-  const flow = /const TOKEN = "(\w+)"/.exec(html)![1];
-  const ui = /const UI_TOKEN = "(\w+)"/.exec(html)![1];
+  const flow = /data-token="(\w+)"/.exec(html)![1];
+  const ui = /data-ui="(\w+)"/.exec(html)![1];
   const p = L.proposeLesson("a rule");
   const post = (path: string, h: Record<string, string>, b: object) =>
     fetch(base + path, { method: "POST", headers: h, body: JSON.stringify(b) });

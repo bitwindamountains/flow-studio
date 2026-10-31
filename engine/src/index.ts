@@ -335,6 +335,28 @@ server.registerTool(
 );
 
 server.registerTool(
+  "studio_current",
+  {
+    title: "Current selection",
+    description: "The project and sub-project the owner has selected in the studio page: { project, sub }, or null if none. Work there; do not invent or create projects unless the owner asks. Returns immediately.",
+    inputSchema: shapes.studio_current,
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
+  () => reply(core.studio_current()),
+);
+
+server.registerTool(
+  "studio_references",
+  {
+    title: "List references",
+    description: "List the reference files (paths only) in the project's and sub-project's references folders. project/sub are optional: they default to the owner's selection. Returns { project: [...], sub: [...] } immediately.",
+    inputSchema: shapes.studio_references,
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
+  (args) => reply(core.studio_references(args)),
+);
+
+server.registerTool(
   "studio_projects",
   {
     title: "List projects",
@@ -360,7 +382,7 @@ server.registerTool(
   "studio_plan_read",
   {
     title: "Read a plan",
-    description: "Read plan.json. Returns the plan fields spread at top level (including `rev`, the plan's revision number) plus `lessons`. Returns immediately.",
+    description: "Read plan.json. Returns the plan fields spread at top level (including `rev`, the plan's revision number) plus `lessons`. Returns immediately. project/sub are optional: when omitted they default to the project the owner selected in the studio (studio_current); with no selection the call fails.",
     inputSchema: shapes.studio_plan_read,
     annotations: { readOnlyHint: true, openWorldHint: false },
   },
@@ -371,7 +393,7 @@ server.registerTool(
   "studio_plan_write",
   {
     title: "Write a plan",
-    description: "Replace plan.json after validating the whole plan; scene numbers `n` must be unique. Pass `rev` from your last studio_plan_read: if the plan changed since (the owner or a finished job wrote it), the write is refused - read again and redo your change. `storyboard` and `clip` are recorded by the engine and `approved`/`kept` by the owner: values you send for them are ignored. Scene `references` must be files inside the project's references folder or the uploads folder (add them with studio_add_reference). Returns { ok, rev } immediately.",
+    description: "Replace plan.json after validating the whole plan; scene numbers `n` must be unique. Pass `rev` from your last studio_plan_read: if the plan changed since (the owner or a finished job wrote it), the write is refused - read again and redo your change. `storyboard` and `clip` are recorded by the engine and `approved`/`kept` by the owner: values you send for them are ignored. Scene `references` must be files inside the project's references folder or the uploads folder (add them with studio_add_reference). Returns { ok, rev } immediately. project/sub are optional: when omitted they default to the project the owner selected in the studio (studio_current); with no selection the call fails.",
     inputSchema: shapes.studio_plan_write,
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },
@@ -382,7 +404,7 @@ server.registerTool(
   "studio_notes_read",
   {
     title: "Read notes",
-    description: "Read a sub-project's notes.md. Returns { text, rev } immediately; pass that rev to studio_notes_write.",
+    description: "Read a sub-project's notes.md. Returns { text, rev } immediately; pass that rev to studio_notes_write. project/sub are optional: when omitted they default to the project the owner selected in the studio (studio_current); with no selection the call fails.",
     inputSchema: shapes.studio_notes_read,
     annotations: { readOnlyHint: true, openWorldHint: false },
   },
@@ -393,7 +415,7 @@ server.registerTool(
   "studio_notes_write",
   {
     title: "Write notes",
-    description: "Replace a sub-project's notes.md. Pass `rev` from your last studio_notes_read: if the owner changed the notes since, the write is refused - read again and merge. Returns { ok, rev } immediately.",
+    description: "Replace a sub-project's notes.md. Pass `rev` from your last studio_notes_read: if the owner changed the notes since, the write is refused - read again and merge. Returns { ok, rev } immediately. project/sub are optional: when omitted they default to the project the owner selected in the studio (studio_current); with no selection the call fails.",
     inputSchema: shapes.studio_notes_write,
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },
@@ -415,7 +437,7 @@ server.registerTool(
   "studio_storyboard",
   {
     title: "Storyboard",
-    description: "Queue one free image job per plan scene (all scenes if none given) into storyboard/. No approval needed. Returns job_ids; check studio_status.",
+    description: "Queue one free image job per plan scene (all scenes if none given) into storyboard/. No approval needed. Returns job_ids; check studio_status. project/sub are optional: when omitted they default to the project the owner selected in the studio (studio_current); with no selection the call fails.",
     inputSchema: shapes.studio_storyboard,
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },
@@ -426,7 +448,7 @@ server.registerTool(
   "studio_generate",
   {
     title: "Generate clips",
-    description: "Queue one video job per approved scene (or the given scenes - unapproved ones are skipped and listed in skipped_unapproved), held until the owner approves in the Studio page. Each scene uses its own model/duration/resolution from the plan (set them per scene in studio_plan_write; defaults Omni 1.1 Flash, 8 s, 720p; Veo is fixed at 8 s). Returns batch, held and quoted_max_credits. Never spends credits by itself.",
+    description: "Queue one video job per approved scene (or the given scenes - unapproved ones are skipped and listed in skipped_unapproved), held until the owner approves in the Studio page. Each scene uses its own model/duration/resolution from the plan (set them per scene in studio_plan_write; defaults Omni 1.1 Flash, 8 s, 720p; Veo is fixed at 8 s). Returns batch, held and quoted_max_credits. Never spends credits by itself. project/sub are optional: when omitted they default to the project the owner selected in the studio (studio_current); with no selection the call fails.",
     inputSchema: shapes.studio_generate,
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },
@@ -437,7 +459,7 @@ server.registerTool(
   "studio_redo",
   {
     title: "Redo clip",
-    description: "Queue one held video job for a scene as a new take; earlier clips are kept. Reuses the scene's own model/duration/resolution unless you pass duration, resolution or model. Optional new prompt.",
+    description: "Queue one held video job for a scene as a new take; earlier clips are kept. Reuses the scene's own model/duration/resolution unless you pass duration, resolution or model. Optional new prompt. project/sub are optional: when omitted they default to the project the owner selected in the studio (studio_current); with no selection the call fails.",
     inputSchema: shapes.studio_redo,
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },
@@ -448,7 +470,7 @@ server.registerTool(
   "studio_status",
   {
     title: "Studio status",
-    description: "Compact per-scene summary: storyboard, clip, jobs with status/credits/notes, and pending approvals. The only call needed after a batch.",
+    description: "Compact per-scene summary: storyboard, clip, jobs with status/credits/notes, and pending approvals. The only call needed after a batch. project/sub are optional: when omitted they default to the project the owner selected in the studio (studio_current); with no selection the call fails.",
     inputSchema: shapes.studio_status,
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
   },
@@ -459,7 +481,7 @@ server.registerTool(
   "studio_add_reference",
   {
     title: "Add a reference image",
-    description: "Copy a file the owner uploaded in the studio page (inside the uploads folder) into the project's references (or the sub-project's when sub is given).",
+    description: "Copy a file the owner uploaded in the studio page (inside the uploads folder) into the project's references (or the sub-project's when sub is given). project/sub are optional: when omitted they default to the project the owner selected in the studio (studio_current); with no selection the call fails.",
     inputSchema: shapes.studio_add_reference,
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },
@@ -470,7 +492,7 @@ server.registerTool(
   "studio_to_remotion",
   {
     title: "Hand off to Remotion",
-    description: "Copy the kept clips (a.mp4, b.mp4...), optional music (bg.mp3) and voiceover (vo.mp3) plus captions.json into a fresh public/<project>/<letter>/ folder of the owner's Remotion project. Returns { dir, files, style }. Then follow the owner's remotion-style-a / -b skill to add a NEW <Composition> in src/Root.tsx; transcribe vo.mp3 for word timing if present.",
+    description: "Copy the kept clips (a.mp4, b.mp4...), optional music (bg.mp3) and voiceover (vo.mp3) plus captions.json into a fresh public/<project>/<letter>/ folder of the owner's Remotion project. Returns { dir, files, style }. Then follow the owner's remotion-style-a / -b skill to add a NEW <Composition> in src/Root.tsx; transcribe vo.mp3 for word timing if present. project/sub are optional: when omitted they default to the project the owner selected in the studio (studio_current); with no selection the call fails.",
     inputSchema: shapes.studio_to_remotion,
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },
