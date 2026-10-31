@@ -21,3 +21,14 @@ test("one generate call of 3 video scenes is one approval group; wait does not b
   assert.equal(w.finished, false);
   assert.equal(w.awaiting_approval.length, 3);
 });
+
+test("an edit whose source clip Flow Studio did not make is refused before the browser is touched", async () => {
+  const { LocalCore } = await import("./core.js");
+  const core = new LocalCore({ queueOpts: { pauseMs: [0, 0] } });
+  const r = (await core.edit({ project: "p", asset: "Someone else's clip", prompt: "make it red" } as never)) as { jobs: { id: string }[] };
+  core.queue.approve({ job_id: r.jobs[0].id });
+  await new Promise((res) => setTimeout(res, 50));
+  const job = core.queue.get(r.jobs[0].id)!;
+  assert.equal(job.status, "failed");
+  assert.match(job.error!, /does not know which Google account holds .*Nothing was generated\./);
+});

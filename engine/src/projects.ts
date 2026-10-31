@@ -19,6 +19,9 @@ export const SceneSchema = z.object({
   approved: z.boolean().optional(),
   clip: z.string().optional(),
   kept: z.boolean().optional(),
+  // Engine-owned: where the storyboard still / clip sits in Flow (hashed account id + Flow project path).
+  storyboard_flow: z.object({ account: z.string(), flowProject: z.string() }).optional(),
+  clip_flow: z.object({ account: z.string(), flowProject: z.string() }).optional(),
 });
 export const PlanSchema = z.object({
   project: z.string().min(1),

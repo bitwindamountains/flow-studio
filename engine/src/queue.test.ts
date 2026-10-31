@@ -111,12 +111,25 @@ test("restore re-holds approved (queued) paid jobs, keeps their batch; free jobs
   assert.equal(q.get("vid")?.status, "held");
 });
 
-test("a Requeue error puts the job back in line and leaves the queue paused", async () => {
-  const q = new JobQueue(async () => { q.pause("All accounts are out of credits."); throw new Requeue("no account left"); }, { pauseMs: [0, 0] });
+test("a Requeue error puts the job back in line, adds to its note, and the note is cleaned when it runs again", async () => {
+  let calls = 0;
+  const q = new JobQueue(async (j) => {
+    if (++calls === 1) {
+      j.note = "acct 0 out of credits → acct 1";
+      q.pause("All accounts are out of credits.");
+      throw new Requeue("All accounts are out of credits.");
+    }
+    return ["f.png"];
+  }, { pauseMs: [0, 0] });
   const job = q.add(params("image"));
   await new Promise((r) => setTimeout(r, 20));
   assert.equal(job.status, "queued");
   assert.equal(job.attempts, 0);
   assert.equal(job.finishedAt, undefined);
+  assert.equal(job.note, "acct 0 out of credits → acct 1 · All accounts are out of credits.");
   assert.equal(q.pausedReason, "All accounts are out of credits.");
+  q.resume();
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(job.status, "done");
+  assert.equal(job.note, "acct 0 out of credits → acct 1");
 });

@@ -10,7 +10,7 @@ import { burnCaptions, captionedName, captionSetup, previewCaptions, transcribe 
 import { characterLook, createCharacter, downloadAsset, trashAsset, editCharacter, getFlowState, listAssets, listCharacters, rememberCharacter, runAgentBatch, runContinue, runEdit, runGeneration } from "./flow.js";
 import { JobQueue, type Job, type JobRunner, type SceneParams } from "./queue.js";
 import { HOME_DIR, getFlowPage } from "./chrome.js";
-import { ACCOUNTS_FILE, discoverAccounts, ensureAffordable } from "./switcher.js";
+import { ACCOUNTS_FILE, currentLocation, discoverAccounts, ensureAffordable, findSource, goToSource } from "./switcher.js";
 import { BIN, COMPUTER, IS_MAC, IS_WIN, moveToBin } from "./platform.js";
 import { PlanSchema, projDir, subDir, safeName, addReference, createSub, listProjects, notesRev, planRev, readNotes, readPlan, uploadsDir, within, writeNotes, writePlan } from "./projects.js";
 import { handoff } from "./handoff.js";
@@ -368,6 +368,7 @@ export const VOICES = [
   { name: "Iapetus", description: "male, clear, mid-low pitch" },
 ];
 
+const READING_ACCOUNTS = "Reading Google accounts…";
 const BUSY = "A generation is running in the Flow tab. Wait for it to finish (flow_wait), then retry.";
 
 export class LocalCore implements Core {
@@ -376,8 +377,22 @@ export class LocalCore implements Core {
     this.queue = new JobQueue(init.runner ?? this.defaultRunner, { file: join(HOME_DIR, "queue.json"), onDone: (j) => this.recordDone(j), ...init.queueOpts });
   }
 
+  // Every finished job records where its media sits in Flow (account + project), so edits and continues find it.
   private defaultRunner: JobRunner = async (job) => {
+    const files = await this.runJob(job);
+    job.flow = await currentLocation(await getFlowPage()).catch(() => undefined);
+    return files;
+  };
+
+  private async runJob(job: Job): Promise<string[]> {
     const { chain_from, reference_from } = job.params;
+    // An edit or continue must run where its source clip is: a same-named clip in another account would be edited
+    // (and charged) instead. Unknown source -> refused before the browser is touched.
+    const source = job.params.edit_asset ?? job.params.continue_from;
+    if (source) {
+      const loc = findSource(this.queue.list(), source);
+      await goToSource(await getFlowPage(), loc, ACCOUNTS_FILE);
+    }
     if (reference_from) {
       const still = this.queue.get(reference_from)?.files.find((f) => /\.(jpe?g|png|webp)$/i.test(f));
       if (!still) throw new Error(`reference_previous: the previous scene (${reference_from}) produced no image.`);
@@ -392,7 +407,7 @@ export class LocalCore implements Core {
     if (job.params.agent_scenes) return runAgentBatch(job);
     if (job.params.edit_asset) return runEdit(job);
     return runGeneration(job, (page) => ensureAffordable(page, job, ACCOUNTS_FILE, this.queue));
-  };
+  }
 
   async status({ detailed }: Args<"status">) {
     const flow = await getFlowState(detailed && !this.queue.busy);
@@ -576,12 +591,13 @@ export class LocalCore implements Core {
     if (this.queue.busy) throw new Error(BUSY);
     const prior = this.queue.pausedReason;
     const hold = !prior || prior.startsWith("pacing:");
-    if (hold) this.queue.pause("Reading Google accounts…");
+    if (hold) this.queue.pause(READING_ACCOUNTS);
     try {
       const accounts = await discoverAccounts(await getFlowPage(), ACCOUNTS_FILE);
       return accounts.map(({ index, credits, refreshTime, exhaustedUntil }) => ({ index, credits, refreshTime, exhaustedUntil }));
     } finally {
-      if (hold) this.queue.resume();
+      // Something else (all accounts out of credits, the owner) may have paused it meanwhile: leave that pause alone.
+      if (hold && this.queue.pausedReason === READING_ACCOUNTS) this.queue.resume();
     }
   }
   async studio_plan_write({ project, sub, rev, plan }: Args<"studio_plan_write">) {
@@ -594,11 +610,11 @@ export class LocalCore implements Core {
       const o = old?.scenes.find((x) => x.n === s.n);
       // storyboard/clip are engine-owned (recorded by finished jobs) and approved/kept are the owner's (UI token routes):
       // whatever the caller sends for them is ignored.
-      const { approved: _a, kept: _k, storyboard: _s, clip: _c, ...rest } = s;
+      const { approved: _a, kept: _k, storyboard: _s, clip: _c, storyboard_flow: _sf, clip_flow: _cf, ...rest } = s;
       if (!o) return rest;
       // Approval belongs to what was approved: changing the content clears it.
       const changed = s.prompt !== o.prompt || s.camera !== o.camera || JSON.stringify(s.references ?? []) !== JSON.stringify(o.references ?? []);
-      return { ...rest, storyboard: o.storyboard, clip: o.clip, approved: changed ? false : o.approved, kept: o.kept };
+      return { ...rest, storyboard: o.storyboard, clip: o.clip, storyboard_flow: o.storyboard_flow, clip_flow: o.clip_flow, approved: changed ? false : o.approved, kept: o.kept };
     });
     writePlan({ ...plan, scenes, project: safeName(project), sub: safeName(sub) });
     return { ok: true, rev: planRev(project, sub) };
@@ -616,6 +632,7 @@ export class LocalCore implements Core {
     const scene = plan.scenes.find((x) => x.n === st.scene);
     if (!scene) return;
     scene[st.kind] = job.files[0];
+    scene[`${st.kind}_flow`] = job.flow;
     if (st.kind === "storyboard") scene.approved = false; // a new still must be looked at again
     writePlan(plan);
   }

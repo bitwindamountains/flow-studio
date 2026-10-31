@@ -53,9 +53,14 @@ export interface Job {
   failed_scenes?: number[];
   // Jobs added together share a batch, so one OK from the owner releases them all.
   batch?: string;
+  // Where the finished media sits in Flow: the Google account (hashed email, see switcher.accountId) and the Flow
+  // project path. Edits and continues of it must run there.
+  flow?: FlowLocation;
   createdAt: string;
   finishedAt?: string;
 }
+
+export type FlowLocation = { account: string; flowProject: string };
 
 export type JobRunner = (job: Job) => Promise<string[]>;
 
@@ -80,6 +85,8 @@ export class JobQueue {
   private pauseMs: [number, number];
   // Only the process that owns the Flow tab restores and writes the shared file (see restore()).
   private active = false;
+  // Note text a Requeue added, removed again when the job next runs (it no longer describes the job).
+  private requeueNote = new Map<string, string>();
 
   constructor(private runner: JobRunner, private opts: { file?: string; pauseMs?: [number, number]; onDone?: (job: Job) => void } = {}) {
     this.pauseMs = opts.pauseMs ?? [PAUSE_MIN_MS, PAUSE_MAX_MS];
@@ -217,6 +224,11 @@ export class JobQueue {
         if (job.status !== "queued" || this.manualPause) continue;
         job.status = "running";
         job.attempts++;
+        const stale = this.requeueNote.get(job.id);
+        if (stale) {
+          job.note = job.note?.split(" · ").filter((p) => p !== stale).join(" · ") || undefined;
+          this.requeueNote.delete(job.id);
+        }
         this.save();
         try {
           job.files = await this.runner(job);
@@ -227,7 +239,8 @@ export class JobQueue {
           if (err instanceof Requeue) {
             job.status = "queued";
             job.attempts--;
-            job.note = err.message;
+            job.note = [job.note, err.message].filter(Boolean).join(" · ");
+            this.requeueNote.set(job.id, err.message);
             if (!this.manualPause) this.manualPause = err.message; // never spin on a job that cannot run
             this.save();
             continue; // the loop's pause check stops here until resume()
