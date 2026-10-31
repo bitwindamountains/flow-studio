@@ -13,9 +13,10 @@ process.env.FLOW_MCP_OUTPUT = join(home, "out");
 const STUDIO = { studio: true };
 // A top-level navigation, the only request that may receive the one-shot UI token. fetch() forces sec-fetch-mode
 // to "cors", so this goes through node:http (with a throwaway agent, since earlier tests' servers are closed).
+let lastSet = ""; // Set-Cookie of the latest page() call
 const NAV = { "sec-fetch-site": "none", "sec-fetch-mode": "navigate" };
 const page = (headers: Record<string, string> = NAV) => new Promise<string>((ok, bad) =>
-  get(`http://127.0.0.1:${port}/`, { agent: false, headers }, (r) => { let t = ""; r.on("data", (c) => (t += c)); r.on("end", () => ok(t)); }).on("error", bad));
+  get(`http://127.0.0.1:${port}/`, { agent: false, headers }, (r) => { lastSet = String(r.headers["set-cookie"] ?? ""); let t = ""; r.on("data", (c) => (t += c)); r.on("end", () => ok(t)); }).on("error", bad));
 
 test("server: /api/approve needs the UI token, never the flow token", async () => {
   const { LocalCore } = await import("./core.js");
@@ -26,20 +27,32 @@ test("server: /api/approve needs the UI token, never the flow token", async () =
   core.queue.approve = (t) => { seen.push(t); return []; };
   assert.equal(await srv.startServer(core, undefined, undefined, STUDIO), "owner");
   const base = `http://127.0.0.1:${port}`;
-  assert.match(await page({}), /data-ui=""/); // not a navigation: no token, and it is not used up
-  assert.match(await page({ "sec-fetch-site": "cross-site", "sec-fetch-mode": "navigate" }), /data-ui=""/);
+  assert.match(await page({}), /data-owner=""/); // not a navigation: no token, and it is not used up
+  assert.match(await page({ "sec-fetch-site": "cross-site", "sec-fetch-mode": "navigate" }), /data-owner=""/);
   const html = await page();
   const flow = /data-token="(\w+)"/.exec(html)![1];
+  const firstSet = lastSet;
+  assert.match(firstSet, /HttpOnly/); assert.match(firstSet, /SameSite=Strict/); assert.match(firstSet, /Path=\//);
+  assert.doesNotMatch(firstSet, /Expires|Max-Age/i);
+  const ui = /fs_ui=([0-9a-f]+)/.exec(firstSet)![1];
+  assert.ok(!html.includes(ui)); // the owner token is never in the page
+  assert.match(html, /data-owner="1"/);
   const second = await page();
-  assert.match(second, /data-ui=""/);
-  const ui = /data-ui="(\w+)"/.exec(html)![1];
+  assert.match(second, /data-owner=""/);
+  assert.equal(lastSet, ""); // the cookie is given once
+  // A reload resends the cookie: still the owner, no new Set-Cookie.
+  const reloaded = await page({ cookie: "fs_ui=" + ui });
+  assert.match(reloaded, /data-owner="1"/); assert.equal(lastSet, ""); assert.ok(!reloaded.includes(ui));
+  assert.match(await page({ cookie: "fs_ui=wrong" }), /data-owner=""/);
   const post = (h: Record<string, string>) =>
     fetch(base + "/api/approve", { method: "POST", headers: h, body: JSON.stringify({ batch: "A" }) });
 
   assert.equal((await post({ "x-flow-token": flow })).status, 403);
   assert.equal((await post({})).status, 403);
-  assert.equal((await post({ "x-ui-token": "" })).status, 403);
-  assert.equal((await post({ "x-flow-token": flow, "x-ui-token": ui })).status, 200);
+  assert.equal((await post({ cookie: "fs_ui=", origin: base })).status, 403);
+  assert.equal((await post({ "x-flow-token": flow, cookie: "fs_ui=" + ui, origin: "http://evil.example" })).status, 403); // right cookie, wrong Origin
+  assert.equal((await post({ "x-flow-token": flow, cookie: "fs_ui=" + ui })).status, 403); // right cookie, no Origin
+  assert.equal((await post({ "x-flow-token": flow, cookie: "fs_ui=" + ui, origin: base })).status, 200);
   assert.deepEqual(seen, [{ batch: "A", job_id: undefined }]);
   assert.equal((await fetch(base + "/api/pending", { headers: { "x-flow-token": flow } })).status, 200);
   assert.equal((await fetch(base + "/api/pending")).status, 401);
@@ -63,7 +76,7 @@ test("pty websocket: rejects missing token, bad Origin, bad Host; one process pe
   const spawner = () => { spawned++; return fake as never; };
   assert.equal(await srv.startServer(new LocalCore(), spawner as never, undefined, STUDIO), "owner");
   const html = await page();
-  const ui = /data-ui="(\w+)"/.exec(html)![1];
+  const ui = /fs_ui=([0-9a-f]+)/.exec(lastSet)![1];
   const origin = `http://127.0.0.1:${port}`;
   const socks: { terminate(): void }[] = [];
   const open = (path: string, headers: Record<string, string>) => new Promise<string>((ok) => {
@@ -73,14 +86,15 @@ test("pty websocket: rejects missing token, bad Origin, bad Host; one process pe
     ws.on("unexpected-response", (_q, r) => { ok("rejected:" + r.statusCode); ws.terminate(); });
     ws.on("error", () => {});
   });
+  const cookie = "fs_ui=" + ui;
   assert.match(await open("/pty", { origin }), /rejected:403/);
-  assert.match(await open("/pty?ui=wrong", { origin }), /rejected:403/);
-  assert.match(await open(`/pty?ui=${ui}`, { origin: "http://evil.example" }), /rejected:403/);
-  assert.match(await open(`/pty?ui=${ui}`, {}), /rejected:403/);
-  assert.match(await open(`/pty?ui=${ui}`, { origin, host: "evil.example" }), /rejected:403/);
+  assert.match(await open("/pty", { origin, cookie: "fs_ui=wrong" }), /rejected:403/);
+  assert.match(await open("/pty", { origin: "http://evil.example", cookie }), /rejected:403/);
+  assert.match(await open("/pty", { cookie }), /rejected:403/);
+  assert.match(await open("/pty", { origin, cookie, host: "evil.example" }), /rejected:403/);
   assert.equal(spawned, 0);
-  const a = await open(`/pty?ui=${ui}`, { origin });
-  const b = await open(`/pty?ui=${ui}`, { origin });
+  const a = await open("/pty", { origin, cookie });
+  const b = await open("/pty", { origin, cookie });
   assert.match(a, /^open:/); assert.match(b, /^open:/);
   assert.equal(spawned, 1);
   // fetch cannot set Host; node:http can.
@@ -102,8 +116,8 @@ test("pty websocket: garbage frames and a throwing spawner never crash the serve
   const srv = await import("./server.js");
   assert.equal(await srv.startServer(new LocalCore(), (() => { throw new Error("no claude here"); }) as never, undefined, STUDIO), "owner");
   const html = await page();
-  const ui = /data-ui="(\w+)"/.exec(html)![1];
-  const ws = new WebSocket(`ws://127.0.0.1:${port}/pty?ui=${ui}`, { headers: { origin: `http://127.0.0.1:${port}` } });
+  const ui = /fs_ui=([0-9a-f]+)/.exec(lastSet)![1];
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/pty`, { headers: { origin: `http://127.0.0.1:${port}`, cookie: "fs_ui=" + ui } });
   const first = await new Promise<string>((ok, bad) => { ws.once("message", (d) => ok(d.toString())); ws.once("error", bad); });
   assert.match(first, /could not start claude: no claude here/);
   for (const g of ["null", "5", "[]", "garbage", '"x"', '{"t":"i","d":1}', '{"t":"r","cols":-1}']) ws.send(g);
@@ -133,19 +147,20 @@ test("server: scene, cancel-job and remotion/dev need the UI token and do only t
   assert.equal(await srv.startServer(core, undefined, { answering: async () => up, start: (cwd: string, onEnd: (e?: Error) => void) => { starts.push(cwd); ended = onEnd; } }, STUDIO), "owner");
   const base = `http://127.0.0.1:${port}`;
   const html = await page();
-  const ui = /data-ui="(\w+)"/.exec(html)![1];
+  const ui = /fs_ui=([0-9a-f]+)/.exec(lastSet)![1];
   const flow = /data-token="(\w+)"/.exec(html)![1];
   const post = (path: string, body: object, h: Record<string, string>) => fetch(base + path, { method: "POST", headers: h, body: JSON.stringify(body) });
   const scene = { project: "P", sub: "s", n: 1, approved: true, kept: true };
   for (const [path, body] of [["/api/scene", scene], ["/api/cancel-job", { id: held.id }], ["/api/remotion/dev", {}]] as const) {
     assert.equal((await post(path, body, {})).status, 403, path);
     assert.equal((await post(path, body, { "x-flow-token": flow })).status, 403, path);
-    assert.equal((await post(path, body, { "x-ui-token": "wrong" })).status, 403, path);
+    assert.equal((await post(path, body, { cookie: "fs_ui=wrong", origin: base })).status, 403, path);
+    assert.equal((await post(path, body, { cookie: "fs_ui=" + ui, origin: "http://evil.example" })).status, 403, path);
   }
   assert.equal(readPlan("P", "s").scenes[0].approved, undefined);
   assert.equal(core.queue.list().find((j) => j.id === held.id)!.status, "held");
   assert.deepEqual(starts, []);
-  const h = { "x-ui-token": ui };
+  const h = { cookie: "fs_ui=" + ui, origin: base };
   const media = (p: string) => fetch(`${base}/media?path=${encodeURIComponent(p)}&token=${flow}`).then((r) => r.status);
   const { projDir } = await import("./projects.js");
   writeFileSync(join(projDir("P"), "references", "a.png"), "x");
@@ -189,7 +204,7 @@ test("server: Claude's (non-studio) server never hands out the UI token", async 
   const { LocalCore } = await import("./core.js");
   const srv = await import("./server.js");
   assert.equal(await srv.startServer(new LocalCore()), "owner");
-  assert.match(await page(), /data-ui=""/);
+  assert.match(await page(), /data-owner=""/);
   assert.match(await page(), /data-token="\w+"/);
   srv.lastServer!.closeAllConnections();
   await new Promise((r) => srv.lastServer!.close(r));

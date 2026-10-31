@@ -612,7 +612,7 @@ export class LocalCore implements Core {
   private pick(a: { project?: string; sub?: string }): { project: string; sub: string } {
     const project = this.pickProject(a.project);
     const sub = a.sub ?? (this.selection?.project === project ? this.selection.sub : undefined);
-    if (!sub) throw new Error(NO_SELECTION);
+    if (!sub) throw new Error(`sub is required for project ${project} (the studio has ${this.selection ? this.selection.project + "/" + this.selection.sub : "nothing"} selected).`);
     return { project, sub };
   }
   async studio_references(a: Args<"studio_references">) {

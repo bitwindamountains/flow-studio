@@ -228,6 +228,7 @@ test("studio selection: omitted project/sub follow it, none errors, survives a c
   await assert.rejects(core.studio_status({} as never), /No project selected in the studio - ask the owner to pick one\./);
   await core.studio_select({ project: "P", sub: "sel" });
   assert.deepEqual(await core.studio_current(), { project: "P", sub: "sel" });
+  await assert.rejects(core.studio_status({ project: "Other" } as never), /sub is required for project Other (the studio has P/sel selected)/);
   assert.equal(((await core.studio_status({} as never)) as { scenes: unknown[] }).scenes.length, 1);
   assert.equal(((await core.studio_plan_read({} as never)) as { sub: string }).sub, "sel");
   const { projDir, subDir } = await import("./projects.js");

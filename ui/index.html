@@ -52,7 +52,7 @@
   .frame { width: 100%; height: 70vh; border: 1px solid var(--line); background: #fff; margin-top: 8px; }
 </style>
 </head>
-<body data-token="__FLOW_TOKEN__" data-ui="__UI_TOKEN__">
+<body data-token="__FLOW_TOKEN__" data-owner="__OWNER__">
 <header>
   <h1>Flow Studio</h1>
   <select id="project" aria-label="Project"></select>
@@ -60,7 +60,7 @@
   <div id="chips" aria-label="Accounts"></div>
 </header>
 <div id="health" hidden></div>
-<div id="reloaded" hidden>This window was reloaded, so it can't approve credits. Close it and reopen Flow Studio.cmd.</div>
+<div id="reloaded" hidden>This window is not the owner's studio window, so it can't approve credits. Close it and reopen Flow Studio.cmd.</div>
 <div id="toast" role="status" hidden></div>
 <main>
   <div id="term-wrap">

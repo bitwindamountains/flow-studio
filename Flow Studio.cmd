@@ -35,6 +35,6 @@ exit /b 1
 :up
 set "BRAVE=%ProgramFiles%\BraveSoftware\Brave-Browser\Application\brave.exe"
 if not exist "%BRAVE%" set "BRAVE=%LOCALAPPDATA%\BraveSoftware\Brave-Browser\Application\brave.exe"
-if exist "%BRAVE%" ( start "" "%BRAVE%" --app=http://127.0.0.1:%FLOW_MCP_PORT% ) else ( start "" http://127.0.0.1:%FLOW_MCP_PORT% )
+if exist "%BRAVE%" ( start "" "%BRAVE%" --user-data-dir="D:\flow-studio\data\ui-profile" --no-first-run --app=http://127.0.0.1:%FLOW_MCP_PORT% ) else ( start "" http://127.0.0.1:%FLOW_MCP_PORT% )
 rem Keep this window open while the server runs.
 pause

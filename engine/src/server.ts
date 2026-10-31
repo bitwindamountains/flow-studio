@@ -104,6 +104,13 @@ export async function startServer(core: Core, spawner = startClaude, remotion = 
   const uiToken = randomBytes(24).toString("hex");
   let uiTokenGiven = !opts.studio; // handed out once: the first page load is the owner's studio tab; later loads get an empty token
 
+  const hasOwnerCookie = (req: IncomingMessage) => {
+    const m = /(?:^|;\s*)fs_ui=([0-9a-f]+)/.exec(req.headers.cookie ?? "");
+    return !!m && sameSecret(m[1], uiToken);
+  };
+  // Owner routes and /pty: the cookie, plus our exact origin (CSRF, on top of SameSite=Strict).
+  const ownerOk = (req: IncomingMessage) => req.headers.origin === `http://${req.headers.host}` && hasOwnerCookie(req);
+
   const allowedHosts = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`]);
 
   const hub = new PtyHub(spawner);
@@ -119,13 +126,16 @@ export async function startServer(core: Core, spawner = startClaude, remotion = 
       if (req.method === "GET" && url.pathname === "/api/health") return json(res, 200, { name: "flow-mcp" });
       if (url.pathname === "/favicon.ico") return void res.writeHead(204).end();
       if (req.method === "GET" && url.pathname === "/") {
-        res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "content-security-policy": CSP, "x-content-type-options": "nosniff" });
-        // Only a top-level navigation the user typed or launched (not a fetch, frame or link from another page) can get it.
+        // Only a top-level navigation the user typed or launched (not a fetch, frame or link from another page) can get the
+        // owner cookie. It is HttpOnly session-only: never in the page, never in storage, resent by the browser on reload.
         const navigated = req.headers["sec-fetch-site"] === "none" && req.headers["sec-fetch-mode"] === "navigate";
         const give = navigated && !uiTokenGiven;
-        const html = readFileSync(STUDIO_HTML, "utf8").replace("__FLOW_TOKEN__", token).replace("__UI_TOKEN__", give ? uiToken : "");
         if (give) uiTokenGiven = true;
-        return res.end(html);
+        const owner = give || hasOwnerCookie(req);
+        const headers: Record<string, string> = { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "content-security-policy": CSP, "x-content-type-options": "nosniff" };
+        if (give) headers["set-cookie"] = `fs_ui=${uiToken}; HttpOnly; SameSite=Strict; Path=/`;
+        res.writeHead(200, headers);
+        return res.end(readFileSync(STUDIO_HTML, "utf8").replace("__FLOW_TOKEN__", token).replace("__OWNER__", owner ? "1" : ""));
       }
 
       if (req.method === "GET" && url.pathname.startsWith("/vendor/")) {
@@ -144,14 +154,14 @@ export async function startServer(core: Core, spawner = startClaude, remotion = 
       }
 
       if (req.method === "POST" && url.pathname === "/api/approve") {
-        if (!sameSecret(String(req.headers["x-ui-token"] ?? ""), uiToken)) return json(res, 403, { error: "Only the studio page can approve credit spending." });
+        if (!ownerOk(req)) return json(res, 403, { error: "Only the studio page can approve credit spending." });
         if (!(core instanceof LocalCore)) return json(res, 404, { error: "Not found." });
         const body = JSON.parse((await readBody(req, 64 * 1024)).toString() || "{}") as { batch?: string; job_id?: string };
         return json(res, 200, { approved: core.queue.approve({ batch: body.batch, job_id: body.job_id }).map((j) => j.id) });
       }
 
       if (req.method === "POST" && (url.pathname === "/api/lessons/resolve" || url.pathname === "/api/lessons/add")) {
-        if (!sameSecret(String(req.headers["x-ui-token"] ?? ""), uiToken)) return json(res, 403, { error: "Only the studio page can change lessons." });
+        if (!ownerOk(req)) return json(res, 403, { error: "Only the studio page can change lessons." });
         const b = JSON.parse((await readBody(req, 64 * 1024)).toString() || "{}") as { id?: string; action?: "save" | "discard"; editedText?: string; text?: string; scope?: string };
         if (url.pathname.endsWith("/add")) addLesson(b.text ?? "", b.scope);
         else resolveLesson(b.id ?? "", b.action === "save" ? "save" : "discard", b.editedText);
@@ -160,7 +170,7 @@ export async function startServer(core: Core, spawner = startClaude, remotion = 
 
       // Owner-only actions: UI token, never the flow token Claude can read.
       if (req.method === "POST" && ["/api/scene", "/api/cancel-job", "/api/remotion/dev"].includes(url.pathname)) {
-        if (!sameSecret(String(req.headers["x-ui-token"] ?? ""), uiToken)) return json(res, 403, { error: "Only the studio page can do this." });
+        if (!ownerOk(req)) return json(res, 403, { error: "Only the studio page can do this." });
         if (url.pathname === "/api/remotion/dev") {
           if (remotionStarted) return json(res, 200, { started: false });
           if (!existsSync(remotionRoot())) return json(res, 400, { error: "Remotion project folder not found." });
@@ -224,11 +234,11 @@ export async function startServer(core: Core, spawner = startClaude, remotion = 
     }
   });
 
-  // Host + Origin + UI token, all checked before the upgrade; claude is only spawned after attach() on an accepted socket.
+  // Host + Origin + owner cookie, all checked before the upgrade; claude is only spawned after attach() on an accepted socket.
   server.on("upgrade", (req, socket, head) => {
     const url = new URL(req.url ?? "/", "http://x");
     const ok = url.pathname === "/pty" && allowedHosts.has(req.headers.host ?? "") &&
-      allowedOrigins.has(req.headers.origin ?? "") && sameSecret(url.searchParams.get("ui") ?? "", uiToken);
+      allowedOrigins.has(req.headers.origin ?? "") && ownerOk(req);
     if (!ok) { socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n"); return; }
     wss.handleUpgrade(req, socket, head, (ws) => hub.attach(ws));
   });

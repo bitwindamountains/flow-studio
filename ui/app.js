@@ -1,9 +1,10 @@
 // Plain JS, no build step. The server writes the tokens into data attributes on <body> (no inline script, for the CSP).
 const TOKEN = document.body.dataset.token;
-// The one-shot UI token is only given on the first load. Keep it in this tab's sessionStorage so F5 does not lock the owner out.
-let UI_TOKEN = document.body.dataset.ui || "";
-try { if (UI_TOKEN) sessionStorage.setItem("flowUi", UI_TOKEN); else UI_TOKEN = sessionStorage.getItem("flowUi") || ""; } catch { /* no storage: reload shows the banner */ }
-addEventListener("beforeunload", (e) => { e.preventDefault(); e.returnValue = ""; });
+document.body.removeAttribute("data-token"); // keep the API token out of the DOM once read
+// The owner session is an HttpOnly cookie the server sets on the first load; the page only learns whether it is the owner.
+const OWNER = document.body.dataset.owner === "1";
+// Reload is harmless now (the cookie is resent); only warn when typed notes are not saved yet.
+addEventListener("beforeunload", (e) => { if (notesTimer || notesSaving || Object.keys(notesConflict).length) { e.preventDefault(); e.returnValue = ""; } });
 const $ = (id) => document.getElementById(id);
 const api = (method, body = {}) =>
   fetch("/api/" + method, { method: "POST", headers: { "x-flow-token": TOKEN }, body: JSON.stringify(body) }).then((r) => r.json());
@@ -17,8 +18,8 @@ let ws;
 const send = (m) => ws && ws.readyState === 1 && ws.send(JSON.stringify(m));
 let retry = 0;
 function connect() {
-  if (!UI_TOKEN || (ws && ws.readyState <= 1)) return;
-  ws = new WebSocket(`ws://${location.host}/pty?ui=${encodeURIComponent(UI_TOKEN)}`);
+  if (!OWNER || (ws && ws.readyState <= 1)) return;
+  ws = new WebSocket(`ws://${location.host}/pty`);
   ws.onopen = () => { retry = 0; term.reset(); /* the server replays its scrollback */ fit.fit(); send({ t: "r", cols: term.cols, rows: term.rows }); };
   ws.onmessage = (e) => term.write(e.data);
   ws.onclose = () => {
@@ -37,8 +38,8 @@ $("restart").onclick = () => {
 };
 addEventListener("resize", () => fit.fit());
 fit.fit();
-if (UI_TOKEN) connect();
-else term.write("This window has no session token. Close it and reopen Flow Studio.\r\n");
+if (OWNER) connect();
+else term.write("This window is not the owner's studio window. Close it and reopen Flow Studio.cmd.\r\n");
 
 // ---- resizable split ----
 $("split").onpointerdown = (e) => {
@@ -103,7 +104,6 @@ fetch("/api/health/flow", { headers: { "x-flow-token": TOKEN } }).then((r) => (r
 
 // ======== step views ========
 // Plan text is written by Claude: every string goes in through textContent, never innerHTML.
-const OWNER = !!UI_TOKEN;
 if (!OWNER) $("reloaded").hidden = false;
 function h(tag, props, ...kids) {
   const e = document.createElement(tag);
@@ -125,7 +125,7 @@ const btn = (label, onclick, owner = false, cls = "") => {
     b.disabled = owner && !OWNER;
     refresh(true);
   };
-  if (owner && !OWNER) { b.disabled = true; b.title = "This window was reloaded and cannot approve credits."; }
+  if (owner && !OWNER) { b.disabled = true; b.title = "This window is not the owner window and cannot approve credits."; }
   return b;
 };
 const cur = () => ({ project: $("project").value, sub: $("sub").value });
@@ -136,7 +136,7 @@ const apiOk = async (method, body) => {
   return r;
 };
 const owner = async (path, body) => {
-  const r = await (await fetch(path, { method: "POST", headers: { "x-ui-token": UI_TOKEN, "x-flow-token": TOKEN }, body: JSON.stringify(body) })).json();
+  const r = await (await fetch(path, { method: "POST", headers: { "x-flow-token": TOKEN }, body: JSON.stringify(body) })).json();
   if (r && r.error) throw new Error(r.error);
   return r;
 };
@@ -179,10 +179,26 @@ let sig = "";
 const notesText = {}, notesRev = {}, notesConflict = {};
 let notesTimer = null, notesSaving = false;
 const notesKey = () => cur().project + "/" + cur().sub;
-let reported = "";
+let reported = "", seen = "";
 async function fetchData() {
-  // Tell the engine (and so Claude) which project/sub the owner has selected.
-  if (have() && reported !== notesKey()) { reported = notesKey(); api("studio_select", cur()).catch(() => { reported = ""; }); }
+  // Tell the engine (and so Claude) which project/sub the owner has selected; awaited so the next read is not stale.
+  if (have() && reported !== notesKey()) {
+    const k = notesKey();
+    try { await api("studio_select", cur()); reported = seen = k; } catch { /* retried on the next poll */ }
+  }
+  // If Claude (or anything else) changed the selection, say so and follow it rather than fight it.
+  const s = await api("studio_current").catch(() => null);
+  if (s && s.project && s.sub) {
+    const k = s.project + "/" + s.sub;
+    if (k !== seen) {
+      seen = k;
+      const p = projects.find((x) => x.project === s.project);
+      if (p && p.subs.includes(s.sub) && k !== notesKey()) {
+        $("project").value = s.project; fillSubs(); $("sub").value = s.sub; reported = k;
+        toast("Claude switched the project to " + k);
+      }
+    }
+  }
   const get = (p) => fetch(p, { headers: { "x-flow-token": TOKEN } }).then((r) => r.json());
   const pendingAll = await get("/api/pending");
   const groups = Array.isArray(pendingAll) ? pendingAll : [];
@@ -325,7 +341,9 @@ function heldCard(g) {
     const thumb = j.params.first_frame && !j.params.first_frame.startsWith("asset:") ? h("img", { src: media(j.params.first_frame), alt: "First frame" + (st ? ", scene " + st.scene : "") }) : null;
     return h("div", { class: "card" }, h("b", {}, st ? `Scene ${st.scene}` : j.params.file_stem || j.id), thumb, h("small", {}, [j.params.model || "Flow's current model", j.params.duration ? j.params.duration + " s" : "", j.params.resolution || ""].filter(Boolean).join(" · ")), h("p", {}, j.params.prompt || ""));
   });
+  const where = [...new Set(g.jobs.map((j) => (j.params.studio ? j.params.studio.project + "/" + j.params.studio.sub : "not a studio job")))].join(", ");
   return h("div", { class: "held" },
+    h("b", {}, "Project: " + where),
     btn(`Approve ${n} clip${n === 1 ? "" : "s"} · ${credits(g)}`, () => owner("/api/approve", g.batch ? { batch: g.batch } : { job_id: g.jobs[0].id }), true, "big"),
     " ", btn("Cancel", async () => { for (const j of g.jobs) await cancelJob(j.id); }, true),
     h("div", { class: "grid" }, items));

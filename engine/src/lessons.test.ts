@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { get } from "node:http";
+let lastSet = "";
 import { test } from "node:test";
 
 const home = mkdtempSync(join(tmpdir(), "fm-lessons-"));
@@ -60,19 +61,19 @@ test("resolve endpoint rejects x-flow-token", async () => {
   assert.equal(await srv.startServer(new LocalCore(), undefined, undefined, { studio: true }), "owner");
   const base = `http://127.0.0.1:${port}`;
   // fetch() forces sec-fetch-mode "cors"; the UI token goes only to a real navigation, so use node:http.
-  const html = await new Promise<string>((ok, bad) => get(base + "/", { agent: false, headers: { "sec-fetch-site": "none", "sec-fetch-mode": "navigate" } }, (r) => { let t = ""; r.on("data", (c) => (t += c)); r.on("end", () => ok(t)); }).on("error", bad));
+  const html = await new Promise<string>((ok, bad) => get(base + "/", { agent: false, headers: { "sec-fetch-site": "none", "sec-fetch-mode": "navigate" } }, (r) => { lastSet = String(r.headers["set-cookie"] ?? ""); let t = ""; r.on("data", (c) => (t += c)); r.on("end", () => ok(t)); }).on("error", bad));
   const flow = /data-token="(\w+)"/.exec(html)![1];
-  const ui = /data-ui="(\w+)"/.exec(html)![1];
+  const ui = /fs_ui=([0-9a-f]+)/.exec(lastSet)![1];
   const p = L.proposeLesson("a rule");
   const post = (path: string, h: Record<string, string>, b: object) =>
     fetch(base + path, { method: "POST", headers: h, body: JSON.stringify(b) });
   const r = { id: p.id, action: "save" };
   assert.equal((await post("/api/lessons/resolve", { "x-flow-token": flow }, r)).status, 403);
-  assert.equal((await post("/api/lessons/resolve", { "x-ui-token": "" }, r)).status, 403);
+  assert.equal((await post("/api/lessons/resolve", { cookie: "fs_ui=", origin: base }, r)).status, 403);
   assert.equal((await post("/api/lessons/add", { "x-flow-token": flow }, { text: "t" })).status, 403);
   assert.deepEqual(L.readLessons(), []);
-  assert.equal((await post("/api/lessons/resolve", { "x-ui-token": ui }, r)).status, 200);
-  assert.equal((await post("/api/lessons/add", { "x-ui-token": ui }, { text: "mine", scope: "model:omni" })).status, 200);
+  assert.equal((await post("/api/lessons/resolve", { cookie: "fs_ui=" + ui, origin: base }, r)).status, 200);
+  assert.equal((await post("/api/lessons/add", { cookie: "fs_ui=" + ui, origin: base }, { text: "mine", scope: "model:omni" })).status, 200);
   assert.equal(L.readLessons().length, 2);
   const g = await (await fetch(base + "/api/lessons", { headers: { "x-flow-token": flow } })).json() as { lessons: unknown[]; pending: unknown[] };
   assert.equal(g.lessons.length, 2);
