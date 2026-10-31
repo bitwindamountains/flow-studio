@@ -412,6 +412,17 @@ export class LocalCore implements Core {
     }
     const clip = chain_file ?? (chain_from ? this.queue.get(chain_from)?.files.find((f) => /\.(mp4|webm|mov)$/i.test(f)) : undefined);
     if ((chain_from || chain_file) && !clip) throw new Error(`chain_previous: the previous scene (${chain_from}) produced no video, so this scene was skipped.`);
+    // Last line of defence for plan scenes (retry, transitive chains, anything not foreseen): a continue clip only
+    // starts from its source scene's current, non-stale clip. Throws before the browser is touched - nothing spent.
+    const st = job.params.studio;
+    if (clip && st?.kind === "clip") {
+      const plan = readPlan(st.project, st.sub);
+      const me = plan.scenes.find((s) => s.n === st.scene);
+      const start = me?.start;
+      const from = start?.kind === "continue" ? plan.scenes.find((s) => s.n === start.from) : undefined;
+      if (from && (from.clip !== clip || from.stale))
+        throw new Error(`Scene ${from.n} changed after this was approved - redo scene ${st.scene}. Nothing spent.`);
+    }
     if (clip) job.params.first_frame = await this.lastFrame(clip);
   }
 

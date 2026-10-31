@@ -442,3 +442,21 @@ test("plan_write drops stale when a scene stops continuing; prepare does not rep
   await until(() => next.status === "done");
   assert.deepEqual(next.params.reference_images, [still]);
 });
+
+test("prepare refuses a continue clip whose source scene changed or went stale (retry path) - runner never called", async () => {
+  const { core, ran, readPlan } = await chainSetup("ch20", [
+    { n: 1, prompt: "x", clip: "C:\c\old.mp4" },
+    { n: 2, prompt: "y", approved: true, start: cont(1) },
+  ]);
+  const { writePlan } = await import("./projects.js");
+  const r = (await core.studio_generate({ project: "P", sub: "ch20" } as never)) as { batch: string };
+  const p = readPlan("P", "ch20");
+  p.scenes[0].clip = "C:\c\new.mp4"; // source changed without this job being cancelled
+  writePlan(p);
+  core.queue.approve({ batch: r.batch });
+  const [j] = core.queue.list();
+  await until(() => j.status === "failed");
+  assert.equal(j.status, "failed");
+  assert.match(j.note ?? j.error ?? "", /Scene 1 changed after this was approved/);
+  assert.equal(ran.length, 0);
+});
