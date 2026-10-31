@@ -12,7 +12,7 @@ import { JobQueue, type Job, type JobRunner, type SceneParams } from "./queue.js
 import { HOME_DIR, getFlowPage } from "./chrome.js";
 import { ACCOUNTS_FILE, currentLocation, discoverAccounts, ensureAffordable, findSource, goToSource } from "./switcher.js";
 import { BIN, COMPUTER, IS_MAC, IS_WIN, moveToBin } from "./platform.js";
-import { PlanSchema, projDir, subDir, safeName, addReference, createSub, listProjects, notesRev, planRev, readNotes, readPlan, uploadsDir, within, writeNotes, writePlan } from "./projects.js";
+import { PlanSchema, sceneSettings, projDir, subDir, safeName, addReference, createSub, listProjects, notesRev, planRev, readNotes, readPlan, uploadsDir, within, writeNotes, writePlan } from "./projects.js";
 import { handoff } from "./handoff.js";
 import { proposeLesson, readLessons } from "./lessons.js";
 import { TECHNIQUES, techniqueById } from "./techniques.js";
@@ -275,12 +275,17 @@ export const shapes = {
   studio_storyboard: { project: z.string().min(1), sub: z.string().min(1), scenes: z.array(z.number().int()).optional() },
   studio_generate: {
     project: z.string().min(1), sub: z.string().min(1), scenes: z.array(z.number().int()).optional(),
-    duration: z.union([z.literal(4), z.literal(6), z.literal(8), z.literal(10)]).default(8),
-    resolution: z.enum(["360p", "720p"]).default("720p"),
+    duration: z.union([z.literal(4), z.literal(6), z.literal(8), z.literal(10)]).optional().describe("Override for every scene. Normally leave unset: each scene's own duration/resolution/model (set in the plan) apply, then the default Omni 1.1 Flash / 8 s / 720p."),
+    resolution: z.enum(["360p", "720p"]).optional(),
     model: z.string().optional(),
-    max_credits: z.number().min(0).default(20).describe("Cap per clip."),
+    max_credits: z.number().min(0).optional().describe("Cap per clip. Default depends on the model (Omni 20, Veo Lite 15, Fast 25, Quality 110)."),
   },
-  studio_redo: { project: z.string().min(1), sub: z.string().min(1), scene: z.number().int(), prompt: z.string().optional() },
+  studio_redo: {
+    project: z.string().min(1), sub: z.string().min(1), scene: z.number().int(), prompt: z.string().optional(),
+    duration: z.union([z.literal(4), z.literal(6), z.literal(8), z.literal(10)]).optional().describe("Defaults to the scene's own duration."),
+    resolution: z.enum(["360p", "720p"]).optional().describe("Defaults to the scene's own resolution."),
+    model: z.string().optional().describe("Defaults to the scene's own model."),
+  },
   studio_status: { project: z.string().min(1), sub: z.string().min(1) },
   studio_to_remotion: { project: z.string().min(1), sub: z.string().min(1), music: z.string().optional(), voiceover: z.string().optional() },
   studio_propose_lesson: { text: z.string().min(1), scope: z.string().default("global") },
@@ -675,10 +680,11 @@ export class LocalCore implements Core {
     return { picked, skipped };
   }
 
-  private clipJob(plan: ReturnType<typeof readPlan>, scene: ReturnType<typeof readPlan>["scenes"][number], a: { duration: 4 | 6 | 8 | 10; resolution: "360p" | "720p"; model?: string; max_credits: number; prompt?: string }, batch: string) {
+  private clipJob(plan: ReturnType<typeof readPlan>, scene: ReturnType<typeof readPlan>["scenes"][number], a: { duration?: 4 | 6 | 8 | 10; resolution?: "360p" | "720p"; model?: string; max_credits?: number; prompt?: string }, batch: string) {
+    const set = sceneSettings(scene, a);
     const dir = join(subDir(plan.project, plan.sub), "clips");
     const params: SceneParams = {
-      prompt: a.prompt ?? scene.prompt, type: "video", max_credits: a.max_credits, duration: a.duration, resolution: a.resolution, model: a.model,
+      prompt: a.prompt ?? scene.prompt, type: "video", max_credits: a.max_credits ?? set.max_credits, duration: set.duration, resolution: set.resolution, model: set.model,
       aspect_ratio: plan.aspect, first_frame: scene.storyboard,
       reference_images: this.studioRefs(plan.project, scene),
       output_dir: dir, file_stem: this.freeStem(dir, plan.project, plan.sub, "clip", scene.n),
@@ -703,16 +709,16 @@ export class LocalCore implements Core {
     const plan = readPlan(project, sub);
     const { picked, skipped } = this.pickScenes(plan, scenes, true);
     const batch = randomUUID().slice(0, 8);
-    for (const s of picked) this.clipJob(plan, s, { duration, resolution, model, max_credits }, batch);
-    return { batch, held: picked.length, quoted_max_credits: max_credits * picked.length, ...(skipped.length && { skipped_unapproved: skipped }) };
+    const jobs = picked.map((s) => this.clipJob(plan, s, { duration, resolution, model, max_credits }, batch));
+    return { batch, held: picked.length, quoted_max_credits: jobs.reduce((n, j) => n + j.params.max_credits, 0), ...(skipped.length && { skipped_unapproved: skipped }) };
   }
 
-  async studio_redo({ project, sub, scene, prompt }: Args<"studio_redo">) {
+  async studio_redo({ project, sub, scene, prompt, duration, resolution, model }: Args<"studio_redo">) {
     const plan = readPlan(project, sub);
     const s = this.pickScenes(plan, [scene], false).picked[0];
     const batch = randomUUID().slice(0, 8);
-    const job = this.clipJob(plan, s, { duration: 8, resolution: "720p", max_credits: 20, prompt }, batch);
-    return { batch, held: 1, job_id: job.id, quoted_max_credits: 20 };
+    const job = this.clipJob(plan, s, { duration, resolution, model, prompt }, batch);
+    return { batch, held: 1, job_id: job.id, quoted_max_credits: job.params.max_credits };
   }
 
   async studio_status({ project, sub }: Args<"studio_status">) {

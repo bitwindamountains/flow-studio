@@ -146,6 +146,12 @@ function picker(label, onFile, accept) {
   };
   return h("label", { class: "pick" }, label + " ", i);
 }
+// Per-scene duration; saves through the plan (settings changes do not clear approval).
+function durationPick(s) {
+  const sel = h("select", { "aria-label": `Scene ${s.n} duration` }, ...[4, 6, 8, 10].map((d) => h("option", { value: d, selected: d === (s.duration || 8) }, d + " s")));
+  sel.onchange = () => savePlan((pl) => { pl.scenes.find((x) => x.n === s.n).duration = Number(sel.value); }).then(() => refresh(true), (e) => toast(e.message));
+  return sel;
+}
 async function savePlan(mut) {
   const { lessons, note, ...plan } = await apiOk("studio_plan_read", cur());
   mut(plan);
@@ -246,7 +252,7 @@ function renderPlan(el) {
     const sty = h("select", { "aria-label": "Style" }, ...[["", "none"], ["A", "A"], ["B", "B"]].map(([v, t]) => h("option", { value: v, selected: v === (p.style || "") }, "Style " + t)));
     sty.onchange = () => savePlan((pl) => { if (sty.value) pl.style = sty.value; else delete pl.style; }).then(() => refresh(true), (e) => toast(e.message));
     const rows = p.scenes.map((s) => h("tr", {},
-      h("td", {}, String(s.n)), h("td", {}, s.prompt), h("td", {}, s.camera || ""), h("td", {}, s.caption || ""), h("td", {}, s.voiceover || ""),
+      h("td", {}, String(s.n)), h("td", {}, s.prompt), h("td", {}, s.camera || ""), h("td", {}, durationPick(s)), h("td", {}, `${s.model || "Omni 1.1 Flash"} · ${s.resolution || "720p"}`), h("td", {}, s.caption || ""), h("td", {}, s.voiceover || ""),
       h("td", {}, picker("+ ref", async (f) => {
         const r = await apiOk("studio_add_reference", { ...c, path: await upload(f) });
         await savePlan((pl) => { const sc = pl.scenes.find((x) => x.n === s.n); sc.references = [...(sc.references || []), r.path]; });
@@ -267,7 +273,7 @@ function renderPlan(el) {
       (() => { const t = h("textarea", { rows: "4", readonly: true, "aria-label": "Unsaved notes" }); t.value = lost; return t; })(),
       btn("Dismiss", () => { delete notesConflict[key]; }));
     kids.push(h("h3", {}, `${p.project} / ${p.sub}`), h("div", { class: "row" }, asp, sty),
-      p.scenes.length ? h("table", {}, h("thead", {}, h("tr", {}, ...["#", "Prompt", "Camera", "Caption", "Voiceover", "References"].map((t) => h("th", {}, t)))), h("tbody", {}, rows)) : h("p", {}, "No scenes yet. Ask Claude to write the plan."),
+      p.scenes.length ? h("table", {}, h("thead", {}, h("tr", {}, ...["#", "Prompt", "Camera", "Duration", "Model · res", "Caption", "Voiceover", "References"].map((t) => h("th", {}, t)))), h("tbody", {}, rows)) : h("p", {}, "No scenes yet. Ask Claude to write the plan."),
       h("h3", {}, "Notes"), notes, lostBox,
       h("h3", {}, "Reference images"), picker("Add project reference", async (f) => { await apiOk("studio_add_reference", { project: c.project, path: await upload(f) }); }));
     if (p.lessons && p.lessons.length) kids.push(h("details", {}, h("summary", {}, `Lessons (${p.lessons.length})`), h("ul", {}, p.lessons.map((l) => h("li", {}, `[${l.scope}] ${l.text}`)))));
@@ -299,7 +305,7 @@ function heldCard(g) {
   const items = g.jobs.map((j) => {
     const st = j.params.studio;
     const thumb = j.params.first_frame && !j.params.first_frame.startsWith("asset:") ? h("img", { src: media(j.params.first_frame), alt: "First frame" + (st ? ", scene " + st.scene : "") }) : null;
-    return h("div", { class: "card" }, h("b", {}, st ? `Scene ${st.scene}` : j.params.file_stem || j.id), thumb, h("p", {}, j.params.prompt || ""));
+    return h("div", { class: "card" }, h("b", {}, st ? `Scene ${st.scene}` : j.params.file_stem || j.id), thumb, h("small", {}, [j.params.model || "Flow's current model", j.params.duration ? j.params.duration + " s" : "", j.params.resolution || ""].filter(Boolean).join(" · ")), h("p", {}, j.params.prompt || ""));
   });
   return h("div", { class: "held" },
     btn(`Approve ${n} clip${n === 1 ? "" : "s"} · ${credits(g)}`, () => owner("/api/approve", g.batch ? { batch: g.batch } : { job_id: g.jobs[0].id }), true, "big"),
@@ -310,9 +316,9 @@ function renderGen(el) {
   const p = data.plan, c = cur();
   const other = data.other.length ? [h("h3", {}, "Other held jobs"), ...data.other.map(heldCard)] : [];
   if (!p) return el.replaceChildren(h("p", {}, "No plan yet."), ...other);
-  const dur = h("select", { "aria-label": "Duration" }, ...[4, 6, 8, 10].map((d) => h("option", { value: d, selected: d === 8 }, d + " s")));
-  const res = h("select", { "aria-label": "Resolution" }, h("option", { value: "360p" }, "360p"), h("option", { value: "720p", selected: true }, "720p"));
-  const kids = [h("div", { class: "row" }, dur, res, btn("Queue approved scenes (held)", () => apiOk("studio_generate", { ...c, duration: Number(dur.value), resolution: res.value })))];
+  const dur = h("select", { "aria-label": "Duration" }, h("option", { value: "" }, "Per scene"), ...[4, 6, 8, 10].map((d) => h("option", { value: d }, d + " s")));
+  const res = h("select", { "aria-label": "Resolution" }, h("option", { value: "" }, "Per scene"), h("option", { value: "360p" }, "360p"), h("option", { value: "720p" }, "720p"));
+  const kids = [h("div", { class: "row" }, dur, res, btn("Queue approved scenes (held)", () => apiOk("studio_generate", { ...c, ...(dur.value ? { duration: Number(dur.value) } : {}), ...(res.value ? { resolution: res.value } : {}) })))];
   for (const l of data.lessons) {
     const txt = h("input", { value: lessonText[l.id] ?? l.text, "aria-label": "Lesson text" });
     txt.oninput = () => (lessonText[l.id] = txt.value);
@@ -331,6 +337,7 @@ function renderGen(el) {
   kids.push(h("div", { class: "grid" }, p.scenes.map((s) => {
     const x = st.find((q) => q.n === s.n) || { jobs: [] };
     const last = x.jobs.filter((j) => j.kind === "clip").slice(-1)[0];
+    const redoDur = h("select", { "aria-label": `Scene ${s.n} redo duration` }, h("option", { value: "" }, "same as scene"), ...[4, 6, 8, 10].map((d) => h("option", { value: d }, d + " s")));
     return h("div", { class: "card" },
       h("b", {}, `Scene ${s.n}`), " ", h("span", { class: "tag" }, last ? last.status : s.clip ? "has clip" : s.approved ? "approved" : "not approved"),
       last && last.credits != null ? h("small", {}, ` ${last.credits} credits`) : null,
@@ -339,10 +346,11 @@ function renderGen(el) {
       h("div", { class: "row" },
         s.clip ? btn(s.kept ? "Kept (undo)" : "Keep", () => owner("/api/scene", { ...c, n: s.n, kept: !s.kept }), true, s.kept ? "ok" : "") : null,
         last && (last.status === "held" || last.status === "queued") ? btn("Cancel", () => cancelJob(last.id), true) : null,
+        redoDur,
         btn("Redo", async () => {
           const change = prompt(`Redo scene ${s.n}: what should change? (optional)`);
           if (change === null) return;
-          await apiOk("studio_redo", { ...c, scene: s.n, ...(change.trim() ? { prompt: change.trim() } : {}) });
+          await apiOk("studio_redo", { ...c, scene: s.n, ...(change.trim() ? { prompt: change.trim() } : {}), ...(redoDur.value ? { duration: Number(redoDur.value) } : {}) });
         })));
   })));
   el.replaceChildren(...kids);

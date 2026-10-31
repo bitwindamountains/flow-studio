@@ -17,6 +17,10 @@ export const SceneSchema = z.object({
   references: z.array(z.string()).optional(),
   storyboard: z.string().optional(),
   approved: z.boolean().optional(),
+  // Per-scene video settings; unset falls back to VIDEO_DEFAULTS. Veo ignores duration/resolution (Flow fixes them).
+  model: z.string().optional(),
+  duration: z.union([z.literal(4), z.literal(6), z.literal(8), z.literal(10)]).optional(),
+  resolution: z.enum(["360p", "720p"]).optional(),
   clip: z.string().optional(),
   kept: z.boolean().optional(),
   // Engine-owned: where the storyboard still / clip sits in Flow (hashed account id + Flow project path).
@@ -34,6 +38,20 @@ export const PlanSchema = z.object({
 });
 export type Scene = z.infer<typeof SceneSchema>;
 export type Plan = z.infer<typeof PlanSchema>;
+
+export const VIDEO_DEFAULTS = { model: "Omni 1.1 Flash", duration: 8 as 4 | 6 | 8 | 10, resolution: "720p" as "360p" | "720p" };
+// Per-job credit cap by model when the caller gives none (spent only within it; nothing is spent if Flow quotes more).
+export const MODEL_MAX_CREDITS: Record<string, number> = { "Omni 1.1 Flash": 20, "Veo 3.1 - Lite": 15, "Veo 3.1 - Fast": 25, "Veo 3.1 - Quality": 110 };
+export const UNKNOWN_MODEL_MAX_CREDITS = 25;
+
+type Overrides = { model?: string; duration?: 4 | 6 | 8 | 10; resolution?: "360p" | "720p" };
+// overrides > scene fields > defaults. Veo: duration fixed at 8, resolution omitted.
+export function sceneSettings(scene: Overrides, o: Overrides = {}) {
+  const model = o.model ?? scene.model ?? VIDEO_DEFAULTS.model;
+  const max_credits = MODEL_MAX_CREDITS[model] ?? UNKNOWN_MODEL_MAX_CREDITS;
+  if (/^veo/i.test(model)) return { model, duration: 8 as const, resolution: undefined, max_credits };
+  return { model, duration: o.duration ?? scene.duration ?? VIDEO_DEFAULTS.duration, resolution: o.resolution ?? scene.resolution ?? VIDEO_DEFAULTS.resolution, max_credits };
+}
 
 export function safeName(s: string): string {
   const out = s.trim().replace(/\s+/g, "-").replace(/[^A-Za-z0-9_-]/g, "").replace(/^-+|-+$/g, "");

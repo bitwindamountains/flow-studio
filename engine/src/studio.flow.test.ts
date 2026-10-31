@@ -185,3 +185,38 @@ test("plan_write: content edits clear approval, unchanged rewrite keeps it, an i
   await w({ n: 1, prompt: "changed" });
   assert.equal(readPlan("P", "i").scenes[0].approved, false);
 });
+
+test("sceneSettings: overrides > scene > defaults; Veo forces 8s and no resolution", async () => {
+  const { sceneSettings, VIDEO_DEFAULTS } = await import("./projects.js");
+  assert.deepEqual(sceneSettings({}), { model: "Omni 1.1 Flash", duration: 8, resolution: "720p", max_credits: 20 });
+  assert.deepEqual(VIDEO_DEFAULTS, { model: "Omni 1.1 Flash", duration: 8, resolution: "720p" });
+  assert.deepEqual(sceneSettings({ duration: 4, resolution: "360p" }, { duration: 10 }), { model: "Omni 1.1 Flash", duration: 10, resolution: "360p", max_credits: 20 });
+  assert.deepEqual(sceneSettings({ model: "Veo 3.1 - Fast", duration: 4, resolution: "360p" }), { model: "Veo 3.1 - Fast", duration: 8, resolution: undefined, max_credits: 25 });
+  assert.equal(sceneSettings({ model: "Veo 3.1 - Quality" }).max_credits, 110);
+  assert.equal(sceneSettings({ model: "Mystery" }).max_credits, 25);
+});
+
+test("generate with no settings queues Omni 1.1 Flash / 8s / 720p, max 20; scene duration wins over default", async () => {
+  const { core } = await setup("set1", [{ n: 1, prompt: "x", approved: true }, { n: 2, prompt: "y", approved: true, duration: 4 }]);
+  await core.studio_generate({ project: "P", sub: "set1" } as never);
+  const [a, b] = core.queue.list().map((j) => j.params);
+  assert.deepEqual([a.model, a.duration, a.resolution, a.max_credits], ["Omni 1.1 Flash", 8, "720p", 20]);
+  assert.equal(b.duration, 4);
+});
+
+test("redo reuses the scene's own settings; an override duration wins", async () => {
+  const { core } = await setup("set2", [{ n: 1, prompt: "x", model: "Omni 1.1 Flash", duration: 4, resolution: "360p" }]);
+  await core.studio_redo({ project: "P", sub: "set2", scene: 1 } as never);
+  await core.studio_redo({ project: "P", sub: "set2", scene: 1, duration: 10 } as never);
+  const [a, b] = core.queue.list().map((j) => j.params);
+  assert.deepEqual([a.model, a.duration, a.resolution], ["Omni 1.1 Flash", 4, "360p"]);
+  assert.deepEqual([b.model, b.duration, b.resolution], ["Omni 1.1 Flash", 10, "360p"]);
+});
+
+test("changing only video settings in plan_write keeps approved", async () => {
+  const { core, readPlan } = await setup("set3", [{ n: 1, prompt: "x", approved: true }]);
+  await write(core, "set3", [{ n: 1, prompt: "x", duration: 6, model: "Veo 3.1 - Lite" }]);
+  const s = readPlan("P", "set3").scenes[0];
+  assert.equal(s.approved, true);
+  assert.equal(s.duration, 6);
+});

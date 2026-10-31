@@ -426,7 +426,7 @@ server.registerTool(
   "studio_generate",
   {
     title: "Generate clips",
-    description: "Queue one video job per approved scene (or the given scenes - unapproved ones are skipped and listed in skipped_unapproved), held until the owner approves in the Studio page. Returns batch, held and quoted_max_credits. Never spends credits by itself.",
+    description: "Queue one video job per approved scene (or the given scenes - unapproved ones are skipped and listed in skipped_unapproved), held until the owner approves in the Studio page. Each scene uses its own model/duration/resolution from the plan (set them per scene in studio_plan_write; defaults Omni 1.1 Flash, 8 s, 720p; Veo is fixed at 8 s). Returns batch, held and quoted_max_credits. Never spends credits by itself.",
     inputSchema: shapes.studio_generate,
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },
@@ -437,7 +437,7 @@ server.registerTool(
   "studio_redo",
   {
     title: "Redo clip",
-    description: "Queue one held video job for a scene as a new take; earlier clips are kept. Optional new prompt.",
+    description: "Queue one held video job for a scene as a new take; earlier clips are kept. Reuses the scene's own model/duration/resolution unless you pass duration, resolution or model. Optional new prompt.",
     inputSchema: shapes.studio_redo,
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },
