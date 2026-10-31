@@ -15,7 +15,10 @@ export interface SceneParams {
   first_frame?: string;
   last_frame?: string;
   reference_images?: string[];
+  // Job whose clip's last frame becomes this job's first frame; the job waits for it and is cancelled if it fails.
   chain_from?: string;
+  // A finished clip on disk whose last frame becomes the first frame (the source is not in this batch).
+  chain_file?: string;
   reference_from?: string;
   edit_asset?: string;
   agent_scenes?: string[];
@@ -36,7 +39,8 @@ export interface SceneParams {
   output_dir: string;
   file_stem: string;
   // Links a job to a Studio plan scene so its finished file is recorded in plan.json.
-  studio?: { project: string; sub: string; scene: number; kind: "storyboard" | "clip" };
+  // `from`: the scene whose last frame this clip starts on (display only; chain_from/chain_file do the work).
+  studio?: { project: string; sub: string; scene: number; kind: "storyboard" | "clip"; from?: number };
 }
 
 export interface Job {
@@ -106,6 +110,7 @@ export class JobQueue {
       if (j.status === "queued" && needsOk(j.params)) j.status = "held";
       this.jobs.set(j.id, j);
     }
+    for (const j of this.list()) if (j.status === "failed" || j.status === "cancelled") this.dropDependents(j);
     this.active = true;
     this.save();
     // Deferred: the runner may use fields its owner assigns after construction.
@@ -199,9 +204,29 @@ export class JobQueue {
     if (job && (job.status === "queued" || job.status === "held")) {
       job.status = "cancelled";
       job.finishedAt = new Date().toISOString();
+      this.dropDependents(job);
       this.save();
     }
     return job;
+  }
+
+  // A job chained to a prior clip cannot run without it: when the prior fails or is cancelled, its waiting
+  // dependents (and theirs) are cancelled before anything is spent.
+  private dropDependents(prior: Job): void {
+    for (const j of this.list()) {
+      if (j.params.chain_from !== prior.id || (j.status !== "held" && j.status !== "queued")) continue;
+      j.status = "cancelled";
+      j.finishedAt = new Date().toISOString();
+      const what = prior.params.studio ? `scene ${prior.params.studio.scene}'s clip` : `the clip it continues from (job ${prior.id})`;
+      j.note = [j.note, `Not run: ${what} ${prior.status === "failed" ? "failed" : "was cancelled"}, so there is no last frame to start from. Nothing spent.`].filter(Boolean).join(" · ");
+      this.dropDependents(j);
+    }
+  }
+
+  // Waiting for the clip it continues from (stays in line, approved with its batch, until that clip is done).
+  private waiting(j: Job): boolean {
+    const p = j.params.chain_from ? this.jobs.get(j.params.chain_from) : undefined;
+    return !!p && (p.status === "held" || p.status === "queued" || p.status === "running");
   }
 
   private gate: Promise<unknown> = Promise.resolve();
@@ -219,7 +244,7 @@ export class JobQueue {
     try {
       for (;;) {
         if (this.manualPause) return;
-        const job = this.list().find((j) => j.status === "queued");
+        const job = this.list().find((j) => j.status === "queued" && !this.waiting(j));
         if (!job) return;
         if (this.lastFinished) {
           const pause = this.pauseMs[0] + Math.random() * (this.pauseMs[1] - this.pauseMs[0]);
@@ -264,6 +289,7 @@ export class JobQueue {
           // is re-queued here. Timeouts are never retried automatically: they may still have spent credits.
           const retryable = /agent finished without creating/i.test(job.error);
           job.status = retryable && job.attempts <= (job.params.retries ?? 1) ? "queued" : "failed";
+          if (job.status === "failed") this.dropDependents(job);
         }
         job.finishedAt = new Date().toISOString();
         this.save();

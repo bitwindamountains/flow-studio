@@ -10,7 +10,11 @@ export const projectsRoot = () => process.env.STUDIO_PROJECTS ?? "D:\\flow-studi
 
 export const SceneSchema = z.object({
   n: z.number().int().min(1),
+  // What the storyboard still shows. `prompt` is the CLIP prompt: motion, camera move and sound starting from that frame.
+  frame_prompt: z.string().optional(),
   prompt: z.string(),
+  // "continue": the clip starts on the last frame of scene `from` (an earlier scene) instead of its own still.
+  start: z.union([z.object({ kind: z.literal("frame") }), z.object({ kind: z.literal("continue"), from: z.number().int().min(1) })]).optional(),
   caption: z.string().optional(),
   voiceover: z.string().optional(),
   camera: z.string().optional(),
@@ -26,7 +30,10 @@ export const SceneSchema = z.object({
   // Engine-owned: where the storyboard still / clip sits in Flow (hashed account id + Flow project path).
   storyboard_flow: z.object({ account: z.string(), flowProject: z.string() }).optional(),
   clip_flow: z.object({ account: z.string(), flowProject: z.string() }).optional(),
+  // Engine-owned: the scene it continues from was redone, so this clip no longer joins it.
+  stale: z.boolean().optional(),
 });
+export const OptionSchema = z.object({ id: z.string().min(1), title: z.string(), hook: z.string(), story: z.string(), scenes: z.number().int().min(1) });
 export const PlanSchema = z.object({
   project: z.string().min(1),
   sub: z.string().min(1),
@@ -34,6 +41,9 @@ export const PlanSchema = z.object({
   style: z.enum(["A", "B"]).optional(),
   // Bumped by every writePlan; studio_plan_write must name the rev it read, so a stale copy cannot overwrite newer work.
   rev: z.number().int().min(0).optional(),
+  // Ideas tab: scenario options Claude proposes, and the id of the one the owner picked in chat.
+  options: z.array(OptionSchema).max(10).optional(),
+  chosen: z.string().optional(),
   scenes: z.array(SceneSchema).refine((s) => new Set(s.map((x) => x.n)).size === s.length, "scene numbers (n) must be unique"),
 });
 export type Scene = z.infer<typeof SceneSchema>;

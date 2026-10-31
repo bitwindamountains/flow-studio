@@ -392,9 +392,26 @@ const BUSY = "A generation is running in the Flow tab. Wait for it to finish (fl
 export class LocalCore implements Core {
   readonly queue: JobQueue;
   private selection: { project: string; sub: string } | null;
-  constructor(init: { runner?: JobRunner; queueOpts?: { file?: string; pauseMs?: [number, number] } } = {}) {
+  private lastFrame: (video: string) => Promise<string>;
+  constructor(init: { runner?: JobRunner; queueOpts?: { file?: string; pauseMs?: [number, number] }; lastFrame?: (video: string) => Promise<string> } = {}) {
     try { this.selection = readJson(SELECTION_FILE, null); } catch { this.selection = null; }
-    this.queue = new JobQueue(init.runner ?? this.defaultRunner, { file: join(HOME_DIR, "queue.json"), onDone: (j) => this.recordDone(j), ...init.queueOpts });
+    this.lastFrame = init.lastFrame ?? extractLastFrame;
+    const run = init.runner ?? this.defaultRunner;
+    this.queue = new JobQueue(async (job) => { await this.prepare(job); return run(job); }, { file: join(HOME_DIR, "queue.json"), onDone: (j) => this.recordDone(j), ...init.queueOpts });
+  }
+
+  // Resolves what a job takes from earlier work just before it runs: the previous still (reference_previous) and the
+  // last frame of the clip it continues from (chain_previous / a plan scene that starts as "continue").
+  private async prepare(job: Job): Promise<void> {
+    const { chain_from, chain_file, reference_from } = job.params;
+    if (reference_from) {
+      const still = this.queue.get(reference_from)?.files.find((f) => /\.(jpe?g|png|webp)$/i.test(f));
+      if (!still) throw new Error(`reference_previous: the previous scene (${reference_from}) produced no image.`);
+      job.params.reference_images = [still, ...(job.params.reference_images ?? [])].slice(0, 3);
+    }
+    const clip = chain_file ?? (chain_from ? this.queue.get(chain_from)?.files.find((f) => /\.(mp4|webm|mov)$/i.test(f)) : undefined);
+    if ((chain_from || chain_file) && !clip) throw new Error(`chain_previous: the previous scene (${chain_from}) produced no video, so this scene was skipped.`);
+    if (clip) job.params.first_frame = await this.lastFrame(clip);
   }
 
   // Every finished job records where its media sits in Flow (account + project), so edits and continues find it.
@@ -405,23 +422,12 @@ export class LocalCore implements Core {
   };
 
   private async runJob(job: Job): Promise<string[]> {
-    const { chain_from, reference_from } = job.params;
     // An edit or continue must run where its source clip is: a same-named clip in another account would be edited
     // (and charged) instead. Unknown source -> refused before the browser is touched.
     const source = job.params.edit_asset ?? job.params.continue_from;
     if (source) {
       const loc = findSource(this.queue.list(), source);
       await goToSource(await getFlowPage(), loc, ACCOUNTS_FILE);
-    }
-    if (reference_from) {
-      const still = this.queue.get(reference_from)?.files.find((f) => /\.(jpe?g|png|webp)$/i.test(f));
-      if (!still) throw new Error(`reference_previous: the previous scene (${reference_from}) produced no image.`);
-      job.params.reference_images = [still, ...(job.params.reference_images ?? [])].slice(0, 3);
-    }
-    if (chain_from) {
-      const clip = this.queue.get(chain_from)?.files.find((f) => /\.(mp4|webm|mov)$/i.test(f));
-      if (!clip) throw new Error(`chain_previous: the previous scene (${chain_from}) produced no video, so this scene was skipped.`);
-      job.params.first_frame = await extractLastFrame(clip);
     }
     if (job.params.continue_from) return runContinue(job);
     if (job.params.agent_scenes) return runAgentBatch(job);
@@ -652,15 +658,23 @@ export class LocalCore implements Core {
     const refRoots = [join(projDir(project), "references"), join(subDir(project, sub), "references"), uploadsDir()];
     for (const s of plan.scenes) for (const r of s.references ?? [])
       if (!within(r, refRoots)) throw new Error(`Scene ${s.n}: reference ${r} must be inside the project's references folder or the uploads folder (use studio_add_reference).`);
+    for (const s of plan.scenes) {
+      if (s.start?.kind !== "continue") continue;
+      const from = s.start.from;
+      if (from >= s.n) throw new Error(`Scene ${s.n}: start.from must be an earlier scene (got ${from}).`);
+      if (!plan.scenes.some((x) => x.n === from)) throw new Error(`Scene ${s.n}: start.from ${from} is not a scene in this plan.`);
+    }
+    if (plan.chosen !== undefined && !(plan.options ?? []).some((o) => o.id === plan.chosen)) throw new Error(`chosen "${plan.chosen}" is not one of the options' ids.`);
+    const same = (a: unknown, b: unknown) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
     const scenes = plan.scenes.map((s) => {
       const o = old?.scenes.find((x) => x.n === s.n);
-      // storyboard/clip are engine-owned (recorded by finished jobs) and approved/kept are the owner's (UI token routes):
-      // whatever the caller sends for them is ignored.
-      const { approved: _a, kept: _k, storyboard: _s, clip: _c, storyboard_flow: _sf, clip_flow: _cf, ...rest } = s;
+      // storyboard/clip/stale are engine-owned (recorded by finished jobs and redos) and approved/kept are the owner's
+      // (UI token routes): whatever the caller sends for them is ignored.
+      const { approved: _a, kept: _k, storyboard: _s, clip: _c, storyboard_flow: _sf, clip_flow: _cf, stale: _st, ...rest } = s;
       if (!o) return rest;
       // Approval belongs to what was approved: changing the content clears it.
-      const changed = s.prompt !== o.prompt || s.camera !== o.camera || JSON.stringify(s.references ?? []) !== JSON.stringify(o.references ?? []);
-      return { ...rest, storyboard: o.storyboard, clip: o.clip, storyboard_flow: o.storyboard_flow, clip_flow: o.clip_flow, approved: changed ? false : o.approved, kept: o.kept };
+      const changed = s.prompt !== o.prompt || s.camera !== o.camera || s.frame_prompt !== o.frame_prompt || !same(s.start ?? { kind: "frame" }, o.start ?? { kind: "frame" }) || !same(s.references ?? [], o.references ?? []);
+      return { ...rest, storyboard: o.storyboard, clip: o.clip, storyboard_flow: o.storyboard_flow, clip_flow: o.clip_flow, stale: o.stale, approved: changed ? false : o.approved, kept: o.kept };
     });
     writePlan({ ...plan, scenes, project: safeName(project), sub: safeName(sub) });
     return { ok: true, rev: planRev(project, sub) };
@@ -682,6 +696,7 @@ export class LocalCore implements Core {
     scene[st.kind] = job.files[0];
     scene[`${st.kind}_flow`] = job.flow;
     if (st.kind === "storyboard") scene.approved = false; // a new still must be looked at again
+    else delete scene.stale; // a fresh clip joins whatever its source is now
     writePlan(plan);
   }
 
@@ -723,15 +738,30 @@ export class LocalCore implements Core {
     return { picked, skipped };
   }
 
-  private clipJob(plan: ReturnType<typeof readPlan>, scene: ReturnType<typeof readPlan>["scenes"][number], a: { duration?: 4 | 6 | 8 | 10; resolution?: "360p" | "720p"; model?: string; max_credits?: number; prompt?: string }, batch: string) {
+  // Where a "continue" scene's first frame comes from: the source scene's job in this batch, else its live (not yet
+  // finished) clip job, else its finished clip on disk. Nothing to continue from -> refused before anything is queued.
+  private chainSource(plan: ReturnType<typeof readPlan>, from: number, inBatch: Map<number, Job>): Pick<SceneParams, "chain_from" | "chain_file"> {
+    const here = inBatch.get(from);
+    if (here) return { chain_from: here.id };
+    const live = this.studioJobs(plan.project, plan.sub, "clip", from).filter((j) => ["held", "queued", "running"].includes(j.status)).at(-1);
+    if (live) return { chain_from: live.id };
+    const clip = plan.scenes.find((x) => x.n === from)?.clip;
+    if (clip) return { chain_file: clip };
+    throw new Error(`Scene ${from} has no clip yet, and a scene continues from it: generate scene ${from} in the same batch or first.`);
+  }
+
+  private clipJob(plan: ReturnType<typeof readPlan>, scene: ReturnType<typeof readPlan>["scenes"][number], a: { duration?: 4 | 6 | 8 | 10; resolution?: "360p" | "720p"; model?: string; max_credits?: number; prompt?: string }, batch: string, inBatch = new Map<number, Job>()) {
     const set = sceneSettings(scene, a);
     const dir = join(subDir(plan.project, plan.sub), "clips");
+    const from = scene.start?.kind === "continue" ? scene.start.from : undefined;
     const params: SceneParams = {
       prompt: a.prompt ?? scene.prompt, type: "video", max_credits: a.max_credits ?? set.max_credits, duration: set.duration, resolution: set.resolution, model: set.model,
-      aspect_ratio: plan.aspect, first_frame: scene.storyboard,
+      aspect_ratio: plan.aspect,
+      // A continue scene's first frame is filled in just before it runs (prepare), from its source clip's last frame.
+      ...(from === undefined ? { first_frame: scene.storyboard } : this.chainSource(plan, from, inBatch)),
       reference_images: this.studioRefs(plan.project, scene),
       output_dir: dir, file_stem: this.freeStem(dir, plan.project, plan.sub, "clip", scene.n),
-      studio: { project: plan.project, sub: plan.sub, scene: scene.n, kind: "clip" },
+      studio: { project: plan.project, sub: plan.sub, scene: scene.n, kind: "clip", ...(from !== undefined && { from }) },
     };
     return this.queue.add(params, { batch });
   }
@@ -740,21 +770,35 @@ export class LocalCore implements Core {
     const { project, sub } = this.pick(a); const { scenes } = a;
     const plan = readPlan(project, sub);
     const dir = join(subDir(project, sub), "storyboard");
-    const job_ids = this.pickScenes(plan, scenes, false).picked.map((s) => this.queue.add({
-      prompt: s.prompt, type: "image", max_credits: 0, aspect_ratio: plan.aspect,
+    const picked = this.pickScenes(plan, scenes, false).picked;
+    // A continue scene has no still of its own: its first frame is the last frame of the clip it continues from.
+    const continues = picked.filter((s) => s.start?.kind === "continue").map((s) => s.n);
+    const own = picked.filter((s) => s.start?.kind !== "continue");
+    const noFrame = own.filter((s) => !s.frame_prompt?.trim()).map((s) => s.n);
+    const job_ids = own.map((s) => this.queue.add({
+      prompt: s.frame_prompt?.trim() || s.prompt, type: "image", max_credits: 0, aspect_ratio: plan.aspect,
       reference_images: this.studioRefs(project, s),
       output_dir: dir, file_stem: this.freeStem(dir, plan.project, plan.sub, "storyboard", s.n),
       studio: { project: plan.project, sub: plan.sub, scene: s.n, kind: "storyboard" },
     }).id);
-    return { job_ids };
+    return {
+      job_ids,
+      ...(continues.length && { skipped_continue: continues }),
+      ...(noFrame.length && { note: `Scene(s) ${noFrame.join(", ")} have no frame_prompt, so the clip prompt was drawn instead. Add a frame_prompt (what the still shows) to each scene with studio_plan_write.` }),
+    };
   }
 
   async studio_generate(a: Args<"studio_generate">) {
     const { project, sub } = this.pick(a); const { scenes, duration, resolution, model, max_credits } = a;
     const plan = readPlan(project, sub);
     const { picked, skipped } = this.pickScenes(plan, scenes, true);
+    // Sources first (start.from is always an earlier n), and every continue checked before anything is queued.
+    picked.sort((x, y) => x.n - y.n);
+    const ns = new Set(picked.map((s) => s.n));
+    for (const s of picked) if (s.start?.kind === "continue" && !ns.has(s.start.from)) this.chainSource(plan, s.start.from, new Map());
     const batch = randomUUID().slice(0, 8);
-    const jobs = picked.map((s) => this.clipJob(plan, s, { duration, resolution, model, max_credits }, batch));
+    const inBatch = new Map<number, Job>();
+    const jobs = picked.map((s) => { const j = this.clipJob(plan, s, { duration, resolution, model, max_credits }, batch, inBatch); inBatch.set(s.n, j); return j; });
     return { batch, held: picked.length, quoted_max_credits: jobs.reduce((n, j) => n + j.params.max_credits, 0), ...(skipped.length && { skipped_unapproved: skipped }) };
   }
 
@@ -764,7 +808,18 @@ export class LocalCore implements Core {
     const s = this.pickScenes(plan, [scene], false).picked[0];
     const batch = randomUUID().slice(0, 8);
     const job = this.clipJob(plan, s, { duration, resolution, model, prompt }, batch);
-    return { batch, held: 1, job_id: job.id, quoted_max_credits: job.params.max_credits };
+    // Every scene continuing from this one (directly or through others) no longer joins it.
+    const stale: number[] = [];
+    for (let grew = true; grew;) {
+      grew = false;
+      for (const x of plan.scenes)
+        if (x.start?.kind === "continue" && (x.start.from === scene || stale.includes(x.start.from)) && !stale.includes(x.n)) { stale.push(x.n); grew = true; }
+    }
+    if (stale.length) {
+      for (const x of plan.scenes) if (stale.includes(x.n)) x.stale = true;
+      writePlan(plan);
+    }
+    return { batch, held: 1, job_id: job.id, quoted_max_credits: job.params.max_credits, ...(stale.length && { stale: stale.sort((p, q) => p - q) }) };
   }
 
   async studio_status(a: Args<"studio_status">) {
@@ -773,7 +828,7 @@ export class LocalCore implements Core {
     const mine = this.queue.list().filter((j) => j.params.studio?.project === plan.project && j.params.studio.sub === plan.sub);
     return {
       scenes: plan.scenes.map((s) => ({
-        n: s.n, storyboard: s.storyboard, approved: s.approved, clip: s.clip, kept: s.kept,
+        n: s.n, storyboard: s.storyboard, approved: s.approved, clip: s.clip, kept: s.kept, start: s.start, stale: s.stale,
         jobs: mine.filter((j) => j.params.studio!.scene === s.n).map((j) => ({ id: j.id, kind: j.params.studio!.kind, status: j.status, batch: j.batch, credits: j.credits, note: j.note, error: j.error })),
       })),
       pending: this.queue.pendingApproval().filter((g) => g.jobs.some((j) => j.params.studio?.project === plan.project && j.params.studio.sub === plan.sub)),

@@ -158,3 +158,16 @@ test("whileIdle declines while a job runs", async () => {
   assert.equal(await q.whileIdle(async () => "read"), undefined);
   finish();
 });
+
+test("restore: a chained job whose prior was running when the studio stopped is cancelled, not run", async () => {
+  const f = join(dir(), "q.json");
+  const at = new Date().toISOString();
+  const prior = { id: "a", status: "running", params: params("video"), files: [], attempts: 1, batch: "b", createdAt: at };
+  const next = { id: "c", status: "queued", params: params("video", { chain_from: "a" }), files: [], attempts: 0, batch: "b", createdAt: at };
+  writeFileSync(f, JSON.stringify([prior, next]));
+  const q = mk(f);
+  q.restore();
+  assert.equal(q.get("a")!.status, "failed");
+  assert.equal(q.get("c")!.status, "cancelled");
+  assert.match(q.get("c")!.note!, /failed.*Nothing spent/);
+});

@@ -393,7 +393,7 @@ server.registerTool(
   "studio_plan_write",
   {
     title: "Write a plan",
-    description: "Replace plan.json after validating the whole plan; scene numbers `n` must be unique. Pass `rev` from your last studio_plan_read: if the plan changed since (the owner or a finished job wrote it), the write is refused - read again and redo your change. `storyboard` and `clip` are recorded by the engine and `approved`/`kept` by the owner: values you send for them are ignored. Scene `references` must be files inside the project's references folder or the uploads folder (add them with studio_add_reference). Returns { ok, rev } immediately. project/sub are optional: when omitted they default to the project the owner selected in the studio (studio_current); with no selection the call fails.",
+    description: "Replace plan.json after validating the whole plan; scene numbers `n` must be unique. Pass `rev` from your last studio_plan_read: if the plan changed since (the owner or a finished job wrote it), the write is refused - read again and redo your change. Ideas: `options` (3-5 scenario options {id,title,hook,story,scenes}) and `chosen` (the option id the owner picked IN CHAT; it must match an option). Each scene: `frame_prompt` = what the storyboard still shows; `prompt` = the CLIP prompt (motion, camera move, sound) starting from that frame; `start` = {kind: frame} (own still, default) or {kind: continue, from: N} (first frame = last frame of earlier scene N; no still is drawn). Changing prompt, frame_prompt, start, camera or references clears the scene approval. `storyboard`, `clip` and `stale` are recorded by the engine and `approved`/`kept` by the owner: values you send for them are ignored. Scene `references` must be files inside the project's references folder or the uploads folder (add them with studio_add_reference). Returns { ok, rev } immediately. project/sub are optional: when omitted they default to the project the owner selected in the studio (studio_current); with no selection the call fails.",
     inputSchema: shapes.studio_plan_write,
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },
@@ -437,7 +437,7 @@ server.registerTool(
   "studio_storyboard",
   {
     title: "Storyboard",
-    description: "Queue one free image job per plan scene (all scenes if none given) into storyboard/. No approval needed. Returns job_ids; check studio_status. project/sub are optional: when omitted they default to the project the owner selected in the studio (studio_current); with no selection the call fails.",
+    description: "Queue one free image job per plan scene (all scenes if none given) into storyboard/, drawn from each scene frame_prompt (falls back to prompt, with a note). Scenes whose start is continue get no still (listed in skipped_continue): their first frame is the last frame of the scene they continue from. No approval needed. Returns job_ids; check studio_status. project/sub are optional: when omitted they default to the project the owner selected in the studio (studio_current); with no selection the call fails.",
     inputSchema: shapes.studio_storyboard,
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },
@@ -448,7 +448,7 @@ server.registerTool(
   "studio_generate",
   {
     title: "Generate clips",
-    description: "Queue one video job per approved scene (or the given scenes - unapproved ones are skipped and listed in skipped_unapproved), held until the owner approves in the Studio page. Each scene uses its own model/duration/resolution from the plan (set them per scene in studio_plan_write; defaults Omni 1.1 Flash, 8 s, 720p; Veo is fixed at 8 s). Returns batch, held and quoted_max_credits. Never spends credits by itself. project/sub are optional: when omitted they default to the project the owner selected in the studio (studio_current); with no selection the call fails.",
+    description: "Queue one video job per approved scene (or the given scenes - unapproved ones are skipped and listed in skipped_unapproved), held until the owner approves in the Studio page. Each scene uses its own model/duration/resolution from the plan (set them per scene in studio_plan_write; defaults Omni 1.1 Flash, 8 s, 720p; Veo is fixed at 8 s). A continue scene waits for its source clip in the same batch (or uses the source scene finished clip) and starts on its last frame; if the source fails or is cancelled it is cancelled too, nothing spent. Returns batch, held and quoted_max_credits. Never spends credits by itself. project/sub are optional: when omitted they default to the project the owner selected in the studio (studio_current); with no selection the call fails.",
     inputSchema: shapes.studio_generate,
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },
@@ -459,7 +459,7 @@ server.registerTool(
   "studio_redo",
   {
     title: "Redo clip",
-    description: "Queue one held video job for a scene as a new take; earlier clips are kept. Reuses the scene's own model/duration/resolution unless you pass duration, resolution or model. Optional new prompt. project/sub are optional: when omitted they default to the project the owner selected in the studio (studio_current); with no selection the call fails.",
+    description: "Queue one held video job for a scene as a new take; earlier clips are kept. Reuses the scene's own model/duration/resolution unless you pass duration, resolution or model. Optional new prompt. Every scene that continues from this one (directly or transitively) is marked stale (returned in `stale`) until it is redone too. project/sub are optional: when omitted they default to the project the owner selected in the studio (studio_current); with no selection the call fails.",
     inputSchema: shapes.studio_redo,
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },

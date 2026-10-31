@@ -241,3 +241,139 @@ test("studio selection: omitted project/sub follow it, none errors, survives a c
   assert.deepEqual(names(refs.sub), ["s.png"]);
   assert.deepEqual(await new LocalCore().studio_current(), { project: "P", sub: "sel" }); // persisted to selection.json
 });
+
+test("storyboard draws frame_prompt, falls back to prompt with a note, skips continue scenes", async () => {
+  const { core } = await setup("fp", [
+    { n: 1, frame_prompt: "a still", prompt: "clip one" },
+    { n: 2, prompt: "clip two" },
+    { n: 3, prompt: "clip three", start: { kind: "continue", from: 1 } },
+  ]);
+  core.queue.pause("hold for inspection");
+  const r = (await core.studio_storyboard({ project: "P", sub: "fp" } as never)) as { job_ids: string[]; skipped_continue: number[]; note: string };
+  assert.deepEqual(core.queue.list().map((j) => [j.params.studio!.scene, j.params.prompt]), [[1, "a still"], [2, "clip two"]]);
+  assert.equal(r.job_ids.length, 2);
+  assert.deepEqual(r.skipped_continue, [3]);
+  assert.match(r.note, /Scene\(s\) 2 have no frame_prompt/);
+});
+
+test("plan_write rejects continue.from that is forward, self or missing; frame_prompt/start changes clear approval", async () => {
+  const { core, readPlan } = await setup("st", [{ n: 1, prompt: "a", approved: true }, { n: 2, prompt: "b", approved: true }, { n: 3, prompt: "c", approved: true }]);
+  const cont = (from: number) => ({ kind: "continue", from });
+  await assert.rejects(write(core, "st", [{ n: 1, prompt: "a", start: cont(2) }, { n: 2, prompt: "b" }]), /earlier scene/);
+  await assert.rejects(write(core, "st", [{ n: 1, prompt: "a" }, { n: 2, prompt: "b", start: cont(2) }]), /earlier scene/);
+  await assert.rejects(write(core, "st", [{ n: 2, prompt: "b" }, { n: 3, prompt: "c", start: cont(1) }]), /not a scene in this plan/);
+  await write(core, "st", [{ n: 1, prompt: "a", start: { kind: "frame" } }, { n: 2, prompt: "b", frame_prompt: "new still" }, { n: 3, prompt: "c", start: cont(2), stale: true }]);
+  const sc = readPlan("P", "st").scenes;
+  assert.deepEqual(sc.map((s) => s.approved), [true, false, false]); // explicit "frame" equals the default
+  assert.equal(sc[2].stale, undefined); // engine-owned
+  const plan = { project: "P", sub: "st", aspect: "16:9", scenes: sc, options: [{ id: "o1", title: "t", hook: "h", story: "s", scenes: 3 }] };
+  await assert.rejects(core.studio_plan_write({ project: "P", sub: "st", rev: readPlan("P", "st").rev, plan: { ...plan, chosen: "o9" } } as never), /chosen/);
+  await core.studio_plan_write({ project: "P", sub: "st", rev: readPlan("P", "st").rev, plan: { ...plan, chosen: "o1" } } as never);
+  assert.equal(readPlan("P", "st").chosen, "o1");
+});
+
+async function chainSetup(sub: string, scenes: object[], fail?: (job: { params: { studio?: { scene: number } } }) => boolean) {
+  const { LocalCore } = await import("./core.js");
+  const { createSub, readPlan, writePlan } = await import("./projects.js");
+  const ran: { scene?: number; first_frame?: string }[] = [];
+  const runner = async (job: { params: { output_dir: string; file_stem: string; first_frame?: string; studio?: { scene: number } } }) => {
+    ran.push({ scene: job.params.studio?.scene, first_frame: job.params.first_frame });
+    if (fail?.(job)) throw new Error("Flow reported a failure");
+    mkdirSync(job.params.output_dir, { recursive: true });
+    const f = join(job.params.output_dir, job.params.file_stem + ".mp4");
+    writeFileSync(f, "x");
+    return [f];
+  };
+  const core = new LocalCore({ runner: runner as never, queueOpts: { pauseMs: [0, 0] }, lastFrame: async (v) => `${v}#last` });
+  createSub("P", sub, "16:9");
+  const plan = readPlan("P", sub);
+  plan.scenes = scenes as never;
+  writePlan(plan);
+  return { core, readPlan, ran };
+}
+const cont = (from: number) => ({ kind: "continue", from });
+
+test("generate: a continue scene waits for its source job in the batch and starts on its last frame", async () => {
+  const { core, readPlan, ran } = await chainSetup("ch1", [
+    { n: 3, prompt: "z", approved: true, start: cont(2) }, // listed first on purpose
+    { n: 1, prompt: "x", approved: true, storyboard: "C:\\s\\1.png" },
+    { n: 2, prompt: "y", approved: true, start: cont(1) },
+  ]);
+  const r = (await core.studio_generate({ project: "P", sub: "ch1" } as never)) as { batch: string; held: number };
+  assert.equal(r.held, 3);
+  const jobs = core.queue.list();
+  assert.ok(jobs.every((j) => j.status === "held" && j.batch === r.batch)); // one approval covers the chain
+  assert.equal(jobs[1].params.chain_from, jobs[0].id);
+  assert.equal(jobs[2].params.chain_from, jobs[1].id);
+  assert.equal(jobs[2].params.first_frame, undefined);
+  core.queue.approve({ batch: r.batch });
+  await until(() => !!readPlan("P", "ch1").scenes.find((s) => s.n === 3)!.clip);
+  assert.deepEqual(ran.map((x) => x.scene), [1, 2, 3]);
+  assert.equal(ran[0].first_frame, "C:\\s\\1.png");
+  assert.ok(ran[1].first_frame!.endsWith("scene-01.mp4#last"));
+  assert.ok(ran[2].first_frame!.endsWith("scene-02.mp4#last"));
+});
+
+test("generate: a failed source cancels its (transitive) continue jobs with a note, nothing run", async () => {
+  const { core, ran } = await chainSetup("ch2", [
+    { n: 1, prompt: "x", approved: true },
+    { n: 2, prompt: "y", approved: true, start: cont(1) },
+    { n: 3, prompt: "z", approved: true, start: cont(2) },
+  ], (j) => j.params.studio?.scene === 1);
+  const r = (await core.studio_generate({ project: "P", sub: "ch2" } as never)) as { batch: string };
+  core.queue.approve({ batch: r.batch });
+  await until(() => core.queue.list().every((j) => j.status === "failed" || j.status === "cancelled"));
+  const [a, b, c] = core.queue.list();
+  assert.deepEqual([a.status, b.status, c.status], ["failed", "cancelled", "cancelled"]);
+  assert.match(b.note!, /scene 1's clip failed.*Nothing spent/);
+  assert.match(c.note!, /scene 2's clip was cancelled/);
+  assert.deepEqual(ran.map((x) => x.scene), [1]);
+});
+
+test("generate: cancelling the source job cancels the continue job too", async () => {
+  const { core } = await chainSetup("ch3", [{ n: 1, prompt: "x", approved: true }, { n: 2, prompt: "y", approved: true, start: cont(1) }]);
+  await core.studio_generate({ project: "P", sub: "ch3" } as never);
+  const [a, b] = core.queue.list();
+  core.queue.cancel(a.id);
+  assert.equal(b.status, "cancelled");
+});
+
+test("generate: a source scene outside the batch uses its finished clip; none at all is refused before queueing", async () => {
+  const { core, ran, readPlan } = await chainSetup("ch4", [
+    { n: 1, prompt: "x", clip: "C:\\c\\scene-01.mp4" },
+    { n: 2, prompt: "y", approved: true, start: cont(1) },
+  ]);
+  const r = (await core.studio_generate({ project: "P", sub: "ch4" } as never)) as { batch: string };
+  const [j] = core.queue.list();
+  assert.equal(j.params.chain_file, "C:\\c\\scene-01.mp4");
+  assert.equal(j.params.studio!.from, 1);
+  core.queue.approve({ batch: r.batch });
+  await until(() => !!readPlan("P", "ch4").scenes[1].clip);
+  assert.equal(ran[0].first_frame, "C:\\c\\scene-01.mp4#last");
+
+  const n = await chainSetup("ch5", [{ n: 1, prompt: "x" }, { n: 2, prompt: "y", approved: true, start: cont(1) }]);
+  await assert.rejects(n.core.studio_generate({ project: "P", sub: "ch5" } as never), /Scene 1 has no clip yet/);
+  assert.equal(n.core.queue.list().length, 0);
+});
+
+test("redo marks continuing scenes stale transitively; their own redo clears it", async () => {
+  const { core, readPlan } = await chainSetup("ch6", [
+    { n: 1, prompt: "x", clip: "C:\\c\\1.mp4" },
+    { n: 2, prompt: "y", clip: "C:\\c\\2.mp4", start: cont(1) },
+    { n: 3, prompt: "z", clip: "C:\\c\\3.mp4", start: cont(2) },
+    { n: 4, prompt: "w", clip: "C:\\c\\4.mp4" },
+  ]);
+  const r = (await core.studio_redo({ project: "P", sub: "ch6", scene: 1 } as never)) as { batch: string; stale: number[] };
+  assert.deepEqual(r.stale, [2, 3]);
+  assert.deepEqual(readPlan("P", "ch6").scenes.map((s) => s.stale), [undefined, true, true, undefined]);
+  // Redoing scene 2 before scene 1's redo finished chains to that live job, not to the old clip.
+  const r2 = (await core.studio_redo({ project: "P", sub: "ch6", scene: 2 } as never)) as { batch: string };
+  const [j1, j2] = core.queue.list();
+  assert.equal(j2.params.chain_from, j1.id);
+  core.queue.approve({ batch: r.batch });
+  core.queue.approve({ batch: r2.batch });
+  await until(() => readPlan("P", "ch6").scenes[1].stale === undefined);
+  const sc = readPlan("P", "ch6").scenes;
+  assert.equal(sc[1].stale, undefined);
+  assert.equal(sc[2].stale, true);
+});
