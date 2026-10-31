@@ -14,7 +14,8 @@ set "FLOW_MCP_OUTPUT=D:\flow-studio\projects"
 rem 8787 is often taken by another local service, so the studio uses 8797. claude\mcp.json uses the same port.
 set "FLOW_MCP_PORT=8797"
 set "FLOW_STUDIO_NO_OPEN=1"
-rem FLOW_MCP_CHROME is left as the caller set it (unset = engine default).
+rem Flow runs in Brave (owner's choice) with the studio's own profile under data\, never the everyday Brave profile.
+if not defined FLOW_MCP_CHROME if exist "%ProgramFiles%\BraveSoftware\Brave-Browser\Application\brave.exe" set "FLOW_MCP_CHROME=%ProgramFiles%\BraveSoftware\Brave-Browser\Application\brave.exe"
 start "Flow Studio server" /b node dist\studio.js
 rem The first page load receives the one-shot UI token, so open the window right away, before anything else can.
 set /a TRIES=0
