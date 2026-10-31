@@ -1,4 +1,4 @@
-import { constants, copyFileSync, existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { constants, copyFileSync, existsSync, mkdirSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { extname, join } from "node:path";
 import { safeName, subDir, within, type Plan } from "./projects.js";
 
@@ -51,15 +51,18 @@ export function listRenders(project: string, sub: string): { version: number; pa
 
 // Copies a finished Remotion render into the sub-project as the next free vN; never overwrites.
 export function renderDone(project: string, sub: string, file: string): { version: number; path: string } {
-  const ext = extname(file).toLowerCase();
-  if (![".mp4", ".webm", ".mov"].includes(ext)) throw new Error("Render must be an mp4, webm or mov file.");
-  if (!existsSync(file) || !statSync(file).isFile()) throw new Error(`Render file not found: ${file}`);
+  // Containment first (never reveal whether an outside path exists), then resolve once and copy that exact file.
   if (!within(file, [join(remotionRoot(), "out")])) throw new Error(`Render must be inside ${join(remotionRoot(), "out")}.`);
+  if (!existsSync(file)) throw new Error(`Render file not found: ${file}`);
+  const real = realpathSync(file);
+  if (!within(real, [join(remotionRoot(), "out")]) || !statSync(real).isFile()) throw new Error(`Render must be a file inside ${join(remotionRoot(), "out")}.`);
+  const ext = extname(real).toLowerCase();
+  if (![".mp4", ".webm", ".mov"].includes(ext)) throw new Error("Render must be an mp4, webm or mov file.");
   const dir = join(subDir(project, sub), "renders");
   mkdirSync(dir, { recursive: true });
   for (let v = Math.max(0, ...listRenders(project, sub).map((r) => r.version)) + 1; ; v++) {
     const path = join(dir, `v${v}${ext}`);
-    try { copyFileSync(file, path, constants.COPYFILE_EXCL); return { version: v, path }; }
+    try { copyFileSync(real, path, constants.COPYFILE_EXCL); return { version: v, path }; }
     catch (e) { if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e; }
   }
 }

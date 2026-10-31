@@ -476,11 +476,13 @@ function renderEdit(el) {
   const [box, lostBox] = editNotes.box(c, "5", "What else do you want in the video, or what should change? (saved automatically)");
   const go = btn(renders.length ? "Revise" : "Edit video", async () => {
     await editNotes.flush(); // Claude reads the saved notes
+    if (Object.keys(editNotes.conflict).length) throw new Error("Your edit notes didn't save (they changed meanwhile). Copy your text from the box, then press again.");
     if (!termUp()) throw new Error("Claude terminal is disconnected.");
+    go.disabled = true; setTimeout(() => { go.disabled = false; }, 5000); // one click, one instruction
     typeToClaude(renders.length
       ? `Revise the video for ${label} using my latest edit notes (studio_edit_notes_read); render a new version and call studio_render_done.`
       : `Edit the full video for ${label}: run studio_to_remotion with the kept clips (music/voiceover if chosen), then build it in Remotion following the plan, my edit notes (studio_edit_notes_read) and the style skill for style ${p && p.style ? p.style : "A or B (the one that fits)"}. Render it and call studio_render_done with the output file.`
-      + (editFiles.music ? ` Music file: ${editFiles.music}.` : "") + (editFiles.voiceover ? ` Voiceover file: ${editFiles.voiceover}.` : ""));
+      + (editFiles.music ? ` Music file: "${editFiles.music}".` : "") + (editFiles.voiceover ? ` Voiceover file: "${editFiles.voiceover}".` : ""));
   }, true, "big");
   if (!termUp() || !kept.length) { go.disabled = true; go.title = !termUp() ? "Claude terminal is disconnected" : "Keep at least one clip first"; }
   const sel = renderSel && renderSel.count === renders.length ? renderSel.v : renders.length ? renders[renders.length - 1].version : null;
