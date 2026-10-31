@@ -26,3 +26,8 @@ Brave works: Google sign-in and Flow both accept it. Launcher sets `FLOW_MCP_CHR
 
 ## Decision
 SWITCH_METHOD=authuser (path form `/u/<n>/`, not the `?authuser=` query)
+
+## Task 5 findings (2026-10-31, live)
+- Flow home (`/u/<n>/`) has `button "New project"`; clicking it lands on `/u/<n>/project/<uuid>` (free). The home also lists `Edit project title` / `Delete project` per project: never touched.
+- The "Credits refresh daily at" time of an account with an untouched balance follows the clock (two accounts read 8:32 AM, then 8:35 AM three minutes later), so it only means something once credits were spent. Exhaustion uses it anyway; worst case an account is retried a little early.
+- Live check: acct 0's stored balance faked to 0 with `FLOW_MCP_FORCE_SWITCH=1`, one image job -> note "acct 0 out of credits → acct 1", new Flow project created in acct 1, image generated and saved there. Balances 50/50 before and after.
