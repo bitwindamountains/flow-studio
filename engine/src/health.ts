@@ -24,7 +24,10 @@ async function run(name: string, hint: string, fn: () => Promise<boolean>): Prom
 let inflight: Promise<Health> | undefined;
 
 // Concurrent callers share one run. Never navigates; the only UI it touches is the account panel (opened, then closed with Escape).
-export function checkFlow(page: Page): Promise<Health> {
+// `whileIdle` runs the panel-opening credits read only when no job is running (and holds job starts meanwhile); it
+// resolves undefined when it declined. Without a queue to ask, the step is skipped.
+export type WhileIdle = (fn: () => Promise<boolean>) => Promise<boolean | undefined>;
+export function checkFlow(page: Page, whileIdle?: WhileIdle, read: (p: Page) => Promise<number | undefined> = readCredits): Promise<Health> {
   return (inflight ??= (async () => {
     const checks: Check[] = [];
     checks.push(await run("signed in", "Flow isn't signed in. Sign in to Google in the Flow window.", async () => !!(await activeAccount(page))));
@@ -38,15 +41,20 @@ export function checkFlow(page: Page): Promise<Health> {
     } else {
       for (const name of ["composer", "settings"]) checks.push({ name, ok: true, hint: "not checked (no project open)" });
     }
-    checks.push(await run("credits readable", `Flow's credit balance couldn't be read - Flow may have changed. ${REMAP}`,
-      async () => (await readCredits(page)) !== undefined));
+    // Awaited without within(): readAccountPanel has its own timeouts, and a second panel read must never overlap it.
+    // It may click overlay backdrops (dismissOverlays) but never clicks inside the account panel (Sign out lives there).
+    const credits = await (whileIdle?.(async () => (await read(page)) !== undefined).catch(() => false) ?? Promise.resolve(undefined));
+    checks.push(credits === undefined
+      ? { name: "credits readable", ok: true, hint: "not checked (job running)" }
+      : credits ? { name: "credits readable", ok: true }
+      : { name: "credits readable", ok: false, hint: `Flow's credit balance couldn't be read - Flow may have changed. ${REMAP}` });
     return { ok: checks.every((c) => c.ok), checks };
   })().finally(() => { inflight = undefined; }));
 }
 
 // Never launches the browser: before the first job there is nothing to check.
-export async function flowHealth(): Promise<Health> {
+export async function flowHealth(whileIdle?: WhileIdle): Promise<Health> {
   const page = await peekFlowPage();
   if (!page) return { ok: false, checks: [{ name: "flow", ok: false, hint: "Flow isn't open yet - it opens with the first job." }] };
-  return checkFlow(page);
+  return checkFlow(page, whileIdle);
 }

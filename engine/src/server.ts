@@ -191,7 +191,7 @@ export async function startServer(core: Core, spawner = startClaude, remotion = 
       if (given !== token) return json(res, 401, { error: "Missing or wrong token." });
 
       if (req.method === "GET" && url.pathname === "/api/health/flow") {
-        const h = await flowHealth();
+        const h = await flowHealth(core instanceof LocalCore ? (fn) => core.queue.whileIdle(fn) : undefined);
         return json(res, 200, { ...h, message: formatHealth(h.checks) });
       }
       if (req.method === "GET" && url.pathname === "/api/pending") {

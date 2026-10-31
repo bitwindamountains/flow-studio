@@ -204,6 +204,15 @@ export class JobQueue {
     return job;
   }
 
+  private gate: Promise<unknown> = Promise.resolve();
+  // Runs fn only when no job is running, and keeps work() from starting one until fn settles (no await between the check and the gate).
+  async whileIdle<T>(fn: () => Promise<T>): Promise<T | undefined> {
+    if (this.busy) return undefined;
+    const p = fn();
+    this.gate = p.catch(() => {});
+    return p;
+  }
+
   private async work(): Promise<void> {
     if (this.working) return;
     this.working = true;
@@ -221,6 +230,7 @@ export class JobQueue {
             this.pacing = null;
           }
         }
+        await this.gate;
         if (job.status !== "queued" || this.manualPause) continue;
         job.status = "running";
         job.attempts++;
