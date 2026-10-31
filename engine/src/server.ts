@@ -10,9 +10,7 @@ import { HOME_DIR } from "./chrome.js";
 import { LocalCore, OUTPUT_ROOT, shapes, type Core } from "./core.js";
 import { loadAccounts } from "./accounts.js";
 import { PtyHub, startClaude } from "./pty.js";
-import { spawn } from "node:child_process";
 import { flowHealth, formatHealth } from "./health.js";
-import { remotionRoot } from "./handoff.js";
 import { projectsRoot, readPlan, writePlan } from "./projects.js";
 
 export const PORT = Number(process.env.FLOW_MCP_PORT ?? 8787);
@@ -29,7 +27,7 @@ const VENDOR: Record<string, [string, string]> = {
   "app.js": [UI_DIR + "app.js", "text/javascript"],
 };
 const sameSecret = (a: string, b: string) => timingSafeEqual(createHash("sha256").update(a).digest(), createHash("sha256").update(b).digest());
-const CSP = `default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self'; connect-src 'self' ws://127.0.0.1:${PORT} ws://localhost:${PORT}; frame-src http://localhost:3000; base-uri 'none'; form-action 'none'`;
+const CSP = `default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self'; connect-src 'self' ws://127.0.0.1:${PORT} ws://localhost:${PORT}; base-uri 'none'; form-action 'none'`;
 const MAX_UPLOAD = 200 * 1024 * 1024;
 
 const MIME: Record<string, string> = {
@@ -88,19 +86,11 @@ export type ServerRole = "owner" | "client" | "none";
 // owns the port (that process owns the Flow tab and the queue), "none" when the port is taken by something else.
 export let lastServer: Server | undefined; // test hook: lets a test close the listener
 
-const REMOTION_URL = "http://localhost:3000";
-export const remotionDefaults = {
-  answering: () => fetch(REMOTION_URL, { signal: AbortSignal.timeout(1500) }).then(() => true, () => false),
-  // Fixed command, cwd only; nothing from a request reaches it. shell:true is needed for npm.cmd on Windows.
-  start: (cwd: string, onEnd: (e?: Error) => void) => void spawn("npm", ["run", "dev"], { cwd, detached: true, stdio: "ignore", shell: process.platform === "win32", windowsHide: true }).on("error", onEnd).on("exit", () => onEnd()).unref(),
-};
-
 // opts.studio: only the standalone Studio (studio.ts) hands out the one-shot UI token; Claude's MCP process never does.
-export async function startServer(core: Core, spawner = startClaude, remotion = remotionDefaults, opts: { studio?: boolean } = {}): Promise<ServerRole> {
+export async function startServer(core: Core, spawner = startClaude, opts: { studio?: boolean } = {}): Promise<ServerRole> {
   // Snapshot the page and its scripts once: an edit to ui/ or node_modules after start (e.g. by Claude) never reaches the owner's window.
   const page = readFileSync(STUDIO_HTML, "utf8");
   const assets = new Map(Object.entries(VENDOR).map(([k, [file]]) => [k, readFileSync(file)]));
-  let remotionStarted = false;
   mkdirSync(UPLOAD_DIR, { recursive: true });
   const token = randomBytes(24).toString("hex");
   // In memory only, never on disk or in the token file: Claude can read the flow token but must not approve credit spend.
@@ -172,19 +162,8 @@ export async function startServer(core: Core, spawner = startClaude, remotion = 
       }
 
       // Owner-only actions: UI token, never the flow token Claude can read.
-      if (req.method === "POST" && ["/api/scene", "/api/cancel-job", "/api/remotion/dev"].includes(url.pathname)) {
+      if (req.method === "POST" && ["/api/scene", "/api/cancel-job"].includes(url.pathname)) {
         if (!ownerOk(req)) return json(res, 403, { error: "Only the studio page can do this." });
-        if (url.pathname === "/api/remotion/dev") {
-          if (remotionStarted) return json(res, 200, { started: false });
-          if (!existsSync(remotionRoot())) return json(res, 400, { error: "Remotion project folder not found." });
-          remotionStarted = true; // set before any await so two concurrent calls cannot both spawn
-          try {
-            if (await remotion.answering()) { remotionStarted = false; return json(res, 200, { started: false }); }
-            // Reset on error AND on exit, so a dev server that stopped can be started again.
-            remotion.start(remotionRoot(), (e) => { if (e) console.error("remotion dev failed:", e.message); remotionStarted = false; });
-          } catch (e) { remotionStarted = false; return json(res, 400, { error: String(e instanceof Error ? e.message : e) }); }
-          return json(res, 200, { started: true });
-        }
         const b = JSON.parse((await readBody(req, 64 * 1024)).toString() || "{}") as { project?: string; sub?: string; n?: number; approved?: unknown; kept?: unknown; id?: string };
         if (url.pathname === "/api/cancel-job") {
           if (!(core instanceof LocalCore)) return json(res, 404, { error: "Not found." });

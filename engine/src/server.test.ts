@@ -25,7 +25,7 @@ test("server: /api/approve needs the UI token, never the flow token", async () =
   const seen: unknown[] = [];
   // Real approve would start Chrome; a spy proves the endpoint reaches core.queue.approve.
   core.queue.approve = (t) => { seen.push(t); return []; };
-  assert.equal(await srv.startServer(core, undefined, undefined, STUDIO), "owner");
+  assert.equal(await srv.startServer(core, undefined, STUDIO), "owner");
   const base = `http://127.0.0.1:${port}`;
   assert.match(await page({}), /data-owner=""/); // not a navigation: no token, and it is not used up
   assert.match(await page({ "sec-fetch-site": "cross-site", "sec-fetch-mode": "navigate" }), /data-owner=""/);
@@ -74,7 +74,7 @@ test("pty websocket: rejects missing token, bad Origin, bad Host; one process pe
     write: (d: string) => void writes.push(d), resize() {}, kill: () => void ev.emit("x"),
   };
   const spawner = () => { spawned++; return fake as never; };
-  assert.equal(await srv.startServer(new LocalCore(), spawner as never, undefined, STUDIO), "owner");
+  assert.equal(await srv.startServer(new LocalCore(), spawner as never, STUDIO), "owner");
   const html = await page();
   const ui = /fs_ui=([0-9a-f]+)/.exec(lastSet)![1];
   const origin = `http://127.0.0.1:${port}`;
@@ -114,7 +114,7 @@ test("pty websocket: garbage frames and a throwing spawner never crash the serve
   const { WebSocket } = await import("ws");
   const { LocalCore } = await import("./core.js");
   const srv = await import("./server.js");
-  assert.equal(await srv.startServer(new LocalCore(), (() => { throw new Error("no claude here"); }) as never, undefined, STUDIO), "owner");
+  assert.equal(await srv.startServer(new LocalCore(), (() => { throw new Error("no claude here"); }) as never, STUDIO), "owner");
   const html = await page();
   const ui = /fs_ui=([0-9a-f]+)/.exec(lastSet)![1];
   const ws = new WebSocket(`ws://127.0.0.1:${port}/pty`, { headers: { origin: `http://127.0.0.1:${port}`, cookie: "fs_ui=" + ui } });
@@ -130,7 +130,7 @@ test("pty websocket: garbage frames and a throwing spawner never crash the serve
   await new Promise((r) => srv.lastServer!.close(r));
 });
 
-test("server: scene, cancel-job and remotion/dev need the UI token and do only their one thing", async () => {
+test("server: scene and cancel-job need the UI token and do only their one thing", async () => {
   const { LocalCore } = await import("./core.js");
   const srv = await import("./server.js");
   const { createSub, readPlan, writePlan } = await import("./projects.js");
@@ -141,17 +141,14 @@ test("server: scene, cancel-job and remotion/dev need the UI token and do only t
   writePlan(plan);
   const core = new LocalCore();
   const held = core.queue.add({ prompt: "p", type: "video", max_credits: 5 } as never);
-  const starts: string[] = [];
-  let up = false;
-  let ended: ((e?: Error) => void) | undefined;
-  assert.equal(await srv.startServer(core, undefined, { answering: async () => up, start: (cwd: string, onEnd: (e?: Error) => void) => { starts.push(cwd); ended = onEnd; } }, STUDIO), "owner");
+  assert.equal(await srv.startServer(core, undefined, STUDIO), "owner");
   const base = `http://127.0.0.1:${port}`;
   const html = await page();
   const ui = /fs_ui=([0-9a-f]+)/.exec(lastSet)![1];
   const flow = /data-token="(\w+)"/.exec(html)![1];
   const post = (path: string, body: object, h: Record<string, string>) => fetch(base + path, { method: "POST", headers: h, body: JSON.stringify(body) });
   const scene = { project: "P", sub: "s", n: 1, approved: true, kept: true };
-  for (const [path, body] of [["/api/scene", scene], ["/api/cancel-job", { id: held.id }], ["/api/remotion/dev", {}]] as const) {
+  for (const [path, body] of [["/api/scene", scene], ["/api/cancel-job", { id: held.id }]] as const) {
     assert.equal((await post(path, body, {})).status, 403, path);
     assert.equal((await post(path, body, { "x-flow-token": flow })).status, 403, path);
     assert.equal((await post(path, body, { cookie: "fs_ui=wrong", origin: base })).status, 403, path);
@@ -159,10 +156,9 @@ test("server: scene, cancel-job and remotion/dev need the UI token and do only t
   }
   assert.equal(readPlan("P", "s").scenes[0].approved, undefined);
   assert.equal(core.queue.list().find((j) => j.id === held.id)!.status, "held");
-  assert.deepEqual(starts, []);
   const h = { cookie: "fs_ui=" + ui, origin: base };
   const media = (p: string) => fetch(`${base}/media?path=${encodeURIComponent(p)}&token=${flow}`).then((r) => r.status);
-  const { projDir } = await import("./projects.js");
+  const { projDir, subDir } = await import("./projects.js");
   writeFileSync(join(projDir("P"), "references", "a.png"), "x");
   assert.equal(await media(join(projDir("P"), "references", "a.png")), 200);
   writeFileSync(join(home, "outside.txt"), "x");
@@ -172,7 +168,12 @@ test("server: scene, cancel-job and remotion/dev need the UI token and do only t
   const png = await fetch(`${base}/media?path=${encodeURIComponent(join(projDir("P"), "references", "a.png"))}&token=${flow}`);
   assert.equal(png.headers.get("x-content-type-options"), "nosniff");
   const root = await fetch(base + "/");
-  assert.match(root.headers.get("content-security-policy") ?? "", /frame-src http:\/\/localhost:3000/);
+  assert.doesNotMatch(root.headers.get("content-security-policy") ?? "", /frame-src/);
+  assert.match(root.headers.get("content-security-policy") ?? "", /default-src 'none'/);
+  assert.equal((await post("/api/remotion/dev", {}, { ...h, "x-flow-token": flow })).status, 404); // the owner route is gone
+  mkdirSync(join(subDir("P", "s"), "renders"), { recursive: true });
+  writeFileSync(join(subDir("P", "s"), "renders", "v1.mp4"), "vid");
+  assert.equal(await media(join(subDir("P", "s"), "renders", "v1.mp4")), 200);
   assert.equal((await post("/api/scene", { ...scene, prompt: "hacked" }, h)).status, 200);
   const s1 = readPlan("P", "s").scenes[0];
   assert.deepEqual([s1.approved, s1.kept, s1.prompt], [true, true, "x"]);
@@ -186,16 +187,6 @@ test("server: scene, cancel-job and remotion/dev need the UI token and do only t
   assert.equal(queued.status, "queued");
   assert.equal((await post("/api/cancel-job", { id: queued.id }, h)).status, 200);
   assert.equal(queued.status, "cancelled");
-  process.env.STUDIO_REMOTION = join(home, "no-such-dir");
-  assert.equal((await post("/api/remotion/dev", {}, h)).status, 400);
-  assert.equal((await fetch(base + "/api/health")).status, 200);
-  process.env.STUDIO_REMOTION = home;
-  assert.equal((await (await post("/api/remotion/dev", { cmd: "calc" }, h)).json() as { started: boolean }).started, true);
-  assert.equal((await (await post("/api/remotion/dev", {}, h)).json() as { started: boolean }).started, false);
-  assert.equal(starts.length, 1);
-  ended!(); // the dev server exited: the next press starts it again
-  assert.equal((await (await post("/api/remotion/dev", {}, h)).json() as { started: boolean }).started, true);
-  assert.equal(starts.length, 2);
   srv.lastServer!.closeAllConnections();
   await new Promise((r) => srv.lastServer!.close(r));
 });

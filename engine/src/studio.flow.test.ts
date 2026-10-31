@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { test } from "node:test";
@@ -459,4 +459,41 @@ test("prepare refuses a continue clip whose source scene changed or went stale (
   assert.equal(j.status, "failed");
   assert.match(j.note ?? j.error ?? "", /Scene 1 changed after this was approved/);
   assert.equal(ran.length, 0);
+});
+
+test("edit notes use a rev conflict check and stay separate from notes.md", async () => {
+  const { core } = await setup("en", []);
+  const call = (m: "studio_edit_notes_read" | "studio_edit_notes_write", a: object = {}) => (core[m] as (a: unknown) => Promise<{ text: string; rev: string }>)({ project: "P", sub: "en", ...a });
+  const r0 = await call("studio_edit_notes_read");
+  assert.equal(r0.text, "");
+  const w = await call("studio_edit_notes_write", { text: "add captions", rev: r0.rev }) as unknown as { rev: string };
+  await assert.rejects(call("studio_edit_notes_write", { text: "stale", rev: r0.rev }), /Edit notes changed/);
+  assert.equal((await call("studio_edit_notes_read")).text, "add captions");
+  assert.equal(((await core.studio_notes_read({ project: "P", sub: "en" } as never)) as { text: string }).text, "");
+  await call("studio_edit_notes_write", { text: "more", rev: w.rev });
+  // defaults to the owner's selection when project/sub are omitted
+  await core.studio_select({ project: "P", sub: "en" } as never);
+  assert.equal(((await core.studio_edit_notes_read({} as never)) as { text: string }).text, "more");
+});
+
+test("studio_render_done copies into renders/v1, v2; refuses outside out/, non-video, never overwrites", async () => {
+  const { core } = await setup("rd", []);
+  const root = mkdtempSync(join(tmpdir(), "fm-rr-"));
+  process.env.STUDIO_REMOTION = root;
+  mkdirSync(join(root, "out"), { recursive: true });
+  const f = (n: string, body: string) => { const p = join(root, "out", n); writeFileSync(p, body); return p; };
+  const done = (file: string) => core.studio_render_done({ project: "P", sub: "rd", file } as never) as Promise<{ version: number; path: string }>;
+  const r1 = await done(f("a.mp4", "one"));
+  assert.equal(r1.version, 1);
+  assert.equal(basename(r1.path), "v1.mp4");
+  const r2 = await done(f("b.mp4", "two"));
+  assert.equal(r2.version, 2);
+  assert.equal(readFileSync(r1.path, "utf8"), "one");
+  assert.deepEqual(((await core.studio_renders({ project: "P", sub: "rd" } as never)) as { renders: { version: number }[] }).renders.map((r) => r.version), [1, 2]);
+  const outside = join(root, "outside.mp4");
+  writeFileSync(outside, "x");
+  await assert.rejects(done(outside), /inside/);
+  await assert.rejects(done(join(root, "out", "..", "outside.mp4")), /inside/);
+  await assert.rejects(done(f("notes.txt", "x")), /mp4, webm or mov/);
+  await assert.rejects(done(join(root, "out", "gone.mp4")), /not found/);
 });

@@ -118,9 +118,9 @@ export function listProjects(): { project: string; subs: string[] }[] {
   return dirs(projectsRoot()).map((project) => ({ project, subs: dirs(join(projectsRoot(), project)).filter((s) => s.toLowerCase() !== "references") }));
 }
 
-export const readNotes = (project: string, sub: string): string => {
+export const readNotes = (project: string, sub: string, file = "notes.md"): string => {
   const d = existingSub(project, sub);
-  try { return readFileSync(join(d, "notes.md"), "utf8"); } catch (e) {
+  try { return readFileSync(join(d, file), "utf8"); } catch (e) {
     if ((e as NodeJS.ErrnoException).code === "ENOENT") return "";
     throw e;
   }
@@ -128,10 +128,10 @@ export const readNotes = (project: string, sub: string): string => {
 // Content hash, not mtime: two writes inside one timestamp tick must still read as different.
 export const notesRev = (text: string): string => createHash("sha256").update(text).digest("hex").slice(0, 16);
 // With a base rev (from a read), refuses to overwrite notes someone else changed since.
-export const writeNotes = (project: string, sub: string, text: string, base?: string): string => {
+export const writeNotes = (project: string, sub: string, text: string, base?: string, file = "notes.md"): string => {
   const d = existingSub(project, sub);
-  if (base !== undefined && base !== notesRev(readNotes(project, sub))) throw new Error("Notes changed since you read them — call studio_notes_read again.");
-  writeFileSync(join(d, "notes.md"), text);
+  if (base !== undefined && base !== notesRev(readNotes(project, sub, file))) throw new Error(file === "notes.md" ? "Notes changed since you read them — call studio_notes_read again." : "Edit notes changed since you read them — call studio_edit_notes_read again.");
+  writeFileSync(join(d, file), text);
   return notesRev(text);
 };
 

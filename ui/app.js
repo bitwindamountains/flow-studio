@@ -4,7 +4,7 @@ document.body.removeAttribute("data-token"); // keep the API token out of the DO
 // The owner session is an HttpOnly cookie the server sets on the first load; the page only learns whether it is the owner.
 const OWNER = document.body.dataset.owner === "1";
 // Reload is harmless now (the cookie is resent); only warn when typed notes are not saved yet.
-addEventListener("beforeunload", (e) => { if (notesTimer || notesSaving || Object.keys(notesConflict).length) { e.preventDefault(); e.returnValue = ""; } });
+addEventListener("beforeunload", (e) => { if (notes.dirty() || editNotes.dirty()) { e.preventDefault(); e.returnValue = ""; } });
 const $ = (id) => document.getElementById(id);
 const api = (method, body = {}) =>
   fetch("/api/" + method, { method: "POST", headers: { "x-flow-token": TOKEN }, body: JSON.stringify(body) }).then((r) => r.json());
@@ -20,14 +20,18 @@ let retry = 0;
 function connect() {
   if (!OWNER || (ws && ws.readyState <= 1)) return;
   ws = new WebSocket(`ws://${location.host}/pty`);
-  ws.onopen = () => { retry = 0; term.reset(); /* the server replays its scrollback */ fit.fit(); send({ t: "r", cols: term.cols, rows: term.rows }); };
+  ws.onopen = () => { retry = 0; refresh(true); term.reset(); /* the server replays its scrollback */ fit.fit(); send({ t: "r", cols: term.cols, rows: term.rows }); };
   ws.onmessage = (e) => term.write(e.data);
   ws.onclose = () => {
+    refresh(true); // the Edit button is disabled while the terminal is down
     if (retry >= 6) return void term.write("\r\n[disconnected - press Restart to retry]\r\n");
     term.write("\r\n[disconnected - reconnecting]\r\n");
     setTimeout(connect, [1000, 2000, 5000, 10000][Math.min(retry++, 3)]);
   };
 }
+const termUp = () => !!ws && ws.readyState === 1;
+// Same as the owner typing it: text, then Enter (a beat later so the TUI does not treat it as one pasted block).
+function typeToClaude(text) { send({ t: "i", d: text }); setTimeout(() => send({ t: "i", d: "\r" }), 250); }
 term.onData((d) => send({ t: "i", d }));
 term.onResize(({ cols, rows }) => send({ t: "r", cols, rows }));
 $("restart").onclick = () => {
@@ -189,10 +193,61 @@ const slug = (s) => s.trim().replace(/\s+/g, "-").replace(/[^A-Za-z0-9_-]/g, "")
 let view = "ideas";
 let data = { plan: null, pending: [], other: [], status: null, lessons: [], notes: null };
 let sig = "";
-// Notes: the page re-reads them on every poll unless the box has focus or a save is pending (then local text wins).
-const notesText = {}, notesRev = {}, notesConflict = {};
-let notesTimer = null, notesSaving = false;
 const notesKey = () => cur().project + "/" + cur().sub;
+// Notes and Edit notes share this: the page re-reads on every poll unless the box has focus or a save is pending (then local text wins).
+function makeNotes(id, label, readM, writeM) {
+  const st = { text: {}, rev: {}, conflict: {}, timer: null, saving: false };
+  st.dirty = () => !!(st.timer || st.saving || Object.keys(st.conflict).length);
+  st.load = async () => {
+    const key = notesKey();
+    if (!st.timer && !st.saving && document.activeElement?.id !== id) {
+      const r = await api(readM, cur());
+      if (r && typeof r.text === "string") { st.text[key] = r.text; st.rev[key] = r.rev; }
+    }
+    return st.text[key] ?? null;
+  };
+  st.save = async (key, c) => {
+    clearTimeout(st.timer);
+    st.timer = null;
+    st.saving = true;
+    const text = st.text[key];
+    try {
+      const r = await apiOk(writeM, { ...c, text, rev: st.rev[key] });
+      st.rev[key] = r.rev;
+    } catch (e) {
+      // Someone (Claude) changed them since this page read them: keep the typed text visible, reload theirs.
+      st.conflict[key] = text;
+      delete st.text[key];
+      toast(String(e.message || e) + " Your unsaved text is shown under " + label + ".");
+    } finally {
+      st.saving = false;
+      refresh(true);
+    }
+  };
+  st.flush = async () => { if (st.timer) await st.save(notesKey(), cur()); };
+  // [textarea, conflict box or null] for the current selection.
+  st.box = (c, rows, placeholder) => {
+    const ta = h("textarea", { id, rows, "aria-label": label, placeholder });
+    const key = notesKey();
+    ta.value = st.text[key] ?? "";
+    ta.disabled = !(key in st.text); // never autosave before the saved text has loaded (the next poll loads it)
+    ta.oninput = () => {
+      if (!(key in st.text)) return;
+      st.text[key] = ta.value;
+      clearTimeout(st.timer);
+      st.timer = setTimeout(() => st.save(key, c), 800);
+    };
+    const lost = st.conflict[key];
+    const lostBox = lost === undefined ? null : h("div", { class: "lesson" },
+      h("b", {}, `Your unsaved ${label.toLowerCase()} (copy what you need, then dismiss):`),
+      (() => { const t = h("textarea", { rows: "4", readonly: true, "aria-label": "Unsaved " + label.toLowerCase() }); t.value = lost; return t; })(),
+      btn("Dismiss", () => { delete st.conflict[key]; }));
+    return [ta, lostBox];
+  };
+  return st;
+}
+const notes = makeNotes("notes", "Notes", "studio_notes_read", "studio_notes_write");
+const editNotes = makeNotes("edit-notes", "Edit notes", "studio_edit_notes_read", "studio_edit_notes_write");
 let reported = "", seen = "";
 async function fetchData() {
   // Tell the engine (and so Claude) which project/sub the owner has selected; awaited so the next read is not stale.
@@ -223,14 +278,14 @@ async function fetchData() {
   data.pending = groups.filter(mine);
   data.other = groups.filter((g) => !mine(g)); // non-studio jobs and other sub-projects: still approvable/cancellable here
   if (view === "plan" && data.plan) {
-    const key = notesKey();
-    if (!notesTimer && !notesSaving && document.activeElement?.id !== "notes") {
-      const r = await api("studio_notes_read", cur());
-      if (r && typeof r.text === "string") { notesText[key] = r.text; notesRev[key] = r.rev; }
-    }
-    data.notes = notesText[key] ?? null;
+    data.notes = await notes.load();
     const refs = await api("studio_references", cur());
     data.refs = refs && !refs.error ? [...refs.project, ...refs.sub] : [];
+  }
+  if (view === "edit") {
+    data.editNotes = await editNotes.load();
+    const r = await api("studio_renders", cur());
+    data.renders = r && r.renders ? r.renders : [];
   }
   if (view === "generate") {
     const [st, ls] = await Promise.all([api("studio_status", cur()), get("/api/lessons")]);
@@ -280,23 +335,6 @@ const staleNote = (s) => (s.stale && isCont(s) ? h("p", { class: "stale" }, `Sce
 
 // ---- Plan ----
 const lessonText = {};
-async function saveNotes(key, c) {
-  notesTimer = null;
-  notesSaving = true;
-  const text = notesText[key];
-  try {
-    const r = await apiOk("studio_notes_write", { ...c, text, rev: notesRev[key] });
-    notesRev[key] = r.rev;
-  } catch (e) {
-    // Someone (Claude) changed the notes since this page read them: keep the typed text visible, reload theirs.
-    notesConflict[key] = text;
-    delete notesText[key];
-    toast(String(e.message || e) + " Your unsaved text is shown under Notes.");
-  } finally {
-    notesSaving = false;
-    refresh(true);
-  }
-}
 function renderPlan(el) {
   const p = data.plan, c = cur();
   const np = h("input", { placeholder: "Project", "aria-label": "New project" }), ns = h("input", { placeholder: "Sub-project", "aria-label": "New sub-project" });
@@ -320,24 +358,10 @@ function renderPlan(el) {
         const r = await apiOk("studio_add_reference", { ...c, path: await upload(f) });
         await savePlan((pl) => { const sc = pl.scenes.find((x) => x.n === s.n); sc.references = [...(sc.references || []), r.path]; });
       }), h("small", {}, (s.references || []).length ? ` ${s.references.length} ref` : ""))));
-    const notes = h("textarea", { id: "notes", rows: "6", "aria-label": "Notes", placeholder: "Notes for this sub-project (saved automatically)" });
-    const key = notesKey();
-    notes.value = notesText[key] ?? "";
-    notes.disabled = !(key in notesText); // never autosave before the saved notes have loaded (the next poll loads them)
-    notes.oninput = () => {
-      if (!(key in notesText)) return;
-      notesText[key] = notes.value;
-      clearTimeout(notesTimer);
-      notesTimer = setTimeout(() => saveNotes(key, c), 800);
-    };
-    const lost = notesConflict[key];
-    const lostBox = lost === undefined ? null : h("div", { class: "lesson" },
-      h("b", {}, "Your unsaved notes (copy what you need, then dismiss):"),
-      (() => { const t = h("textarea", { rows: "4", readonly: true, "aria-label": "Unsaved notes" }); t.value = lost; return t; })(),
-      btn("Dismiss", () => { delete notesConflict[key]; }));
+    const [notesBox, lostBox] = notes.box(c, "6", "Notes for this sub-project (saved automatically)");
     kids.push(h("h3", {}, `${p.project} / ${p.sub}`), h("div", { class: "row" }, asp, sty),
       p.scenes.length ? h("table", {}, h("thead", {}, h("tr", {}, ...["#", "Frame prompt", "Clip prompt", "Start", "Camera", "Duration", "Model · res", "Caption", "Voiceover", "References"].map((t) => h("th", {}, t)))), h("tbody", {}, rows)) : h("p", {}, "No scenes yet. Ask Claude to write the plan."),
-      h("h3", {}, "Notes"), notes, lostBox,
+      h("h3", {}, "Notes"), notesBox, lostBox,
       h("h3", {}, "Reference images"), picker("Add project reference", async (f) => { await apiOk("studio_add_reference", { project: c.project, path: await upload(f) }); }),
       h("div", { class: "refs" }, (data.refs || []).map((r) => { const name = r.split(/[\\/]/).pop(); return h("figure", {}, h("img", { src: media(r), alt: name }), h("figcaption", {}, name)); })));
     if (p.lessons && p.lessons.length) kids.push(h("details", {}, h("summary", {}, `Lessons (${p.lessons.length})`), h("ul", {}, p.lessons.map((l) => h("li", {}, `[${l.scope}] ${l.text}`)))));
@@ -441,23 +465,37 @@ function renderGen(el) {
   el.replaceChildren(...kids);
 }
 
-// ---- Edit ----
+// ---- Edit: Claude edits the whole video in Remotion; this view collects the extras and shows the renders ----
+const editFiles = {};
+let renderSel = null; // { count, v }: the owner's pick, forgotten when a new render arrives
 function renderEdit(el) {
-  if (el.dataset.built) return; // keep the iframe and chosen files alive across polls
-  el.dataset.built = "1";
-  const files = {};
-  const out = h("pre", { class: "dim" });
-  const frame = h("iframe", { src: "http://localhost:3000", title: "Remotion Studio", class: "frame", sandbox: "allow-scripts allow-same-origin allow-forms allow-downloads" });
+  if (!have()) return el.replaceChildren(h("p", {}, "Pick or create a project first (Plan tab)."));
+  const p = data.plan, c = cur(), renders = data.renders || [];
+  const kept = (p ? p.scenes : []).filter((s) => s.kept && s.clip);
+  const label = `${c.project}/${c.sub}`;
+  const [box, lostBox] = editNotes.box(c, "5", "What else do you want in the video, or what should change? (saved automatically)");
+  const go = btn(renders.length ? "Revise" : "Edit video", async () => {
+    await editNotes.flush(); // Claude reads the saved notes
+    if (!termUp()) throw new Error("Claude terminal is disconnected.");
+    typeToClaude(renders.length
+      ? `Revise the video for ${label} using my latest edit notes (studio_edit_notes_read); render a new version and call studio_render_done.`
+      : `Edit the full video for ${label}: run studio_to_remotion with the kept clips (music/voiceover if chosen), then build it in Remotion following the plan, my edit notes (studio_edit_notes_read) and the style skill for style ${p && p.style ? p.style : "A or B (the one that fits)"}. Render it and call studio_render_done with the output file.`
+      + (editFiles.music ? ` Music file: ${editFiles.music}.` : "") + (editFiles.voiceover ? ` Voiceover file: ${editFiles.voiceover}.` : ""));
+  }, true, "big");
+  if (!termUp() || !kept.length) { go.disabled = true; go.title = !termUp() ? "Claude terminal is disconnected" : "Keep at least one clip first"; }
+  const sel = renderSel && renderSel.count === renders.length ? renderSel.v : renders.length ? renders[renders.length - 1].version : null;
+  const shown = renders.find((r) => r.version === sel);
   el.replaceChildren(
-    h("div", { class: "row" }, picker("Music", async (f) => (files.music = await upload(f)), "audio/*"), picker("Voiceover", async (f) => (files.voiceover = await upload(f)), "audio/*")),
-    h("div", { class: "row" },
-      btn("Send kept clips to Remotion", async () => { out.textContent = JSON.stringify(await apiOk("studio_to_remotion", { ...cur(), ...files }), null, 2); }),
-      btn("Start Remotion Studio", async () => {
-        const r = await owner("/api/remotion/dev", {});
-        toast(r.started ? "Starting Remotion Studio..." : "Remotion Studio already running");
-        setTimeout(() => (frame.src = "http://localhost:3000"), 6000);
-      }, true)),
-    out, frame);
+    h("h3", {}, `Kept clips (${kept.length})`),
+    kept.length ? h("div", { class: "thumbs" }, kept.map((s) => h("figure", {}, h("video", { src: media(s.clip), muted: true, preload: "metadata" }), h("figcaption", {}, `Scene ${s.n}`))))
+      : h("p", { class: "dim" }, "No kept clips yet. Keep clips in the Generate tab."),
+    h("div", { class: "row" }, picker("Music", async (f) => (editFiles.music = await upload(f)), "audio/*"), picker("Voiceover", async (f) => (editFiles.voiceover = await upload(f)), "audio/*")),
+    h("h3", {}, "Edit notes"), box, lostBox,
+    h("div", { class: "row" }, go),
+    shown ? h("div", {},
+      h("h3", {}, "Latest render"),
+      h("div", { class: "row" }, renders.map((r) => btn(`v${r.version}`, () => { renderSel = { count: renders.length, v: r.version }; }, false, r.version === sel ? "ok" : ""))),
+      h("video", { src: media(shown.path), controls: true, preload: "metadata", class: "render" })) : null);
 }
 
 refresh(true);

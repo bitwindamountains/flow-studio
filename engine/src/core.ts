@@ -14,7 +14,7 @@ import { ACCOUNTS_FILE, currentLocation, discoverAccounts, ensureAffordable, fin
 import { BIN, COMPUTER, IS_MAC, IS_WIN, moveToBin } from "./platform.js";
 import { PlanSchema, sceneSettings, projDir, subDir, safeName, addReference, createSub, listProjects, notesRev, planRev, readNotes, readPlan, uploadsDir, within, writeNotes, writePlan } from "./projects.js";
 import { readJson, writeJsonAtomic } from "./persist.js";
-import { handoff } from "./handoff.js";
+import { handoff, listRenders, renderDone } from "./handoff.js";
 import { proposeLesson, readLessons } from "./lessons.js";
 import { TECHNIQUES, techniqueById } from "./techniques.js";
 
@@ -298,6 +298,10 @@ export const shapes = {
   studio_to_remotion: { ...PS, music: z.string().optional(), voiceover: z.string().optional() },
   studio_propose_lesson: { text: z.string().min(1), scope: z.string().default("global") },
   studio_accounts_refresh: {},
+  studio_edit_notes_read: { ...PS },
+  studio_edit_notes_write: { ...PS, text: z.string(), rev: z.string().optional().describe("The `rev` from your last studio_edit_notes_read; the write is refused if the edit notes changed since.") },
+  studio_render_done: { ...PS, file: z.string().min(1).describe("Absolute path of the finished render (mp4/webm/mov) inside the Remotion project's out/ folder.") },
+  studio_renders: { ...PS },
   studio_notes_write: { ...PS, text: z.string(), rev: z.string().optional().describe("The notes `rev` from your last studio_notes_read; the write is refused if the notes changed since.") },
   studio_add_reference: { project: PS.project, sub: z.string().optional().describe("Omit for a project-level reference."), path: z.string().describe("A file already uploaded through the studio page (inside the uploads folder).") },
 };
@@ -356,6 +360,10 @@ export interface Core {
   studio_plan_write(a: Args<"studio_plan_write">): Promise<unknown>;
   studio_notes_read(a: Args<"studio_notes_read">): Promise<unknown>;
   studio_notes_write(a: Args<"studio_notes_write">): Promise<unknown>;
+  studio_edit_notes_read(a: Args<"studio_edit_notes_read">): Promise<unknown>;
+  studio_edit_notes_write(a: Args<"studio_edit_notes_write">): Promise<unknown>;
+  studio_render_done(a: Args<"studio_render_done">): Promise<unknown>;
+  studio_renders(a: Args<"studio_renders">): Promise<unknown>;
   studio_storyboard(a: Args<"studio_storyboard">): Promise<unknown>;
   studio_generate(a: Args<"studio_generate">): Promise<unknown>;
   studio_redo(a: Args<"studio_redo">): Promise<unknown>;
@@ -694,6 +702,14 @@ export class LocalCore implements Core {
   async studio_add_reference(a: Args<"studio_add_reference">) { return { path: addReference(this.pickProject(a.project), a.sub, a.path) }; }
   async studio_notes_read(a: Args<"studio_notes_read">) {
     const { project, sub } = this.pick(a); const text = readNotes(project, sub); return { text, rev: notesRev(text) }; }
+  async studio_edit_notes_read(a: Args<"studio_edit_notes_read">) {
+    const { project, sub } = this.pick(a); const text = readNotes(project, sub, "edit-notes.md"); return { text, rev: notesRev(text) }; }
+  async studio_edit_notes_write(a: Args<"studio_edit_notes_write">) {
+    const { project, sub } = this.pick(a);
+    return { ok: true, rev: writeNotes(project, sub, a.text, a.rev, "edit-notes.md") };
+  }
+  async studio_render_done(a: Args<"studio_render_done">) { const { project, sub } = this.pick(a); return renderDone(project, sub, a.file); }
+  async studio_renders(a: Args<"studio_renders">) { const { project, sub } = this.pick(a); return { renders: listRenders(project, sub) }; }
   async studio_notes_write(a: Args<"studio_notes_write">) {
     const { project, sub } = this.pick(a); const { text, rev } = a;
     return { ok: true, rev: writeNotes(project, sub, text, rev) };

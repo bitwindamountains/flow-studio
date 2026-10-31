@@ -48,6 +48,10 @@ export class RemoteCore implements Core {
   studio_plan_write = (a: unknown) => call("studio_plan_write", a);
   studio_notes_read = (a: unknown) => call("studio_notes_read", a);
   studio_notes_write = (a: unknown) => call("studio_notes_write", a);
+  studio_edit_notes_read = (a: unknown) => call("studio_edit_notes_read", a);
+  studio_edit_notes_write = (a: unknown) => call("studio_edit_notes_write", a);
+  studio_render_done = (a: unknown) => call("studio_render_done", a);
+  studio_renders = (a: unknown) => call("studio_renders", a);
   studio_storyboard = (a: unknown) => call("studio_storyboard", a);
   studio_generate = (a: unknown) => call("studio_generate", a);
   studio_redo = (a: unknown) => call("studio_redo", a);

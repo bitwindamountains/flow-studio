@@ -423,6 +423,50 @@ server.registerTool(
 );
 
 server.registerTool(
+  "studio_edit_notes_read",
+  {
+    title: "Read edit notes",
+    description: "Read the owner's edit notes (edit-notes.md): what they want in or changed about the finished video. Returns { text, rev } immediately; pass that rev to studio_edit_notes_write. project/sub are optional: they default to the owner's selection (studio_current).",
+    inputSchema: shapes.studio_edit_notes_read,
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
+  (args) => reply(core.studio_edit_notes_read(args)),
+);
+
+server.registerTool(
+  "studio_edit_notes_write",
+  {
+    title: "Write edit notes",
+    description: "Replace the sub-project's edit-notes.md. Pass `rev` from your last studio_edit_notes_read: if the owner changed them since, the write is refused - read again and merge. Returns { ok, rev }. project/sub default to the owner's selection.",
+    inputSchema: shapes.studio_edit_notes_write,
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+  },
+  (args) => reply(core.studio_edit_notes_write(args)),
+);
+
+server.registerTool(
+  "studio_render_done",
+  {
+    title: "Register finished render",
+    description: "Call after rendering the edited video: copies the file (must be inside the Remotion project's out/ folder; mp4/webm/mov) to projects/<P>/<sub>/renders/v<N>.<ext>, N = next free number; never overwrites earlier versions. Returns { version, path }. project/sub default to the owner's selection.",
+    inputSchema: shapes.studio_render_done,
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+  },
+  (args) => reply(core.studio_render_done(args)),
+);
+
+server.registerTool(
+  "studio_renders",
+  {
+    title: "List renders",
+    description: "List the rendered versions of the sub-project's edited video: { renders: [{version, path}] }. project/sub default to the owner's selection.",
+    inputSchema: shapes.studio_renders,
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
+  (args) => reply(core.studio_renders(args)),
+);
+
+server.registerTool(
   "studio_propose_lesson",
   {
     title: "Propose lesson",

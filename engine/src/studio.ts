@@ -8,7 +8,7 @@ import { openUrl } from "./platform.js";
 process.on("unhandledRejection", (e) => console.error("flow-mcp: unhandled rejection:", e));
 process.on("uncaughtException", (e) => console.error("flow-mcp: uncaught exception:", e));
 const local = new LocalCore();
-const role = await startServer(local, undefined, undefined, { studio: true });
+const role = await startServer(local, undefined, { studio: true });
 const url = `http://127.0.0.1:${PORT}`;
 if (role === "none") {
   // Before restore(): a process that is about to exit must not touch the shared queue file.
