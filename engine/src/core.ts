@@ -14,7 +14,7 @@ import { ACCOUNTS_FILE, currentLocation, discoverAccounts, ensureAffordable, fin
 import { BIN, COMPUTER, IS_MAC, IS_WIN, moveToBin } from "./platform.js";
 import { PlanSchema, sceneSettings, projDir, subDir, safeName, addReference, createSub, listProjects, notesRev, planRev, readNotes, readPlan, uploadsDir, within, writeNotes, writePlan } from "./projects.js";
 import { readJson, writeJsonAtomic } from "./persist.js";
-import { handoff, listRenders, renderDone } from "./handoff.js";
+import { clipsDir, handoff, listRenders, renderDone } from "./handoff.js";
 import { proposeLesson, readLessons } from "./lessons.js";
 import { TECHNIQUES, techniqueById } from "./techniques.js";
 
@@ -817,7 +817,7 @@ export class LocalCore implements Core {
 
   private clipJob(plan: ReturnType<typeof readPlan>, scene: ReturnType<typeof readPlan>["scenes"][number], a: { duration?: 4 | 6 | 8 | 10; resolution?: "360p" | "720p"; model?: string; max_credits?: number; prompt?: string }, batch: string, inBatch = new Map<number, Job>()) {
     const set = sceneSettings(scene, a);
-    const dir = join(subDir(plan.project, plan.sub), "clips");
+    const dir = clipsDir(plan.project, plan.sub);
     const from = scene.start?.kind === "continue" ? scene.start.from : undefined;
     const params: SceneParams = {
       prompt: a.prompt ?? scene.prompt, type: "video", max_credits: a.max_credits ?? set.max_credits, duration: set.duration, resolution: set.resolution, model: set.model,
@@ -894,7 +894,7 @@ export class LocalCore implements Core {
     const plan = readPlan(project, sub);
     for (const [what, p] of [["music", music], ["voiceover", voiceover]] as const)
       if (p && !within(p, [uploadsDir()])) throw new Error(`${what} must be a file uploaded through the studio page (inside the uploads folder).`);
-    const clips = join(subDir(project, sub), "clips");
+    const clips = clipsDir(project, sub);
     for (const s of plan.scenes) if (s.kept && s.clip && !within(s.clip, [clips])) throw new Error(`Scene ${s.n}: kept clip must be inside ${clips}.`);
     return { ...handoff(plan, { music, voiceover }), style: plan.style };
   }

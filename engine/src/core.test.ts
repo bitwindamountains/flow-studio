@@ -7,6 +7,7 @@ import { test } from "node:test";
 const home = mkdtempSync(join(tmpdir(), "fm-core-"));
 process.env.FLOW_MCP_HOME = home;
 process.env.FLOW_MCP_OUTPUT = join(home, "out");
+process.env.STUDIO_REMOTION = join(home, "remotion");
 
 test("one generate call of 3 video scenes is one approval group; wait does not block on held", async () => {
   const { LocalCore } = await import("./core.js");

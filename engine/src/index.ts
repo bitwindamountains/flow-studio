@@ -448,7 +448,7 @@ server.registerTool(
   "studio_render_done",
   {
     title: "Register finished render",
-    description: "Call after rendering the edited video: copies the file (must be inside the Remotion project's out/ folder; mp4/webm/mov) to projects/<P>/<sub>/renders/v<N>.<ext>, N = next free number; never overwrites earlier versions. Returns { version, path }. project/sub default to the owner's selection.",
+    description: "Call after rendering the edited video, ideally straight to my-video/out/<project>/<sub>/v<N>.mp4. The file must be inside the Remotion project's out/ folder (mp4/webm/mov). A vN already in out/<project>/<sub>/ is registered as is; any other file is MOVED there (no copy) as the next free v<N>; never overwrites earlier versions. Returns { version, path }. project/sub default to the owner's selection.",
     inputSchema: shapes.studio_render_done,
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },
@@ -536,7 +536,7 @@ server.registerTool(
   "studio_to_remotion",
   {
     title: "Hand off to Remotion",
-    description: "Copy the kept clips (a.mp4, b.mp4...), optional music (bg.mp3) and voiceover (vo.mp3) plus captions.json into a fresh public/<project>/<letter>/ folder of the owner's Remotion project. Returns { dir, files, style }. Then follow the owner's remotion-style-a / -b skill to add a NEW <Composition> in src/Root.tsx; transcribe vo.mp3 for word timing if present. project/sub are optional: when omitted they default to the project the owner selected in the studio (studio_current); with no selection the call fails.",
+    description: "Prepare the Remotion edit. Copies nothing: the clips already live in my-video/public/<project>/<sub>/clips/. Writes captions.json there and MOVES the optional music / voiceover upload in as bg.<ext> / vo.<ext> (refuses if one already exists). Returns { dir, clips (kept clips in scene order as staticFile() paths), captions, music?, voiceover?, style }. Then follow the owner's remotion-style-a / -b skill to add a NEW <Composition> in src/Root.tsx; transcribe the voiceover for word timing if present. project/sub are optional: when omitted they default to the project the owner selected in the studio (studio_current); with no selection the call fails.",
     inputSchema: shapes.studio_to_remotion,
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },

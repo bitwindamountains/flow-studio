@@ -12,6 +12,7 @@ import { loadAccounts } from "./accounts.js";
 import { PtyHub, startClaude } from "./pty.js";
 import { flowHealth, formatHealth } from "./health.js";
 import { projectsRoot, readPlan, writePlan } from "./projects.js";
+import { remotionRoot } from "./handoff.js";
 
 export const PORT = Number(process.env.FLOW_MCP_PORT ?? 8787);
 export const TOKEN_FILE = join(HOME_DIR, "token");
@@ -61,7 +62,8 @@ const real = (p: string) => { try { return realpathSync(p); } catch { return res
 const inside = (file: string, dir: string) => real(file).startsWith(real(dir) + sep);
 
 function sendMedia(req: IncomingMessage, res: ServerResponse, file: string) {
-  if (!(inside(file, OUTPUT_ROOT) || inside(file, UPLOAD_DIR) || inside(file, CAPTIONS_DIR) || inside(file, projectsRoot())) || !existsSync(file)) return json(res, 404, { error: "Not found." });
+  const roots = [OUTPUT_ROOT, UPLOAD_DIR, CAPTIONS_DIR, projectsRoot(), join(remotionRoot(), "public"), join(remotionRoot(), "out")];
+  if (!roots.some((r) => inside(file, r)) || !existsSync(file)) return json(res, 404, { error: "Not found." });
   const { size } = statSync(file);
   const type = MIME[extname(file).toLowerCase()];
   if (!type) return json(res, 404, { error: "Not found." }); // images, video and audio only: never HTML/JS/SVG

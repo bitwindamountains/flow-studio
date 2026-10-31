@@ -480,8 +480,8 @@ function renderEdit(el) {
     if (!termUp()) throw new Error("Claude terminal is disconnected.");
     go.disabled = true; setTimeout(() => { go.disabled = false; }, 5000); // one click, one instruction
     typeToClaude(renders.length
-      ? `Revise the video for ${label} using my latest edit notes (studio_edit_notes_read); render a new version and call studio_render_done.`
-      : `Edit the full video for ${label}: run studio_to_remotion with the kept clips (music/voiceover if chosen), then build it in Remotion following the plan, my edit notes (studio_edit_notes_read) and the style skill for style ${p && p.style ? p.style : "A or B (the one that fits)"}. Render it and call studio_render_done with the output file.`
+      ? `Revise the video for ${label} using my latest edit notes (studio_edit_notes_read); render a new version to my-video/out/${c.project}/${c.sub}/ as the next free v<N>.mp4 and call studio_render_done with it.`
+      : `Edit the full video for ${label}: run studio_to_remotion (music/voiceover if chosen) - the kept clips are already in my-video/public/${c.project}/${c.sub}/clips, use the staticFile paths it returns. Build a NEW composition following the plan, my edit notes (studio_edit_notes_read) and the style skill for style ${p && p.style ? p.style : "A or B (the one that fits)"}. Render to my-video/out/${c.project}/${c.sub}/v<N>.mp4 and call studio_render_done with that file.`
       + (editFiles.music ? ` Music file: "${editFiles.music}".` : "") + (editFiles.voiceover ? ` Voiceover file: "${editFiles.voiceover}".` : ""));
   }, true, "big");
   if (!termUp() || !kept.length) { go.disabled = true; go.title = !termUp() ? "Claude terminal is disconnected" : "Keep at least one clip first"; }

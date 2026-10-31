@@ -10,6 +10,7 @@ const port = 20000 + Math.floor(Math.random() * 20000);
 process.env.FLOW_MCP_PORT = String(port);
 process.env.FLOW_MCP_HOME = home;
 process.env.FLOW_MCP_OUTPUT = join(home, "out");
+process.env.STUDIO_REMOTION = join(home, "remotion");
 const STUDIO = { studio: true };
 // A top-level navigation, the only request that may receive the one-shot UI token. fetch() forces sec-fetch-mode
 // to "cors", so this goes through node:http (with a throwaway agent, since earlier tests' servers are closed).
@@ -158,7 +159,7 @@ test("server: scene and cancel-job need the UI token and do only their one thing
   assert.equal(core.queue.list().find((j) => j.id === held.id)!.status, "held");
   const h = { cookie: "fs_ui=" + ui, origin: base };
   const media = (p: string) => fetch(`${base}/media?path=${encodeURIComponent(p)}&token=${flow}`).then((r) => r.status);
-  const { projDir, subDir } = await import("./projects.js");
+  const { projDir } = await import("./projects.js");
   writeFileSync(join(projDir("P"), "references", "a.png"), "x");
   assert.equal(await media(join(projDir("P"), "references", "a.png")), 200);
   writeFileSync(join(home, "outside.txt"), "x");
@@ -171,9 +172,17 @@ test("server: scene and cancel-job need the UI token and do only their one thing
   assert.doesNotMatch(root.headers.get("content-security-policy") ?? "", /frame-src/);
   assert.match(root.headers.get("content-security-policy") ?? "", /default-src 'none'/);
   assert.equal((await post("/api/remotion/dev", {}, { ...h, "x-flow-token": flow })).status, 404); // the owner route is gone
-  mkdirSync(join(subDir("P", "s"), "renders"), { recursive: true });
-  writeFileSync(join(subDir("P", "s"), "renders", "v1.mp4"), "vid");
-  assert.equal(await media(join(subDir("P", "s"), "renders", "v1.mp4")), 200);
+  // Remotion public (clips) and out (renders) are served too; never HTML there either.
+  for (const d of ["public", "out"]) {
+    const dir = join(home, "remotion", d, "P", "s");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "v1.mp4"), "vid");
+    writeFileSync(join(dir, "x.html"), "<script>1</script>");
+    assert.equal(await media(join(dir, "v1.mp4")), 200, d);
+    assert.equal(await media(join(dir, "x.html")), 404, d);
+  }
+  writeFileSync(join(home, "remotion", "Root.mp4"), "x");
+  assert.equal(await media(join(home, "remotion", "Root.mp4")), 404); // the Remotion root itself is not served
   assert.equal((await post("/api/scene", { ...scene, prompt: "hacked" }, h)).status, 200);
   const s1 = readPlan("P", "s").scenes[0];
   assert.deepEqual([s1.approved, s1.kept, s1.prompt], [true, true, "x"]);

@@ -7,52 +7,51 @@ import type { Plan } from "./projects.js";
 
 const tmp = mkdtempSync(join(tmpdir(), "fm-ho-"));
 process.env.STUDIO_REMOTION = join(tmp, "remotion");
-const { handoff, nextLetter } = await import("./handoff.js");
+const { handoff, clipsDir, subPublicDir } = await import("./handoff.js");
 
-const clip = (name: string, body: string) => { const p = join(tmp, name); writeFileSync(p, body); return p; };
-const mk = (project: string): Plan => ({
-  project, sub: "s", aspect: "9:16",
-  scenes: [
-    { n: 1, prompt: "x", kept: true, clip: clip(`${project}1.mp4`, "one"), caption: "C1", voiceover: "V1" },
-    { n: 2, prompt: "x", kept: false, clip: clip(`${project}2.mp4`, "two"), caption: "C2" },
-    { n: 3, prompt: "x", kept: true, clip: clip(`${project}3.mp4`, "three"), voiceover: "V3" },
-  ],
+const mk = (project: string): Plan => {
+  mkdirSync(clipsDir(project, "s"), { recursive: true });
+  const clip = (n: string) => { const p = join(clipsDir(project, "s"), n); writeFileSync(p, n); return p; };
+  return {
+    project, sub: "s", aspect: "9:16",
+    scenes: [
+      { n: 1, prompt: "x", kept: true, clip: clip("scene-01.mp4"), caption: "C1", voiceover: "V1" },
+      { n: 2, prompt: "x", kept: false, clip: clip("scene-02.mp4"), caption: "C2" },
+      { n: 3, prompt: "x", kept: true, clip: clip("scene-03.mp4"), voiceover: "V3" },
+    ],
+  };
+};
+
+test("kept clips in scene order as staticFile paths; unkept skipped; nothing copied", () => {
+  const r = handoff(mk("Order"), {});
+  assert.deepEqual(r.clips, ["Order/s/clips/scene-01.mp4", "Order/s/clips/scene-03.mp4"]);
+  assert.equal(r.dir, subPublicDir("Order", "s"));
+  assert.ok(!existsSync(join(r.dir, "a.mp4")));
 });
 
-test("copies kept clips in scene order as a.mp4, b.mp4; source clips remain; unkept skipped", () => {
-  const plan = mk("Order");
-  const r = handoff(plan, {});
-  assert.equal(readFileSync(join(r.dir, "a.mp4"), "utf8"), "one");
-  assert.equal(readFileSync(join(r.dir, "b.mp4"), "utf8"), "three");
-  assert.ok(!existsSync(join(r.dir, "c.mp4")));
-  assert.ok(existsSync(plan.scenes[0].clip!) && existsSync(plan.scenes[2].clip!));
-  assert.deepEqual(r.files, ["a.mp4", "b.mp4", "captions.json"]);
+test("music and voiceover moved in as bg.<ext> / vo.<ext>", () => {
+  const m = join(tmp, "m.wav"); writeFileSync(m, "m");
+  const v = join(tmp, "v.mp3"); writeFileSync(v, "v");
+  const r = handoff(mk("Aud"), { music: m, voiceover: v });
+  assert.deepEqual([r.music, r.voiceover], ["Aud/s/bg.wav", "Aud/s/vo.mp3"]);
+  assert.equal(readFileSync(join(r.dir, "bg.wav"), "utf8"), "m");
+  assert.ok(!existsSync(m) && !existsSync(v));
 });
 
-test("existing public/x/a folder -> uses b", () => {
-  mkdirSync(join(process.env.STUDIO_REMOTION!, "public", "x", "a"), { recursive: true });
-  assert.equal(nextLetter(join(process.env.STUDIO_REMOTION!, "public", "x")), "b");
-  assert.ok(handoff(mk("Any"), { folder: "x" }).dir.endsWith(join("x", "b")));
-  assert.equal(nextLetter(join(tmp, "nope")), "a");
-});
-
-test("music and voiceover named bg.mp3 / vo.mp3", () => {
-  const r = handoff(mk("Aud"), { music: clip("m.mp3", "m"), voiceover: clip("v.mp3", "v") });
-  assert.equal(readFileSync(join(r.dir, "bg.mp3"), "utf8"), "m");
-  assert.equal(readFileSync(join(r.dir, "vo.mp3"), "utf8"), "v");
-});
-
-test("captions.json carries planned caption + voiceover text", () => {
-  const r = handoff(mk("Cap"), {});
+test("captions.json carries planned caption + voiceover text, rewritten on each handoff", () => {
+  const p = mk("Cap");
+  handoff(p, {});
+  p.scenes[1].caption = "C2b";
+  const r = handoff(p, {});
   const c = JSON.parse(readFileSync(join(r.dir, "captions.json"), "utf8"));
-  assert.deepEqual(c, [{ scene: 1, caption: "C1", voiceover: "V1" }, { scene: 2, caption: "C2" }, { scene: 3, voiceover: "V3" }]);
+  assert.deepEqual(c, [{ scene: 1, caption: "C1", voiceover: "V1" }, { scene: 2, caption: "C2b" }, { scene: 3, voiceover: "V3" }]);
 });
 
-test("validation: no kept, missing clip, missing music throw before copying", () => {
+test("validation: no kept, missing clip, missing music throw before anything is written", () => {
   const p = mk("Bad");
   assert.throws(() => handoff({ ...p, scenes: [{ n: 1, prompt: "x" }] }, {}), /no kept/);
   assert.throws(() => handoff({ ...p, scenes: [{ n: 1, prompt: "x", kept: true }] }, {}), /no clip/);
   assert.throws(() => handoff({ ...p, scenes: [{ n: 1, prompt: "x", kept: true, clip: join(tmp, "gone.mp4") }] }, {}), /missing/);
   assert.throws(() => handoff(p, { music: join(tmp, "gone.mp3") }), /music/);
-  assert.ok(!existsSync(join(process.env.STUDIO_REMOTION!, "public", "Bad")));
+  assert.ok(!existsSync(join(subPublicDir("Bad", "s"), "captions.json")));
 });

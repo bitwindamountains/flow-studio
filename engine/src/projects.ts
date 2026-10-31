@@ -84,7 +84,6 @@ export function createSub(project: string, sub: string, aspect: "9:16" | "16:9" 
   if (existsSync(dir)) throw new Error(`Sub-project ${safeName(project)}/${safeName(sub)} already exists.`);
   mkdirSync(join(projDir(project), "references"), { recursive: true });
   mkdirSync(join(dir, "storyboard"), { recursive: true });
-  mkdirSync(join(dir, "clips"), { recursive: true });
   writeFileSync(join(dir, "notes.md"), "");
   writePlanFile({ project: safeName(project), sub: safeName(sub), aspect, scenes: [] });
   return dir;

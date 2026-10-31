@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { test } from "node:test";
@@ -8,6 +8,7 @@ const home = mkdtempSync(join(tmpdir(), "fm-sf-"));
 process.env.FLOW_MCP_HOME = home;
 process.env.FLOW_MCP_OUTPUT = join(home, "out");
 process.env.STUDIO_PROJECTS = join(home, "projects");
+process.env.STUDIO_REMOTION = join(home, "remotion"); // never the owner's real Remotion project
 
 async function setup(sub: string, scenes: object[]) {
   const { LocalCore } = await import("./core.js");
@@ -130,10 +131,10 @@ test("generate with an explicit scene list still skips (and reports) unapproved 
   await assert.rejects(core.studio_generate({ project: "P", sub: "ap", scenes: [2], duration: 8, resolution: "720p", max_credits: 20 } as never), /No approved scenes/);
 });
 
-test("to_remotion only takes music/voiceover from uploads and kept clips from the sub's clips folder", async () => {
-  const { core, readPlan } = await setup("rm", [{ n: 1, prompt: "x" }]);
+test("to_remotion copies nothing, returns staticFile paths, moves music in and never overwrites it", async () => {
+  const { core, readPlan } = await setup("rm", [{ n: 1, prompt: "x" }, { n: 2, prompt: "y" }]);
   const { writePlan } = await import("./projects.js");
-  process.env.STUDIO_REMOTION = mkdtempSync(join(tmpdir(), "fm-rm-"));
+  const { clipsDir, subPublicDir } = await import("./handoff.js");
   const token = join(home, "token");
   writeFileSync(token, "secret");
   const call = (a: object) => core.studio_to_remotion({ project: "P", sub: "rm", ...a } as never);
@@ -141,17 +142,37 @@ test("to_remotion only takes music/voiceover from uploads and kept clips from th
   plan.scenes[0] = { ...plan.scenes[0], kept: true, clip: token };
   writePlan(plan);
   await assert.rejects(call({}), /kept clip must be inside/);
-  const clip = join(home, "projects", "P", "rm", "clips", "scene-01.mp4");
-  writeFileSync(clip, "x");
-  plan.scenes[0].clip = clip;
+  mkdirSync(clipsDir("P", "rm"), { recursive: true });
+  const clip = (n: string) => { const f = join(clipsDir("P", "rm"), n); writeFileSync(f, n); return f; };
+  plan.scenes[0].clip = clip("scene-01.mp4");
+  plan.scenes[1] = { ...plan.scenes[1], kept: true, clip: clip("scene-02.mp4") };
   writePlan(plan);
   await assert.rejects(call({ music: token }), /music must be a file uploaded/);
   await assert.rejects(call({ voiceover: token }), /voiceover must be a file uploaded/);
   mkdirSync(join(home, "uploads"), { recursive: true });
   const song = join(home, "uploads", "song.mp3");
-  writeFileSync(song, "x");
-  const out = (await call({ music: song })) as { files: string[] };
-  assert.deepEqual(out.files, ["a.mp4", "bg.mp3", "captions.json"]);
+  writeFileSync(song, "tune");
+  const out = (await call({ music: song })) as { clips: string[]; captions: string; music: string };
+  assert.deepEqual(out.clips, ["P/rm/clips/scene-01.mp4", "P/rm/clips/scene-02.mp4"]);
+  assert.equal(out.captions, "P/rm/captions.json");
+  assert.equal(out.music, "P/rm/bg.mp3");
+  assert.equal(readFileSync(join(subPublicDir("P", "rm"), "bg.mp3"), "utf8"), "tune");
+  assert.ok(!existsSync(song), "music moved, not copied");
+  assert.deepEqual(readdirSync(subPublicDir("P", "rm")).sort(), ["bg.mp3", "captions.json", "clips"]);
+  assert.deepEqual(readdirSync(clipsDir("P", "rm")).sort(), ["scene-01.mp4", "scene-02.mp4"]);
+  const song2 = join(home, "uploads", "song2.mp3");
+  writeFileSync(song2, "other");
+  await assert.rejects(call({ music: song2 }), /already exists/);
+  assert.equal(readFileSync(join(subPublicDir("P", "rm"), "bg.mp3"), "utf8"), "tune");
+  assert.ok(existsSync(song2));
+});
+
+test("clip jobs download straight into the Remotion public clips folder", async () => {
+  const { core } = await setup("cd", [{ n: 1, prompt: "x", approved: true, storyboard: "s.png" }]);
+  const { clipsDir } = await import("./handoff.js");
+  await core.studio_generate({ project: "P", sub: "cd", scenes: [1] } as never);
+  assert.equal(core.queue.list().find((j) => j.params.studio?.sub === "cd")!.params.output_dir, clipsDir("P", "cd"));
+  assert.equal(clipsDir("P", "cd"), join(home, "remotion", "public", "P", "cd", "clips"));
 });
 
 test("storyboard reroll resets approved", async () => {
@@ -476,24 +497,32 @@ test("edit notes use a rev conflict check and stay separate from notes.md", asyn
   assert.equal(((await core.studio_edit_notes_read({} as never)) as { text: string }).text, "more");
 });
 
-test("studio_render_done copies into renders/v1, v2; refuses outside out/, non-video, never overwrites", async () => {
+test("studio_render_done moves into out/<P>/<sub>/vN (one copy); registers a vN in place; refuses outside out/, never overwrites", async () => {
   const { core } = await setup("rd", []);
-  const root = mkdtempSync(join(tmpdir(), "fm-rr-"));
-  process.env.STUDIO_REMOTION = root;
+  const { rendersDir } = await import("./handoff.js");
+  const root = process.env.STUDIO_REMOTION!;
   mkdirSync(join(root, "out"), { recursive: true });
   const f = (n: string, body: string) => { const p = join(root, "out", n); writeFileSync(p, body); return p; };
   const done = (file: string) => core.studio_render_done({ project: "P", sub: "rd", file } as never) as Promise<{ version: number; path: string }>;
-  const r1 = await done(f("a.mp4", "one"));
+  const a = f("a.mp4", "one");
+  const r1 = await done(a);
   assert.equal(r1.version, 1);
-  assert.equal(basename(r1.path), "v1.mp4");
-  const r2 = await done(f("b.mp4", "two"));
-  assert.equal(r2.version, 2);
+  assert.equal(r1.path, join(rendersDir("P", "rd"), "v1.mp4"));
+  assert.ok(!existsSync(a), "moved, not copied");
+  // Rendered straight into place as v2: registered as is, nothing moves.
+  writeFileSync(join(rendersDir("P", "rd"), "v2.mp4"), "two");
+  const r2 = await done(join(rendersDir("P", "rd"), "v2.mp4"));
+  assert.deepEqual([r2.version, readFileSync(r2.path, "utf8")], [2, "two"]);
+  const r3 = await done(f("b.mp4", "three"));
+  assert.equal(r3.version, 3);
   assert.equal(readFileSync(r1.path, "utf8"), "one");
-  assert.deepEqual(((await core.studio_renders({ project: "P", sub: "rd" } as never)) as { renders: { version: number }[] }).renders.map((r) => r.version), [1, 2]);
+  assert.deepEqual(readdirSync(rendersDir("P", "rd")).sort(), ["v1.mp4", "v2.mp4", "v3.mp4"]);
+  assert.deepEqual(((await core.studio_renders({ project: "P", sub: "rd" } as never)) as { renders: { version: number }[] }).renders.map((r) => r.version), [1, 2, 3]);
   const outside = join(root, "outside.mp4");
   writeFileSync(outside, "x");
   await assert.rejects(done(outside), /inside/);
   await assert.rejects(done(join(root, "out", "..", "outside.mp4")), /inside/);
+  assert.ok(existsSync(outside));
   await assert.rejects(done(f("notes.txt", "x")), /mp4, webm or mov/);
   await assert.rejects(done(join(root, "out", "gone.mp4")), /not found/);
 });

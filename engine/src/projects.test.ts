@@ -9,7 +9,8 @@ const P = await import("./projects.js");
 
 test("createSub makes the folder layout and 9:16 default", () => {
   const d = P.createSub("Aqua", "v1");
-  for (const f of ["storyboard", "clips", "notes.md", "plan.json"]) assert.ok(existsSync(join(d, f)), f);
+  for (const f of ["storyboard", "notes.md", "plan.json"]) assert.ok(existsSync(join(d, f)), f);
+  assert.ok(!existsSync(join(d, "clips")), "clips live in Remotion public, not here");
   assert.ok(existsSync(join(d, "..", "references")));
   assert.equal(P.readPlan("Aqua", "v1").aspect, "9:16");
   assert.deepEqual(P.listProjects(), [{ project: "Aqua", subs: ["v1"] }]);

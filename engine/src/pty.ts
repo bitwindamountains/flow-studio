@@ -1,7 +1,8 @@
 import { spawn, type IPty } from "@lydell/node-pty";
 import type { WebSocket } from "ws";
 
-const CWD = "D:/1ecbrzy/AFF/REMOTION";
+// Remotion root, so the owner's style skills in remotion/.claude/skills load.
+const CWD = "D:/flow-studio/remotion";
 const STUDIO = "D:/flow-studio";
 
 // Flags verified against `claude --help` (2026-10-31): --add-dir, --mcp-config, --settings, --append-system-prompt-file.
