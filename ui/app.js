@@ -86,9 +86,9 @@ $("project").onchange = () => { fillSubs(); refresh(true); };
 $("sub").onchange = () => refresh(true);
 loadProjects();
 
-// ---- health banner: stays hidden unless /api/health (Task 10) reports a problem; a 404 changes nothing ----
-fetch("/api/health").then((r) => (r.ok ? r.json() : null)).then((h) => {
-  if (h && h.ok === false && h.message) { $("health").textContent = h.message; $("health").hidden = false; }
+// ---- health banner: /api/health/flow lists the Flow checks that failed (textContent only) ----
+fetch("/api/health/flow", { headers: { "x-flow-token": TOKEN } }).then((r) => (r.ok ? r.json() : null)).then((h) => {
+  if (h && h.ok === false && h.message) { $("health").textContent = "Flow check: " + h.message; $("health").hidden = false; }
 }).catch(() => {});
 
 // ======== step views ========

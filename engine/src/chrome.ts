@@ -78,6 +78,15 @@ export async function getBrowser(): Promise<Browser> {
   return browser;
 }
 
+// Like getFlowPage, but never launches Chrome or opens a tab: undefined when Flow isn't already open.
+export async function peekFlowPage(): Promise<Page | undefined> {
+  if (!browser?.isConnected()) {
+    if (!(await cdpUp())) return undefined;
+    browser = await chromium.connectOverCDP(CDP_URL);
+  }
+  return browser.contexts()[0]?.pages().find((p) => FLOW_HOSTS.test(p.url()));
+}
+
 export async function getFlowPage(): Promise<Page> {
   const b = await getBrowser();
   const context = b.contexts()[0];

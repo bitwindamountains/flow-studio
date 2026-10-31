@@ -11,6 +11,7 @@ import { LocalCore, OUTPUT_ROOT, shapes, type Core } from "./core.js";
 import { loadAccounts } from "./accounts.js";
 import { PtyHub, startClaude } from "./pty.js";
 import { spawn } from "node:child_process";
+import { flowHealth, formatHealth } from "./health.js";
 import { remotionRoot } from "./handoff.js";
 import { projectsRoot, readPlan, writePlan } from "./projects.js";
 
@@ -189,6 +190,10 @@ export async function startServer(core: Core, spawner = startClaude, remotion = 
       const given = req.headers["x-flow-token"] ?? url.searchParams.get("token");
       if (given !== token) return json(res, 401, { error: "Missing or wrong token." });
 
+      if (req.method === "GET" && url.pathname === "/api/health/flow") {
+        const h = await flowHealth();
+        return json(res, 200, { ...h, message: formatHealth(h.checks) });
+      }
       if (req.method === "GET" && url.pathname === "/api/pending") {
         return core instanceof LocalCore ? json(res, 200, core.queue.pendingApproval()) : json(res, 404, { error: "Not found." });
       }
