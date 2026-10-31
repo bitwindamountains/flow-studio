@@ -41,11 +41,23 @@ fit.fit();
 if (OWNER) connect();
 else term.write("This window is not the owner's studio window. Close it and reopen Flow Studio.cmd.\r\n");
 
-// ---- resizable split ----
+// ---- resizable split: terminal at the bottom, height remembered (storage may be blocked, so every access is guarded) ----
+const TERM_H = "flow-studio-term-height";
+function setTermHeight(px, save) {
+  const hgt = Math.round(Math.min(Math.max(120, px), innerHeight - 200));
+  $("term-wrap").style.height = hgt + "px";
+  fit.fit();
+  if (save) try { localStorage.setItem(TERM_H, String(hgt)); } catch { /* not remembered */ }
+}
+try { const saved = Number(localStorage.getItem(TERM_H)); if (saved > 0) setTermHeight(saved, false); } catch { /* default height */ }
 $("split").onpointerdown = (e) => {
   $("split").setPointerCapture(e.pointerId);
-  $("split").onpointermove = (m) => { $("term-wrap").style.width = Math.max(260, m.clientX) + "px"; fit.fit(); };
-  $("split").onpointerup = () => { $("split").onpointermove = null; };
+  $("split").onpointermove = (m) => setTermHeight(innerHeight - m.clientY, false);
+  $("split").onpointerup = () => { $("split").onpointermove = null; setTermHeight($("term-wrap").offsetHeight, true); };
+};
+$("split").onkeydown = (e) => {
+  const step = e.key === "ArrowUp" ? 24 : e.key === "ArrowDown" ? -24 : 0;
+  if (step) { e.preventDefault(); setTermHeight($("term-wrap").offsetHeight + step, true); }
 };
 
 // ---- tabs ----
@@ -172,7 +184,7 @@ async function savePlan(mut) {
 }
 const slug = (s) => s.trim().replace(/\s+/g, "-").replace(/[^A-Za-z0-9_-]/g, "");
 
-let view = "plan";
+let view = "ideas";
 let data = { plan: null, pending: [], other: [], status: null, lessons: [], notes: null };
 let sig = "";
 // Notes: the page re-reads them on every poll unless the box has focus or a save is pending (then local text wins).
@@ -246,8 +258,22 @@ function render() {
   const el = $("view-" + view);
   if (view === "edit") return renderEdit(el);
   if (!have() && view !== "plan" && view !== "generate") return el.replaceChildren(h("p", {}, "Pick or create a project first (Plan tab)."));
-  ({ plan: renderPlan, storyboard: renderBoard, generate: renderGen })[view](el);
+  ({ ideas: renderIdeas, plan: renderPlan, storyboard: renderBoard, generate: renderGen })[view](el);
 }
+
+// ---- Ideas: Claude writes the options, the owner picks one in chat; read-only here ----
+function renderIdeas(el) {
+  const p = data.plan;
+  const opts = (p && p.options) || [];
+  if (!opts.length) return el.replaceChildren(h("p", { class: "empty" }, "Tell Claude about the product and ask for scenario options with hooks."));
+  el.replaceChildren(
+    h("p", { class: "dim" }, p.chosen ? "Chosen in chat. To change it, tell Claude which option to go with." : "Tell Claude in chat which option to go with (e.g. \"go with option 2\")."),
+    h("div", { class: "grid" }, opts.map((o, i) => h("div", { class: "card" + (o.id === p.chosen ? " chosen" : "") },
+      h("b", {}, `${i + 1}. ${o.title}`), o.id === p.chosen ? h("span", { class: "tag" }, " chosen") : null,
+      h("p", {}, h("i", {}, o.hook)), h("p", {}, o.story), h("small", { class: "dim" }, `${o.scenes} scene${o.scenes === 1 ? "" : "s"}`)))));
+}
+const isCont = (s) => s.start && s.start.kind === "continue";
+const staleNote = (s) => (s.stale && isCont(s) ? h("p", { class: "stale" }, `Scene ${s.start.from} changed - redo this scene`) : null);
 
 // ---- Plan ----
 const lessonText = {};
@@ -285,7 +311,8 @@ function renderPlan(el) {
     const sty = h("select", { "aria-label": "Style" }, ...[["", "none"], ["A", "A"], ["B", "B"]].map(([v, t]) => h("option", { value: v, selected: v === (p.style || "") }, "Style " + t)));
     sty.onchange = () => savePlan((pl) => { if (sty.value) pl.style = sty.value; else delete pl.style; }).then(() => refresh(true), (e) => toast(e.message));
     const rows = p.scenes.map((s) => h("tr", {},
-      h("td", {}, String(s.n)), h("td", {}, s.prompt), h("td", {}, s.camera || ""), h("td", {}, durationPick(s)), h("td", {}, isVeo(s) ? s.model : `${s.model || "Omni 1.1 Flash"} · ${s.resolution || "720p"}`), h("td", {}, s.caption || ""), h("td", {}, s.voiceover || ""),
+      h("td", {}, String(s.n)), h("td", {}, isCont(s) ? h("span", { class: "dim" }, "(last frame of scene " + s.start.from + ")") : s.frame_prompt || h("span", { class: "dim" }, "not set")),
+      h("td", {}, s.prompt, staleNote(s)), h("td", {}, isCont(s) ? `continues from scene ${s.start.from}` : "own frame"), h("td", {}, s.camera || ""), h("td", {}, durationPick(s)), h("td", {}, isVeo(s) ? s.model : `${s.model || "Omni 1.1 Flash"} · ${s.resolution || "720p"}`), h("td", {}, s.caption || ""), h("td", {}, s.voiceover || ""),
       h("td", {}, picker("+ ref", async (f) => {
         const r = await apiOk("studio_add_reference", { ...c, path: await upload(f) });
         await savePlan((pl) => { const sc = pl.scenes.find((x) => x.n === s.n); sc.references = [...(sc.references || []), r.path]; });
@@ -306,7 +333,7 @@ function renderPlan(el) {
       (() => { const t = h("textarea", { rows: "4", readonly: true, "aria-label": "Unsaved notes" }); t.value = lost; return t; })(),
       btn("Dismiss", () => { delete notesConflict[key]; }));
     kids.push(h("h3", {}, `${p.project} / ${p.sub}`), h("div", { class: "row" }, asp, sty),
-      p.scenes.length ? h("table", {}, h("thead", {}, h("tr", {}, ...["#", "Prompt", "Camera", "Duration", "Model · res", "Caption", "Voiceover", "References"].map((t) => h("th", {}, t)))), h("tbody", {}, rows)) : h("p", {}, "No scenes yet. Ask Claude to write the plan."),
+      p.scenes.length ? h("table", {}, h("thead", {}, h("tr", {}, ...["#", "Frame prompt", "Clip prompt", "Start", "Camera", "Duration", "Model · res", "Caption", "Voiceover", "References"].map((t) => h("th", {}, t)))), h("tbody", {}, rows)) : h("p", {}, "No scenes yet. Ask Claude to write the plan."),
       h("h3", {}, "Notes"), notes, lostBox,
       h("h3", {}, "Reference images"), picker("Add project reference", async (f) => { await apiOk("studio_add_reference", { project: c.project, path: await upload(f) }); }),
       h("div", { class: "refs" }, (data.refs || []).map((r) => { const name = r.split(/[\\/]/).pop(); return h("figure", {}, h("img", { src: media(r), alt: name }), h("figcaption", {}, name)); })));
@@ -321,10 +348,12 @@ function renderBoard(el) {
   if (!p) return el.replaceChildren(h("p", {}, "No plan yet."));
   const cards = p.scenes.map((s) => h("div", { class: "card" },
     h("b", {}, `Scene ${s.n}`),
-    s.storyboard ? h("img", { src: media(s.storyboard), alt: "Storyboard still, scene " + s.n }) : h("div", { class: "empty" }, "no still yet"),
-    h("p", {}, s.prompt),
+    isCont(s) ? h("div", { class: "empty" }, `continues from scene ${s.start.from} - first frame comes from that clip's last frame`)
+      : s.storyboard ? h("img", { src: media(s.storyboard), alt: "Storyboard still, scene " + s.n }) : h("div", { class: "empty" }, "no still yet"),
+    !isCont(s) && s.frame_prompt ? h("p", { class: "dim" }, "Still: ", s.frame_prompt) : null,
+    h("p", {}, "Clip: ", s.prompt),
     h("div", { class: "row" },
-      btn("Reroll (free)", () => apiOk("studio_storyboard", { ...c, scenes: [s.n] })),
+      isCont(s) ? null : btn("Reroll (free)", () => apiOk("studio_storyboard", { ...c, scenes: [s.n] })),
       btn(s.approved ? "Approved (undo)" : "Approve scene", () => owner("/api/scene", { ...c, n: s.n, approved: !s.approved }), true, s.approved ? "ok" : ""))));
   el.replaceChildren(h("div", { class: "row" }, btn("Make all stills (free)", () => apiOk("studio_storyboard", c))), h("div", { class: "grid" }, cards));
 }
@@ -338,8 +367,16 @@ function heldCard(g) {
   const n = g.jobs.length;
   const items = g.jobs.map((j) => {
     const st = j.params.studio;
-    const thumb = j.params.first_frame && !j.params.first_frame.startsWith("asset:") ? h("img", { src: media(j.params.first_frame), alt: "First frame" + (st ? ", scene " + st.scene : "") }) : null;
-    return h("div", { class: "card" }, h("b", {}, st ? `Scene ${st.scene}` : j.params.file_stem || j.id), thumb, h("small", {}, [j.params.model || "Flow's current model", j.params.duration ? j.params.duration + " s" : "", j.params.resolution || ""].filter(Boolean).join(" · ")), h("p", {}, j.params.prompt || ""));
+    // A continue clip's first frame does not exist yet: it is cut from its source clip's end just before it runs.
+    const chained = j.params.chain_from || j.params.chain_file;
+    const src = st && st.from ? "scene " + st.from : "the previous scene";
+    const thumb = chained
+      ? h("p", { class: "dim" }, j.params.chain_file ? `First frame: last frame of ${src}'s finished clip.` : `First frame: last frame of ${src} (not visible until it finishes).`)
+      : j.params.first_frame && !j.params.first_frame.startsWith("asset:") ? h("img", { src: media(j.params.first_frame), alt: "First frame" + (st ? ", scene " + st.scene : "") }) : null;
+    return h("div", { class: "card" }, h("b", {}, st ? `Scene ${st.scene}` : j.params.file_stem || j.id), thumb,
+      h("small", {}, [j.params.model || "Flow's current model", j.params.duration ? j.params.duration + " s" : "", j.params.resolution || ""].filter(Boolean).join(" · ")),
+      h("small", { class: "dim" }, [st ? ` · ${st.project}/${st.sub}` : "", j.params.edit_asset || j.params.continue_from ? "" : ` · cap ${j.params.max_credits} credits`].join("")),
+      h("p", {}, j.params.prompt || ""));
   });
   const where = [...new Set(g.jobs.map((j) => (j.params.studio ? j.params.studio.project + "/" + j.params.studio.sub : "not a studio job")))].join(", ");
   return h("div", { class: "held" },
@@ -377,6 +414,7 @@ function renderGen(el) {
     return h("div", { class: "card" },
       h("b", {}, `Scene ${s.n}`), " ", h("span", { class: "tag" }, last ? last.status : s.clip ? "has clip" : s.approved ? "approved" : "not approved"),
       last && last.credits != null ? h("small", {}, ` ${last.credits} credits`) : null,
+      staleNote(s), isCont(s) ? h("p", { class: "dim" }, `Continues from scene ${s.start.from}`) : null,
       last && last.note ? h("p", { class: "dim" }, last.note) : null, last && last.error ? h("p", { class: "err" }, last.error) : null,
       s.clip ? h("video", { src: media(s.clip), controls: true, preload: "metadata" }) : null,
       h("div", { class: "row" },
