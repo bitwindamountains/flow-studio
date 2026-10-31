@@ -35,6 +35,17 @@ exit /b 1
 :up
 set "BRAVE=%ProgramFiles%\BraveSoftware\Brave-Browser\Application\brave.exe"
 if not exist "%BRAVE%" set "BRAVE=%LOCALAPPDATA%\BraveSoftware\Brave-Browser\Application\brave.exe"
-if exist "%BRAVE%" ( start "" "%BRAVE%" --user-data-dir="D:\flow-studio\data\ui-profile" --no-first-run --app=http://127.0.0.1:%FLOW_MCP_PORT% ) else ( start "" http://127.0.0.1:%FLOW_MCP_PORT% )
+rem The window gets its own profile outside D:\flow-studio, never an everyday browser profile (the owner cookie must not land there).
+set "UIPROFILE=%LOCALAPPDATA%\FlowStudioUI"
+set "EDGE=%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe"
+if not exist "%BRAVE%" set "BRAVE=%EDGE%"
+if not exist "%BRAVE%" (
+  echo.
+  echo Neither Brave nor Edge was found, so the studio window cannot open in its own profile.
+  echo Install Brave, then start Flow Studio again.
+  pause
+  exit /b 1
+)
+start "" "%BRAVE%" --user-data-dir="%UIPROFILE%" --no-first-run --app=http://127.0.0.1:%FLOW_MCP_PORT%
 rem Keep this window open while the server runs.
 pause

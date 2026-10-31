@@ -97,6 +97,9 @@ export const remotionDefaults = {
 
 // opts.studio: only the standalone Studio (studio.ts) hands out the one-shot UI token; Claude's MCP process never does.
 export async function startServer(core: Core, spawner = startClaude, remotion = remotionDefaults, opts: { studio?: boolean } = {}): Promise<ServerRole> {
+  // Snapshot the page and its scripts once: an edit to ui/ or node_modules after start (e.g. by Claude) never reaches the owner's window.
+  const page = readFileSync(STUDIO_HTML, "utf8");
+  const assets = new Map(Object.entries(VENDOR).map(([k, [file]]) => [k, readFileSync(file)]));
   let remotionStarted = false;
   mkdirSync(UPLOAD_DIR, { recursive: true });
   const token = randomBytes(24).toString("hex");
@@ -135,14 +138,14 @@ export async function startServer(core: Core, spawner = startClaude, remotion = 
         const headers: Record<string, string> = { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "content-security-policy": CSP, "x-content-type-options": "nosniff" };
         if (give) headers["set-cookie"] = `fs_ui=${uiToken}; HttpOnly; SameSite=Strict; Path=/`;
         res.writeHead(200, headers);
-        return res.end(readFileSync(STUDIO_HTML, "utf8").replace("__FLOW_TOKEN__", token).replace("__OWNER__", owner ? "1" : ""));
+        return res.end(page.replace("__FLOW_TOKEN__", token).replace("__OWNER__", owner ? "1" : ""));
       }
 
       if (req.method === "GET" && url.pathname.startsWith("/vendor/")) {
         const hit = Object.hasOwn(VENDOR, url.pathname.slice(8)) ? VENDOR[url.pathname.slice(8)] : undefined;
         if (!hit) return json(res, 404, { error: "Not found." });
         res.writeHead(200, { "content-type": hit[1], "cache-control": "no-store" });
-        return res.end(readFileSync(hit[0]));
+        return res.end(assets.get(url.pathname.slice(8)));
       }
       // Read-only and email-free: index, credits, exhausted flag, refresh time.
       if (req.method === "GET" && url.pathname === "/api/accounts") {

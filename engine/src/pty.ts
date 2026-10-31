@@ -6,7 +6,8 @@ const STUDIO = "D:/flow-studio";
 
 // Flags verified against `claude --help` (2026-10-31): --add-dir, --mcp-config, --settings, --append-system-prompt-file.
 export const CLAUDE_ARGS = [
-  "--add-dir", STUDIO,
+  // Only the projects folder: ui/, engine/, claude/, data/ and the launcher stay outside Claude's workspace.
+  "--add-dir", `${STUDIO}/projects`,
   "--mcp-config", `${STUDIO}/claude/mcp.json`,
   "--settings", `${STUDIO}/claude/settings.json`,
   "--append-system-prompt-file", `${STUDIO}/claude/studio-prompt.md`,
