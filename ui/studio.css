@@ -70,12 +70,13 @@ header button { min-height: 44px; font-size: 13px; }
 header #alerts { color: var(--bad); border-color: #e8bbc4; background: #fff0f2; font-variant-numeric: tabular-nums; }
 header #chat-toggle { padding: 7px 18px; color: #fff; background: var(--night); border-color: var(--night); }
 header #chat-toggle:not(:disabled):hover, header #chat-toggle[aria-expanded=true] { color: #fff; background: #262c4a; border-color: #262c4a; }
-#gate { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; padding: 12px 14px; border-radius: 16px; background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--accent); box-shadow: 0 10px 26px -22px rgba(15,19,38,.5); }
-#gate[data-status=blocked], #gate[data-status=paused] { border-left-color: var(--warn); }
-#gate[data-status=working], #gate[data-status=changes] { border-left-color: #bac2de; }
+#gate { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; padding: 12px 14px; border-radius: 16px; background: var(--panel); border: 1px solid var(--line); box-shadow: 0 10px 26px -22px rgba(15,19,38,.5); }
 .gate-text { flex: 1 1 320px; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 #gate-step { font-size: 14px; font-weight: 600; }
-#gate[data-status=working] #gate-step::before, #gate[data-status=changes] #gate-step::before { content: '\25cc  '; color: var(--accent); }
+#gate-icon { display: inline-grid; place-items: center; min-width: 22px; height: 22px; margin-right: 2px; border-radius: 999px; background: var(--accent); color: #fff; font-size: 12px; line-height: 1; vertical-align: -2px; }
+#gate[data-status=blocked] #gate-icon, #gate[data-status=paused] #gate-icon { background: var(--warn); }
+#gate[data-status=working] #gate-icon, #gate[data-status=changes] #gate-icon, #gate[data-status=idle] #gate-icon { background: #e6e9f5; color: var(--accent); }
+#gate input { color: var(--text); }
 #gate-summary { white-space: pre-line; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; }
 #gate-summary.expanded { display: block; }
 #gate-more { align-self: flex-start; min-height: 32px; padding: 2px 8px; border-color: transparent; background: transparent; color: #233ca3; font-size: 13px; }

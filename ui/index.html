@@ -50,17 +50,17 @@
   <p id="gate-live" class="sr-only" aria-live="polite"></p>
   <section id="gate" aria-label="Review" hidden>
     <div class="gate-text">
-      <p id="gate-step"></p>
+      <p id="gate-step"><span id="gate-icon" aria-hidden="true"></span> <span id="gate-label"></span></p>
       <p id="gate-summary"></p>
       <button id="gate-more" type="button" aria-expanded="false" aria-controls="gate-summary" hidden>More</button>
       <p id="gate-counts"></p>
     </div>
     <div class="gate-actions">
       <div id="budget-form" hidden>
-        <label>Look <input id="budget-look" type="number" min="0" step="1" inputmode="numeric"></label>
-        <label>Assets <input id="budget-assets" type="number" min="0" step="1" inputmode="numeric"></label>
+        <label>Look <input id="budget-look" type="number" min="0" step="1" max="100000" inputmode="numeric"> credits</label>
+        <label>Assets <input id="budget-assets" type="number" min="0" step="1" max="100000" inputmode="numeric"> credits</label>
       </div>
-      <label id="credits-label" hidden>Budget <input id="credits-budget" type="number" min="0" step="1" inputmode="numeric"></label>
+      <label id="credits-label" hidden>Budget <input id="credits-budget" type="number" min="0" step="1" max="100000" inputmode="numeric"> credits</label>
       <button id="start" type="button" class="gate-primary">Start</button>
       <button id="approve" type="button" class="gate-primary">Approve</button>
       <button id="ask-changes" type="button" aria-expanded="false" aria-controls="changes-form">Ask for changes</button>

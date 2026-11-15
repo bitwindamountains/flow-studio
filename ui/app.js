@@ -380,6 +380,7 @@ async function loadProjects() {
 function projectChanged() {
   selection = null; data.workflow = null;
   connectionState(false, "Loading selected project…");
+  renderGate(stepState());
   updateContextLabel(); refresh(true);
 }
 $("project").onchange = () => { fillSubs(); projectChanged(); };
@@ -577,6 +578,7 @@ async function fetchData() {
       const p = projects.find((x) => x.project === s.project);
       if (p && p.subs.includes(s.sub) && k !== notesKey()) {
         $("project").value = s.project; fillSubs(); $("sub").value = s.sub; reported = k;
+        renderGate(stepState()); // clears the old video's gate at once, before its data arrives
         toast("The agent switched the project to " + k);
       }
     }
@@ -610,7 +612,7 @@ async function fetchData() {
   }
   // The desk needs every step's status, each scene's jobs and the latest render, whichever stage view is open.
   const [st, r] = await Promise.all([api("studio_status", scope), api("studio_renders", scope)]);
-  data.status = st.error ? null : st;
+  data.status = st.error ? null : st; data.statusScope = scopeKey;
   data.renders = r && r.renders ? r.renders : [];
   if (view === "generate" || view === "storyboard") data.lessons = (await get("/api/lessons")).pending || [];
   if (notesKey() !== scopeKey || view !== requestedStage) { again = true; return false; }
@@ -638,6 +640,9 @@ async function refresh(force) {
 // Cheap local polling, only while the window is visible.
 setInterval(() => { if (document.visibilityState === "visible") { refresh(false); accounts(); } }, 4000);
 document.addEventListener("visibilitychange", () => document.visibilityState === "visible" && refresh(true));
+// A hidden window polls only while a step of this video is working, and slower, so the title and notification still arrive.
+function hiddenPoll() { if (document.visibilityState !== "visible" && have() && STEPS.some((n) => stepState()[n]?.status === "working")) refresh(true); }
+setInterval(hiddenPoll, 15000);
 
 function renderNavigation() {
   for (const b of document.querySelectorAll("#tabs button")) {
@@ -813,7 +818,7 @@ $("flag-note").onclick = () => $("flag-note").setAttribute("aria-expanded", Stri
 const stepLabel = (n) => n[0].toUpperCase() + n.slice(1);
 const GATE_WORD = { working: "working", paused: "paused", review: "ready for review", changes: "changes sent", blocked: "blocked", idle: "not started" };
 const GATE_CONTROLS = ["start", "approve", "ask-changes", "resume", "add-credits", "send-changes", "budget-look", "budget-assets", "credits-budget", "changes-text", "pin-scene"];
-let gatePending = false, gateStep = null, gateKey = "", gateScope = "", askedNotify = false;
+let gatePending = false, gateTarget = null, gateKey = "", gateScope = "", gateNotice = "", askedNotify = false;
 const gateSeen = new Map(); // scope -> "step:status" last rendered, so only a real transition notifies
 function gateControls() {
   const off = !OWNER || !dataFresh || gatePending;
@@ -821,23 +826,38 @@ function gateControls() {
   $("send-changes").disabled = off || !$("changes-text").value.trim();
   if (!selection?.scene && !(data.renders || []).length) $("pin-scene").disabled = true;
 }
+const GATE_ICON = { working: "◌", paused: "‖", review: "●", changes: "◌", blocked: "!", idle: "○" };
+const MAX_BUDGET = 100000; // a sanity cap: an absurd number in an input is one click from being a real budget
 const wholeNumber = (v) => /^\d+$/.test(v.trim()) ? Number(v) : null;
+const capped = (n) => n !== null && n <= MAX_BUDGET ? n : null;
 const moreCredits = (reason) => Number(/^needs (\d+) more credits?\.?$/.exec(reason || "")?.[1]) || 0;
 const creditsLeft = (x) => x.budget - x.spent - (x.reservations || []).reduce((a, r) => a + r.credits, 0); // remaining() in steps.ts
+const currentScope = () => cur().project + "/" + cur().sub;
+const gateStatusOf = (x) => !x?.status ? "" : x.status === "working" && x.paused ? "paused" : x.status;
 function renderGate(steps) {
-  const step = have() ? STEPS.find((n) => steps[n]?.status !== "approved") : null, x = step ? steps[step] : null;
-  const status = !x?.status ? "" : x.status === "working" && x.paused ? "paused" : x.status;
-  const scope = cur().project + "/" + cur().sub;
+  // Steps fetched for another video (the selection just changed) draw nothing until this video's arrive.
+  const scope = currentScope(), mine = have() && data.statusScope === scope;
+  const step = mine ? STEPS.find((n) => steps[n]?.status !== "approved") ?? null : null, x = step ? steps[step] : null;
+  const status = gateStatusOf(x);
   notifyGate(scope, step, status);
   $("gate").hidden = !status; $("gate").dataset.status = status;
   $("gate-live").textContent = status ? `${stepLabel(step)} ${GATE_WORD[status]}` : "";
+  // A new video or step closes the forms and discards their drafts; the gate's one-line notice survives only into the redraw it asked for.
+  if (scope + "/" + step !== gateScope) {
+    gateScope = scope + "/" + step; gateKey = "";
+    gateForm(false); $("changes-text").value = ""; $("pin-scene").checked = false;
+    $("budget-look").value = $("budget-assets").value = $("credits-budget").value = "";
+    $("gate-error").textContent = status ? gateNotice : "";
+    if (status) gateNotice = "";
+  }
+  // Every request from this gate goes to exactly this video, step and state (gatePost), never to cur() at send time.
+  gateTarget = status ? { project: cur().project, sub: cur().sub, step, status } : null;
   if (!status) return;
-  // A new step or video clears the error and the draft; a new state of the same step re-fills the numbers.
-  if (scope + "/" + step !== gateScope) { gateScope = scope + "/" + step; $("gate-error").textContent = ""; $("changes-text").value = ""; $("pin-scene").checked = false; }
   const review = status === "review", plan = review && step === "plan", more = status === "blocked" ? moreCredits(x.blockedReason) : 0;
   const key = [gateScope, status, x.summary, x.blockedReason, x.budget].join("\n"), fresh = key !== gateKey;
-  gateKey = key; gateStep = step;
-  $("gate-step").textContent = `${stepLabel(step)} · ${GATE_WORD[status]}`;
+  gateKey = key;
+  $("gate-icon").textContent = GATE_ICON[status];
+  $("gate-label").textContent = `${stepLabel(step)} · ${GATE_WORD[status]}`;
   const text = review ? x.summary || "" : status === "blocked" ? x.blockedReason || "" : "";
   $("gate-summary").textContent = text; $("gate-summary").hidden = !text;
   const scenes = data.plan?.scenes?.length || 0, flagged = x.flags?.length || 0;
@@ -853,8 +873,9 @@ function renderGate(steps) {
   if (fresh) {
     // The Plan summary's third line is exactly "Estimate: Look N credits, Assets M credits"; anything else leaves the budgets empty.
     const est = plan ? /^Estimate: Look (\d+) credits, Assets (\d+) credits$/.exec((x.summary || "").split("\n")[2]?.trim() || "") : null;
-    $("budget-look").value = est?.[1] ?? ""; $("budget-assets").value = est?.[2] ?? "";
-    $("credits-budget").value = more ? x.budget + more : "";
+    const ok = est && capped(Number(est[1])) !== null && capped(Number(est[2])) !== null;
+    $("budget-look").value = ok ? est[1] : ""; $("budget-assets").value = ok ? est[2] : "";
+    $("credits-budget").value = more && capped(x.budget + more) !== null ? x.budget + more : "";
     $("gate-summary").classList.remove("expanded"); $("gate-more").setAttribute("aria-expanded", "false"); $("gate-more").textContent = "More";
   }
   $("pin-label").textContent = !selection?.scene && (data.renders || []).length ? "Pin to this moment" : "Pin to this scene";
@@ -875,12 +896,24 @@ function gateForm(open) {
   $("changes-form").hidden = !open; $("ask-changes").setAttribute("aria-expanded", String(open));
 }
 // Posts the bodies in order and stops at the first refusal, so Add credits never resumes after a refused budget.
+// The scope is the one captured when the gate was drawn; a reply that comes back after the video changed is ignored.
 async function gatePost(...bodies) {
-  if (gatePending || !gateStep) return false;
+  const t = gateTarget;
+  if (gatePending || !t) return false;
+  const key = t.project + "/" + t.sub, same = () => currentScope() === key;
+  if (!same() || data.statusScope !== key || gateStatusOf(stepState()[t.step]) !== t.status) {
+    gateNotice = $("gate-error").textContent = "Video changed. Review again.";
+    gateScope = ""; refresh(true);
+    return false;
+  }
   gatePending = true; $("gate-error").textContent = ""; gateControls();
-  const step = gateStep;
-  try { for (const b of bodies) await owner("/api/step", { ...cur(), step, ...b }); return true; }
-  catch (e) { $("gate-error").textContent = String(e.message || e); return false; }
+  try {
+    for (const b of bodies) {
+      if (!same()) return false;
+      await owner("/api/step", { project: t.project, sub: t.sub, step: t.step, ...b });
+    }
+    return same();
+  } catch (e) { if (same()) $("gate-error").textContent = String(e.message || e); return false; }
   finally { gatePending = false; gateControls(); refresh(true); }
 }
 $("gate").addEventListener("click", (e) => {
@@ -892,14 +925,16 @@ $("gate-more").onclick = () => { const open = $("gate-summary").classList.toggle
 $("start").onclick = () => gatePost({ action: "start" });
 $("resume").onclick = () => gatePost({ action: "resume" });
 $("approve").onclick = () => {
-  if (gateStep !== "plan") return gatePost({ action: "approve" });
+  if (gateTarget?.step !== "plan") return gatePost({ action: "approve" });
   const look = wholeNumber($("budget-look").value), assets = wholeNumber($("budget-assets").value);
   if (look === null || assets === null) { $("gate-error").textContent = "Enter both budgets"; return; }
+  if (capped(look) === null || capped(assets) === null) { $("gate-error").textContent = `Up to ${MAX_BUDGET} credits`; return; }
   gatePost({ action: "approve", budgets: { look, assets } });
 };
 $("add-credits").onclick = () => {
   const credits = wholeNumber($("credits-budget").value);
   if (credits === null) { $("gate-error").textContent = "Enter a budget"; return; }
+  if (capped(credits) === null) { $("gate-error").textContent = `Up to ${MAX_BUDGET} credits`; return; }
   gatePost({ action: "budget", credits }, { action: "resume" });
 };
 $("ask-changes").onclick = () => { const open = $("changes-form").hidden; gateForm(open); if (open) $("changes-text").focus(); };

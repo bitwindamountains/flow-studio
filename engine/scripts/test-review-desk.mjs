@@ -28,7 +28,7 @@ const browser = await chromium.launch({ executablePath: process.env.FLOW_TEST_CH
 try {
   // A 1x1 PNG for stills, a 404 for missing.png, and media requests for videos left pending (no real file to play).
   const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64');
-  async function open(width, owner = '1') {
+  async function open(width, owner = '1', before = null) {
     const context = await browser.newContext({ viewport: { width, height: 850 } });
     const page = await context.newPage(), errors = [];
     page.on('pageerror', (e) => errors.push(e.message));
@@ -61,11 +61,12 @@ try {
           return fail ? { ok: false, status: fail.status, json: async () => ({ error: fail.error }) } : { ok: true, status: 200, json: async () => ({ steps: f.steps }) };
         }
         const plan = { project: f.project, sub: f.sub, aspect: '9:16', scenes: f.scenes };
-        if (method === 'studio_projects') result = [{ project: 'A', subs: ['video'] }];
+        if (method === 'studio_projects') result = [{ project: 'A', subs: ['video', 'other'] }];
         else if (method === 'studio_current') result = { project: f.project, sub: f.sub };
+        else if (method === 'studio_select') { const b = JSON.parse(opts.body); f.project = b.project; f.sub = b.sub; }
         else if (method === 'studio_plan_read') result = structuredClone(plan);
         else if (method === 'studio_workflow_read') result = window.deriveWorkflow({ plan, scenes: f.scenes.map(s => ({ n: s.n, validPlan: true, validSource: true, storyboardExists: !!s.storyboard, clipExists: !!s.clip, hasTakes: false, hasActiveJob: false })), renderVersions: f.renders.map(r => r.version), editTaskPhase: null });
-        else if (method === 'studio_status') result = { scenes: f.scenes.map(s => ({ ...s, takes: [], jobs: f.jobs.filter(j => j.scene === s.n) })), pending: [], steps: f.steps, production_plan: { text: '', rev: '0' } };
+        else if (method === 'studio_status') (f.statusCalls = (f.statusCalls || 0) + 1), result = { scenes: f.scenes.map(s => ({ ...s, takes: [], jobs: f.jobs.filter(j => j.scene === s.n) })), pending: [], steps: f.steps, production_plan: { text: '', rev: '0' } };
         else if (method === 'studio_renders') result = { renders: f.renders };
         else if (method === 'studio_notes_read' || method === 'studio_edit_notes_read') result = { text: '', rev: '1' };
         else if (method === 'studio_references') result = { project: [], sub: [], active: [], library: [] };
@@ -76,6 +77,7 @@ try {
         return { ok: true, status: 200, json: async () => result };
       };
     }, { scenes: sixScenes, steps: sixSteps });
+    if (before) await page.evaluate(before);
     await page.addScriptTag({ content: readFileSync(root + 'ui/app.js', 'utf8') });
     await page.waitForFunction(() => !!data.workflow && document.querySelectorAll('#strip .tile').length === 6, null, { timeout: 10000 }).catch((e) => { throw new Error(e.message + ' page errors: ' + errors.join(' / ')); });
     return { context, page, errors };
@@ -284,7 +286,7 @@ try {
     await page.evaluate(() => { Notification.permission = 'granted'; });
     await setSteps(page, STATES.working);
     assert.equal(await gate.getAttribute('data-status'), 'working');
-    assert.equal(await page.locator('#gate-step').innerText(), 'Assets · working');
+    assert.match(await page.locator('#gate-step').innerText(), /^\S+ Assets · working$/, 'icon plus label');
     assert.deepEqual(await shown(page), []);
     assert.equal(await page.locator('#gate-summary, #gate-counts, #budget-form, #changes-form').evaluateAll(e => e.filter(x => x.checkVisibility()).length), 0);
     assert.equal(await page.title(), 'Flow Studio');
@@ -362,6 +364,14 @@ try {
       assert.equal(await page.locator('#gate-error').innerText(), 'Enter both budgets');
       assert.deepEqual(await posts(page), []);
     }
+    // values read as values, with a unit, capped at 100000
+    assert.equal(await page.locator('#budget-look').evaluate(e => getComputedStyle(e).color), await page.locator('#gate-step').evaluate(e => getComputedStyle(e).color));
+    assert.match(await page.locator('#budget-form').innerText(), /Look\s+credits[\s\S]*Assets\s+credits/);
+    assert.equal(await page.locator('#budget-look').getAttribute('max'), '100000');
+    await page.locator('#budget-look').fill('100001');
+    await page.locator('#approve').click();
+    assert.equal(await page.locator('#gate-error').innerText(), 'Up to 100000 credits');
+    assert.deepEqual(await posts(page), []);
     await page.locator('#budget-look').fill('50');
     await page.locator('#approve').click();
     await page.waitForFunction(() => window.fixture.posts.length === 1 && !$('approve').disabled);
@@ -371,6 +381,9 @@ try {
     await setSteps(page, noEstimate);
     assert.equal(await page.locator('#budget-look').inputValue(), '');
     assert.equal(await page.locator('#budget-assets').inputValue(), '');
+    await setSteps(page, S({ plan: { ...step('review'), summary: 'Plan ready.\nSix scenes.\nEstimate: Look 40 credits, Assets 99999999999999999999 credits' }, look: step('idle'), assets: step('idle'), edit: step('idle') }));
+    assert.equal(await page.locator('#budget-look').inputValue(), '', 'an absurd estimate pre-fills nothing');
+    assert.equal(await page.locator('#budget-assets').inputValue(), '');
 
     // blocked on budget: Add credits posts budget (budget + N) then resume
     await setSteps(page, STATES.blocked);
@@ -378,6 +391,12 @@ try {
     assert.deepEqual(await shown(page), ['add-credits']);
     assert.equal(await page.locator('#gate-summary').innerText(), 'needs 12 more credits');
     assert.equal(await page.locator('#credits-budget').inputValue(), '52');
+    assert.match(await page.locator('#credits-label').innerText(), /credits/);
+    await page.locator('#credits-budget').fill('100001');
+    await page.locator('#add-credits').click();
+    assert.equal(await page.locator('#gate-error').innerText(), 'Up to 100000 credits');
+    assert.deepEqual(await posts(page), []);
+    await page.locator('#credits-budget').fill('52');
     await page.locator('#add-credits').click();
     await page.waitForFunction(() => window.fixture.posts.length === 2);
     assert.deepEqual(await posts(page), [{ ...base, step: 'look', action: 'budget', credits: 52 }, { ...base, step: 'look', action: 'resume' }]);
@@ -426,6 +445,81 @@ try {
     assert.deepEqual(errors, []);
     await context.close();
   }
+  // The gate acts only on the video it was drawn for; switching videos clears it; a hidden window still hears about review.
+  {
+    const stub = (permission) => `(${(permission) => {
+      window.notes = []; window.asked = 0;
+      window.Notification = class { static permission = permission; static requestPermission() { window.asked++; return Promise.resolve(permission); } constructor(t, o) { window.notes.push(t + '|' + o.body); } };
+    }})(${JSON.stringify(permission)})`;
+    const { context, page, errors } = await open(1366, '1', stub('granted'));
+    const settled = () => page.waitForFunction(() => !$('gate').hidden && !$('approve').disabled || !$('add-credits').hidden && !$('add-credits').disabled);
+    const agentSwitch = (sub) => page.evaluate(async (sub) => { window.fixture.sub = sub; await refresh(true); }, sub);
+    // first load of a step already in review: title, no notification
+    assert.equal(await page.title(), '● Review — video');
+    assert.deepEqual(await page.evaluate(() => window.notes), [], 'first load never notifies');
+    // the selection changed under a drawn gate: nothing is sent, one line, redrawn for the new video
+    await page.evaluate(() => { $('sub').value = 'other'; });
+    await page.locator('#approve').click();
+    await page.waitForFunction(() => $('gate-error').textContent === 'Video changed. Review again.' && !$('gate').hidden && document.title === '● Review — other');
+    assert.deepEqual(await posts(page), []);
+    assert.equal(await page.title(), '● Review — other');
+    await page.evaluate(() => { $('sub').value = 'video'; $('sub').dispatchEvent(new Event('change')); });
+    await settled();
+    assert.equal(await page.locator('#gate-error').innerText(), '', 'a new video starts with no message');
+    // an agent switch closes the open form and discards its draft
+    await page.locator('#ask-changes').click();
+    await page.locator('#changes-form textarea').fill('Text for the old video');
+    await agentSwitch('other');
+    await settled();
+    assert.equal(await page.locator('#changes-form').isVisible(), false);
+    assert.equal(await page.locator('#ask-changes').getAttribute('aria-expanded'), 'false');
+    assert.equal(await page.locator('#changes-form textarea').inputValue(), '');
+    assert.deepEqual(await posts(page), []);
+    await agentSwitch('video');
+    await settled();
+    // a switch while Add credits is pending: the budget went to the old video, no resume follows, nothing is applied
+    await setSteps(page, STATES.blocked);
+    await page.evaluate(() => { window.fixture.hold = new Promise(r => { window.release = r; }); });
+    await page.locator('#add-credits').click();
+    await agentSwitch('other');
+    await page.evaluate(() => { window.release(); window.fixture.hold = null; });
+    await settled();
+    await page.waitForTimeout(200);
+    assert.deepEqual(await posts(page), [{ ...base, step: 'look', action: 'budget', credits: 52 }]);
+    assert.equal(await page.locator('#gate-error').innerText(), '');
+    // a refusal that returns after the switch is not shown on the new video
+    await agentSwitch('video');
+    await setSteps(page, sixSteps.steps);
+    await page.evaluate(() => { window.fixture.hold = new Promise(r => { window.release = r; }); window.fixture.replies = [{ status: 409, error: 'Assets is not ready for review.' }]; });
+    await page.locator('#approve').click();
+    await agentSwitch('other');
+    await page.evaluate(() => { window.release(); window.fixture.hold = null; });
+    await settled();
+    await page.waitForTimeout(200);
+    assert.deepEqual(await posts(page), [{ ...base, step: 'assets', action: 'approve' }]);
+    assert.equal(await page.locator('#gate-error').innerText(), '');
+    await agentSwitch('video');
+    // hidden window: polls every 15 s while a step works, so the title and one notification still arrive
+    await page.evaluate(() => Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' }));
+    await setSteps(page, STATES.working);
+    await page.evaluate(() => { window.notes = []; window.fixture.steps = { ...window.fixture.steps, steps: structuredClone(window.fixture.steps.steps) }; window.fixture.steps.steps.assets.status = 'review'; });
+    await page.waitForFunction(() => document.title === '● Review — video', null, { timeout: 20000 });
+    assert.deepEqual(await page.evaluate(() => window.notes), ['Review — video|Assets ready for review']);
+    const calls = await page.evaluate(() => window.fixture.statusCalls);
+    await page.evaluate(() => hiddenPoll());
+    await page.waitForTimeout(300);
+    assert.equal(await page.evaluate(() => window.fixture.statusCalls), calls, 'nothing working: no hidden poll');
+    assert.deepEqual(errors, []);
+    await context.close();
+    // permission is asked on the first gate click, once, never on load
+    const second = await open(1366, '1', stub('default'));
+    assert.equal(await second.page.evaluate(() => window.asked), 0);
+    await second.page.locator('#ask-changes').click();
+    await second.page.locator('#ask-changes').click();
+    assert.equal(await second.page.evaluate(() => window.asked), 1);
+    assert.deepEqual(second.errors, []);
+    await second.context.close();
+  }
   // non-owner window: no gate write control works, one alert
   {
     const { context, page, errors } = await open(1366, '');
@@ -458,5 +552,5 @@ try {
     assert.deepEqual(errors, []);
     await context.close();
   }
-  console.log('Gate bar: review, working, notifications, approve once, 409, changes with pins, Plan budgets, Add credits, resume, start, clamp, offline, non-owner and 44px targets passed.');
+  console.log('Gate bar: review, working, notifications, approve once, 409, changes with pins, Plan budgets, Add credits, resume, start, clamp, offline, video-switch scope guard, first-load and hidden-window notifications, non-owner and 44px targets passed.');
 } finally { await browser.close(); }
