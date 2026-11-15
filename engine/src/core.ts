@@ -548,12 +548,12 @@ export class LocalCore implements Core {
   }
 
   // The step whose owner-approved budget may pay for clips without a click: Look or Assets, working and not paused.
-  // Returns it when the whole batch fits; otherwise blocks the step and throws before anything is queued.
   private fundingStep(project: string, sub: string): StepName | undefined {
     const steps = readSteps(project, sub).steps;
     return (["look", "assets"] as const).find((n) => steps[n].status === "working" && !steps[n].paused);
   }
 
+  // Returns the funding step when the whole batch fits; otherwise blocks the step and throws before anything is queued.
   private fundBatch(project: string, sub: string, costs: number[]): StepName | undefined {
     const steps = readSteps(project, sub).steps;
     const step = this.fundingStep(project, sub);
@@ -729,9 +729,14 @@ export class LocalCore implements Core {
   async retry({ job_ids }: Args<"retry">) {
     const ids = job_ids ?? this.queue.list().filter((j) => j.status === "failed" || j.failed_scenes?.length).map((j) => j.id);
     const jobs: Job[] = [];
+    const redo: number[] = [];
     for (const id of ids) {
       const job = this.queue.get(id);
       const p = job?.params;
+      // A retry is unbudgeted (queue.retry drops studio.step), so a clip of an unapproved scene would only fail its
+      // pre-run check after the owner's click: it goes back through studio_redo, which applies the step budget.
+      const st = p?.studio;
+      if (st?.kind === "clip" && !readPlan(st.project, st.sub).scenes.find((s) => s.n === st.scene)?.approved) { redo.push(st.scene); continue; }
       if (job?.failed_scenes?.length && p?.agent_scenes && job.status === "done") {
         // A batch that finished with some images still failed: make just those again, under their own scene numbers,
         // instead of re-running the whole batch. The list moves to the new job, so it is never retried twice.
@@ -754,8 +759,10 @@ export class LocalCore implements Core {
       const again = this.queue.retry(id);
       if (again) jobs.push(again);
     }
+    const redoMsg = redo.length ? `Scene(s) ${redo.join(", ")} are not approved, so a retry cannot run: redo them from the Studio with studio_redo instead.` : "";
+    if (redo.length && (job_ids || !jobs.length)) throw new Error(redoMsg);
     if (!jobs.length) throw new Error("Nothing to retry: no failed jobs, and no batch with failed images.");
-    return { jobs: jobs.map(jobView) };
+    return { jobs: jobs.map(jobView), ...(redoMsg && { note: redoMsg }) };
   }
 
   async assets({ kind }: Args<"assets">) {

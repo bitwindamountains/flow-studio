@@ -211,8 +211,8 @@ test("studio_generate skips still scenes and lists them in skipped_stills", asyn
 });
 
 // Unapproved scenes: `boards` lists the scenes that get a storyboard file, `approved` the ones the owner approved.
-async function boardFixture(sub: string, budget: number, boards: number[], approved: number[] = []) {
-  const ctx = await stepFixture(sub, budget, 3);
+async function boardFixture(sub: string, budget: number, boards: number[], approved: number[] = [], runner?: (job: FixtureJob) => string[], file?: string) {
+  const ctx = await stepFixture(sub, budget, 3, runner, file);
   const plan = ctx.P.readPlan("Bud", sub);
   const dir = join(ctx.P.subDir("Bud", sub), "storyboard"); mkdirSync(dir, { recursive: true });
   for (const s of plan.scenes) {
@@ -271,6 +271,56 @@ test("funded batch with unapproved scenes over budget: nothing queued, step bloc
   assert.equal(assets().status, "blocked");
   assert.equal(assets().blockedReason, "needs 1 more credits");
   assert.deepEqual(assets().reservations, []);
+});
+
+test("funded studio_redo of an unapproved storyboarded scene is queued and reserved", async () => {
+  const { core, assets } = await boardFixture("ubredo", 60, [1, 2, 3]);
+  const r = await core.studio_redo({ project: "Bud", sub: "ubredo", scene: 2 } as never) as { queued: number; step: string; job_id: string };
+  assert.deepEqual([r.queued, r.step], [1, "assets"]);
+  assert.equal(core.queue.get(r.job_id)?.status, "queued");
+  assert.deepEqual(assets().reservations, [{ job: r.job_id, credits: 20 }]);
+});
+
+test("a funded unapproved job survives a restart: re-held, keeps its reservation, runs after resumeStepJobs", async () => {
+  const file = join(mkdtempSync(join(tmpdir(), "flow-ub-restart-")), "queue.json");
+  const first = await boardFixture("ubrst", 60, [1], [], undefined, file);
+  first.core.queue.restore();
+  first.S.resumeStep("Bud", "ubrst", "assets");
+  await first.core.studio_generate({ project: "Bud", sub: "ubrst", scenes: [1] } as never);
+  const reserved = first.assets().reservations;
+  assert.equal(reserved.length, 1);
+  const { LocalCore } = await import("./core.js");
+  const core = new LocalCore({ runner: (async (job: FixtureJob) => first.write(job)) as never, queueOpts: { file, pauseMs: [0, 0] } });
+  core.queue.pause("fixture");
+  core.queue.restore();
+  const job = mine(core, "ubrst")[0] as unknown as { id: string; status: string };
+  assert.equal(job.status, "held");
+  assert.deepEqual(first.assets().reservations, reserved);
+  first.S.resumeStep("Bud", "ubrst", "assets");
+  assert.deepEqual(core.resumeStepJobs("Bud", "ubrst", "assets"), [job.id]);
+  core.queue.resume();
+  await settled(() => ["done", "failed"].includes(job.status));
+  assert.equal(job.status, "done");
+});
+
+test("retry of a failed funded clip of an unapproved scene is refused and points at studio_redo", async () => {
+  const tried = new Set<string>(); // every job fails its first run, then succeeds
+  const ctx: { write?: (job: FixtureJob) => string[] } = {};
+  const fx = await boardFixture("ubretry", 60, [1, 2], [2], (job) => { if (!tried.has(job.id)) { tried.add(job.id); throw new Error("Flow failed"); } return ctx.write!(job); });
+  ctx.write = fx.write;
+  const { core } = fx;
+  await core.studio_generate({ project: "Bud", sub: "ubretry", scenes: [1, 2] } as never);
+  core.queue.resume();
+  const [j1, j2] = mine(core, "ubretry") as unknown as { id: string; status: string }[];
+  await settled(() => j1.status === "failed" && j2.status === "failed");
+  await assert.rejects(core.retry({ job_ids: [j1.id] } as never), /studio_redo/);
+  assert.equal(j1.status, "failed");
+  // The approved scene's retry works as today: held for the owner, and it runs once approved.
+  const r = await core.retry({ job_ids: [j2.id] } as never) as { jobs: { id: string; status: string }[] };
+  assert.deepEqual(r.jobs.map((j) => [j.id, j.status]), [[j2.id, "held"]]);
+  core.queue.approve({ job_id: j2.id });
+  await settled(() => j2.status === "done" || j2.status === "failed");
+  assert.equal(j2.status, "done");
 });
 
 test("studio_plan_write refuses a continue scene whose source is a still; studio_to_remotion returns scenes", async () => {
