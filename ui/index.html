@@ -47,8 +47,35 @@
 <div id="reloaded" hidden>This window is not the owner's studio window, so it can't approve credits. Close this window, reopen Flow Studio.cmd, and choose Yes when asked to restart Studio. Wait for any active work to finish first.</div>
 <div id="toast" role="status" hidden></div>
 <main>
-  <section id="gate" aria-label="Review" hidden></section>
+  <p id="gate-live" class="sr-only" aria-live="polite"></p>
+  <section id="gate" aria-label="Review" hidden>
+    <div class="gate-text">
+      <p id="gate-step"></p>
+      <p id="gate-summary"></p>
+      <button id="gate-more" type="button" aria-expanded="false" aria-controls="gate-summary" hidden>More</button>
+      <p id="gate-counts"></p>
+    </div>
+    <div class="gate-actions">
+      <div id="budget-form" hidden>
+        <label>Look <input id="budget-look" type="number" min="0" step="1" inputmode="numeric"></label>
+        <label>Assets <input id="budget-assets" type="number" min="0" step="1" inputmode="numeric"></label>
+      </div>
+      <label id="credits-label" hidden>Budget <input id="credits-budget" type="number" min="0" step="1" inputmode="numeric"></label>
+      <button id="start" type="button" class="gate-primary">Start</button>
+      <button id="approve" type="button" class="gate-primary">Approve</button>
+      <button id="ask-changes" type="button" aria-expanded="false" aria-controls="changes-form">Ask for changes</button>
+      <button id="resume" type="button" class="gate-primary">Resume</button>
+      <button id="add-credits" type="button" class="gate-primary">Add credits</button>
+    </div>
+    <form id="changes-form" hidden>
+      <textarea id="changes-text" maxlength="2000" rows="2" aria-label="Changes"></textarea>
+      <label class="gate-pin"><input id="pin-scene" type="checkbox"> <span id="pin-label">Pin to this scene</span></label>
+      <button id="send-changes" type="submit" class="gate-primary">Send</button>
+    </form>
+    <p id="gate-error" role="alert"></p>
+  </section>
   <section id="player" aria-label="Player"></section>
+  <button id="flag-note" type="button" aria-expanded="false" hidden></button>
   <div id="strip-row">
   <div id="strip-bar">
     <div id="strip-filter" role="group" aria-label="Show scenes"><button type="button" aria-pressed="true" data-filter="all">All</button><button type="button" aria-pressed="false" data-filter="flag">Flagged</button></div>

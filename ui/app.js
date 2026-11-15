@@ -13,6 +13,7 @@ function connectionState(ok, message = "") {
   $("connection-message").textContent = message;
   if (!ok) for (const el of document.querySelectorAll('#views [data-write], #views input, #views textarea, #views select')) el.disabled = true;
   if ($("message-input")) updateComposer();
+  gateControls();
   renderAlerts();
 }
 async function requestJson(path, options = {}) {
@@ -794,8 +795,123 @@ function renderDesk() {
   renderSteps();
   renderStrip(data.plan?.scenes || [], stepState()[currentStep()]?.flags || []);
   renderPlayer(selection);
+  renderFlagNote();
+  renderGate(stepState());
   renderAlerts();
 }
+// The agent's note on the selected flagged scene: one line under the player, the whole note on click.
+function renderFlagNote() {
+  const flag = selection?.scene && (stepState()[currentStep()]?.flags || []).find((f) => f.scene === selection.scene), el = $("flag-note");
+  const text = flag ? flag.note : "";
+  el.hidden = !flag;
+  if (el.dataset.note !== text) { el.dataset.note = text; el.setAttribute("aria-expanded", "false"); el.replaceChildren(h("span", { "aria-hidden": "true" }, "⚑ "), h("span", { class: "sr-only" }, "Flag: "), text); }
+}
+$("flag-note").onclick = () => $("flag-note").setAttribute("aria-expanded", String($("flag-note").getAttribute("aria-expanded") !== "true"));
+
+// ======== gate bar: the one place the owner approves, asks for changes, sets budgets and resumes ========
+// Every action goes to POST /api/step (owner cookie); a non-owner or offline window has every control disabled.
+const stepLabel = (n) => n[0].toUpperCase() + n.slice(1);
+const GATE_WORD = { working: "working", paused: "paused", review: "ready for review", changes: "changes sent", blocked: "blocked", idle: "not started" };
+const GATE_CONTROLS = ["start", "approve", "ask-changes", "resume", "add-credits", "send-changes", "budget-look", "budget-assets", "credits-budget", "changes-text", "pin-scene"];
+let gatePending = false, gateStep = null, gateKey = "", gateScope = "", askedNotify = false;
+const gateSeen = new Map(); // scope -> "step:status" last rendered, so only a real transition notifies
+function gateControls() {
+  const off = !OWNER || !dataFresh || gatePending;
+  for (const id of GATE_CONTROLS) $(id).disabled = off;
+  $("send-changes").disabled = off || !$("changes-text").value.trim();
+  if (!selection?.scene && !(data.renders || []).length) $("pin-scene").disabled = true;
+}
+const wholeNumber = (v) => /^\d+$/.test(v.trim()) ? Number(v) : null;
+const moreCredits = (reason) => Number(/^needs (\d+) more credits?\.?$/.exec(reason || "")?.[1]) || 0;
+const creditsLeft = (x) => x.budget - x.spent - (x.reservations || []).reduce((a, r) => a + r.credits, 0); // remaining() in steps.ts
+function renderGate(steps) {
+  const step = have() ? STEPS.find((n) => steps[n]?.status !== "approved") : null, x = step ? steps[step] : null;
+  const status = !x?.status ? "" : x.status === "working" && x.paused ? "paused" : x.status;
+  const scope = cur().project + "/" + cur().sub;
+  notifyGate(scope, step, status);
+  $("gate").hidden = !status; $("gate").dataset.status = status;
+  $("gate-live").textContent = status ? `${stepLabel(step)} ${GATE_WORD[status]}` : "";
+  if (!status) return;
+  // A new step or video clears the error and the draft; a new state of the same step re-fills the numbers.
+  if (scope + "/" + step !== gateScope) { gateScope = scope + "/" + step; $("gate-error").textContent = ""; $("changes-text").value = ""; $("pin-scene").checked = false; }
+  const review = status === "review", plan = review && step === "plan", more = status === "blocked" ? moreCredits(x.blockedReason) : 0;
+  const key = [gateScope, status, x.summary, x.blockedReason, x.budget].join("\n"), fresh = key !== gateKey;
+  gateKey = key; gateStep = step;
+  $("gate-step").textContent = `${stepLabel(step)} · ${GATE_WORD[status]}`;
+  const text = review ? x.summary || "" : status === "blocked" ? x.blockedReason || "" : "";
+  $("gate-summary").textContent = text; $("gate-summary").hidden = !text;
+  const scenes = data.plan?.scenes?.length || 0, flagged = x.flags?.length || 0;
+  $("gate-counts").textContent = [scenes && `${scenes} scenes`, (scenes || flagged) && `${flagged} flagged`, x.budget && `${x.budget - creditsLeft(x)} of ${x.budget} credits`].filter(Boolean).join(" · ");
+  $("gate-counts").hidden = !["review", "blocked", "paused"].includes(status) || !$("gate-counts").textContent;
+  $("start").hidden = status !== "idle";
+  $("approve").hidden = $("ask-changes").hidden = !review;
+  $("approve").textContent = plan ? "Approve and set budgets" : "Approve";
+  $("budget-form").hidden = !plan;
+  $("resume").hidden = !(status === "paused" || (status === "blocked" && !more));
+  $("add-credits").hidden = $("credits-label").hidden = !more;
+  if (!review) gateForm(false);
+  if (fresh) {
+    // The Plan summary's third line is exactly "Estimate: Look N credits, Assets M credits"; anything else leaves the budgets empty.
+    const est = plan ? /^Estimate: Look (\d+) credits, Assets (\d+) credits$/.exec((x.summary || "").split("\n")[2]?.trim() || "") : null;
+    $("budget-look").value = est?.[1] ?? ""; $("budget-assets").value = est?.[2] ?? "";
+    $("credits-budget").value = more ? x.budget + more : "";
+    $("gate-summary").classList.remove("expanded"); $("gate-more").setAttribute("aria-expanded", "false"); $("gate-more").textContent = "More";
+  }
+  $("pin-label").textContent = !selection?.scene && (data.renders || []).length ? "Pin to this moment" : "Pin to this scene";
+  const sum = $("gate-summary");
+  $("gate-more").hidden = !text || (!sum.classList.contains("expanded") && sum.scrollHeight <= sum.clientHeight + 1);
+  gateControls();
+}
+function notifyGate(scope, step, status) {
+  if (!status) { document.title = "Flow Studio"; return; }
+  const now = step + ":" + status, before = gateSeen.get(scope), asks = status === "review" || status === "blocked";
+  gateSeen.set(scope, now);
+  document.title = asks ? `● Review — ${cur().sub}` : "Flow Studio";
+  // Video and step names only, never the agent's own text.
+  if (asks && before !== undefined && before !== now && window.Notification?.permission === "granted")
+    try { new Notification(`Review — ${cur().sub}`, { body: `${stepLabel(step)} ${GATE_WORD[status]}` }); } catch { /* the title still says it */ }
+}
+function gateForm(open) {
+  $("changes-form").hidden = !open; $("ask-changes").setAttribute("aria-expanded", String(open));
+}
+// Posts the bodies in order and stops at the first refusal, so Add credits never resumes after a refused budget.
+async function gatePost(...bodies) {
+  if (gatePending || !gateStep) return false;
+  gatePending = true; $("gate-error").textContent = ""; gateControls();
+  const step = gateStep;
+  try { for (const b of bodies) await owner("/api/step", { ...cur(), step, ...b }); return true; }
+  catch (e) { $("gate-error").textContent = String(e.message || e); return false; }
+  finally { gatePending = false; gateControls(); refresh(true); }
+}
+$("gate").addEventListener("click", (e) => {
+  // Desktop notifications are asked for on the owner's first gate click, never on load.
+  if (askedNotify || !e.target.closest("button") || window.Notification?.permission !== "default") return;
+  askedNotify = true; Promise.resolve(Notification.requestPermission()).catch(() => {});
+});
+$("gate-more").onclick = () => { const open = $("gate-summary").classList.toggle("expanded"); $("gate-more").setAttribute("aria-expanded", String(open)); $("gate-more").textContent = open ? "Less" : "More"; };
+$("start").onclick = () => gatePost({ action: "start" });
+$("resume").onclick = () => gatePost({ action: "resume" });
+$("approve").onclick = () => {
+  if (gateStep !== "plan") return gatePost({ action: "approve" });
+  const look = wholeNumber($("budget-look").value), assets = wholeNumber($("budget-assets").value);
+  if (look === null || assets === null) { $("gate-error").textContent = "Enter both budgets"; return; }
+  gatePost({ action: "approve", budgets: { look, assets } });
+};
+$("add-credits").onclick = () => {
+  const credits = wholeNumber($("credits-budget").value);
+  if (credits === null) { $("gate-error").textContent = "Enter a budget"; return; }
+  gatePost({ action: "budget", credits }, { action: "resume" });
+};
+$("ask-changes").onclick = () => { const open = $("changes-form").hidden; gateForm(open); if (open) $("changes-text").focus(); };
+$("changes-text").oninput = gateControls;
+$("changes-form").onsubmit = async (e) => {
+  e.preventDefault();
+  const text = $("changes-text").value.trim(), body = { action: "changes", text };
+  if (!text || $("send-changes").disabled) return;
+  if ($("pin-scene").checked && selection?.scene) body.scene = selection.scene;
+  else if ($("pin-scene").checked) { const v = $("player").querySelector("video"); if (v) body.at = Math.round(v.currentTime * 10) / 10; }
+  if (await gatePost(body)) { $("changes-text").value = ""; $("pin-scene").checked = false; gateForm(false); gateControls(); }
+};
 function render() {
   $("start-new-ad").disabled = !have() || !dataFresh;
   const pending = [...data.pending, ...data.other];
