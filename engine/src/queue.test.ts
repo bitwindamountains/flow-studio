@@ -180,3 +180,40 @@ test("image jobs use the shorter image pause; video keeps the long one", async (
   assert.equal(a.status, "done");
   assert.equal(b.status, "done"); // with the 60 s video pause this would still be queued
 });
+
+test("preapproved paid job starts queued; without it, held", () => {
+  const q = mk();
+  q.pause("fixture");
+  assert.equal(q.add(params("video"), { preapproved: true }).status, "queued");
+  assert.equal(q.add(params("video")).status, "held");
+});
+
+test("restore re-holds a preapproved queued paid job", () => {
+  const file = join(dir(), "q.json");
+  const q = mk(file);
+  q.restore();
+  q.pause("fixture");
+  const j = q.add(params("video"), { preapproved: true });
+  assert.equal(j.status, "queued");
+  const again = mk(file);
+  again.restore();
+  assert.equal(again.get(j.id)?.status, "held");
+});
+
+test("onFinish sees every finished job: done, failed, cancelled, dropped dependent and stopped-at-restart", async () => {
+  const seen: string[] = [];
+  const onFinish = (j: Job) => seen.push(`${j.id}:${j.status}`);
+  const q = new JobQueue(async (j) => { if (j.params.file_stem === "bad") throw new Error("boom"); return ["f"]; }, { pauseMs: [0, 0], onFinish });
+  const ok = q.add(params("image"));
+  const bad = q.add(params("image", { file_stem: "bad" }));
+  await tick();
+  const held = q.add(params("video"));
+  const dep = q.add(params("video", { chain_from: held.id }));
+  q.cancel(held.id);
+  assert.deepEqual(seen.sort(), [`${ok.id}:done`, `${bad.id}:failed`, `${held.id}:cancelled`, `${dep.id}:cancelled`].sort());
+  const file = join(dir(), "q.json");
+  writeFileSync(file, JSON.stringify([{ id: "run", status: "running", params: params("video"), files: [], attempts: 1, createdAt: "x" }]));
+  const restored: string[] = [];
+  new JobQueue(async () => [], { file, onFinish: (j) => restored.push(`${j.id}:${j.status}`) }).restore();
+  assert.deepEqual(restored, ["run:failed"]);
+});

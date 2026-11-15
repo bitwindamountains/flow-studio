@@ -14,6 +14,7 @@ import { ACCOUNTS_FILE, currentLocation, discoverAccounts, ensureAffordable, ens
 import { BIN, COMPUTER, IS_MAC, IS_WIN, moveToBin } from "./platform.js";
 import { PlanSchema, sceneSettings, projDir, subDir, safeName, addReference, createSub, listProjects, notesRev, planRev, readNotes, readPlan, uploadsDir, within, writeNotes, writePlan } from "./projects.js";
 import { readJson, writeJsonAtomic } from "./persist.js";
+import { blockStep, pauseWorking, readSteps, remaining, reserve, settle, type StepName } from "./steps.js";
 import { clipsDir, handoff, listRenders, renderDone } from "./handoff.js";
 import { proposeLesson, readLessons } from "./lessons.js";
 import { TECHNIQUES, techniqueById } from "./techniques.js";
@@ -429,7 +430,75 @@ export class LocalCore implements Core {
     try { this.selection = readJson(SELECTION_FILE, null); } catch { this.selection = null; }
     this.lastFrame = init.lastFrame ?? extractLastFrame;
     const run = init.runner ?? this.defaultRunner;
-    this.queue = new JobQueue(async (job) => { await this.prepare(job); return run(job); }, { file: join(HOME_DIR, "queue.json"), onDone: (j) => this.recordDone(j), ...init.queueOpts });
+    this.queue = new JobQueue(async (job) => {
+      this.unspent.delete(job.id);
+      try { await this.prepare(job); } catch (e) { this.unspent.add(job.id); throw e; }
+      return run(job);
+    }, { file: join(HOME_DIR, "queue.json"), onDone: (j) => this.recordDone(j), onFinish: (j) => this.settleJob(j), onRestore: () => this.pauseSteps(), ...init.queueOpts });
+  }
+
+  // Jobs that failed in prepare(), before the browser was touched: their reservation settles at 0.
+  private unspent = new Set<string>();
+  // A reserved job settles with its measured credits, else the reserved cap (a failed run may still have spent), or 0
+  // when it never reached the browser.
+  private settleJob(j: Job): void {
+    const st = j.params.studio;
+    const never = j.status === "cancelled" || this.unspent.delete(j.id);
+    if (!st?.step) return;
+    const measured = j.credits !== undefined && Number.isFinite(j.credits) && j.credits >= 0 ? j.credits : undefined;
+    settle(st.project, st.sub, j.id, measured ?? (never ? 0 : undefined));
+  }
+
+  // After a restart no step spends again until the owner resumes it. Subs without a steps.json are left alone.
+  private pauseSteps(): void {
+    for (const { project, subs } of listProjects()) for (const sub of subs) {
+      try {
+        if (!existsSync(join(subDir(project, sub), "steps.json"))) continue;
+        if (Object.values(readSteps(project, sub).steps).some((x) => x.status === "working" && !x.paused)) pauseWorking(project, sub);
+      } catch (e) { console.error(`flow-mcp: could not pause steps of ${project}/${sub}: ${(e as Error).message}`); }
+    }
+  }
+
+  // Owner route only (server.ts), never an MCP tool: releases the step's held jobs that still hold a reservation.
+  resumeStepJobs(project: string, sub: string, name: StepName): string[] {
+    const reserved = new Set(readSteps(project, sub).steps[name].reservations.map((r) => r.job));
+    const ids = this.queue.list().filter((j) => j.status === "held" && reserved.has(j.id) && j.params.studio?.project === project && j.params.studio.sub === sub && j.params.studio.step === name).map((j) => j.id);
+    for (const id of ids) this.queue.approve({ job_id: id });
+    return ids;
+  }
+
+  // The step whose owner-approved budget may pay for clips without a click: Look or Assets, working and not paused.
+  // Returns it when the whole batch fits; otherwise blocks the step and throws before anything is queued.
+  private fundBatch(project: string, sub: string, costs: number[]): StepName | undefined {
+    const steps = readSteps(project, sub).steps;
+    const step = (["look", "assets"] as const).find((n) => steps[n].status === "working" && !steps[n].paused);
+    if (!step || !costs.length) return undefined;
+    if (costs.some((c) => !Number.isInteger(c) || c < 0)) throw new Error("Inside a step budget max_credits must be a whole number, 0 or more.");
+    const short = costs.reduce((a, c) => a + c, 0) - remaining(steps[step]);
+    if (short > 0) {
+      const msg = `needs ${short} more credits`;
+      blockStep(project, sub, step, msg);
+      throw new Error(msg);
+    }
+    return step;
+  }
+
+  // Each job is reserved as it is added, in one synchronous run (work() starts in a later microtask). fundBatch already
+  // checked the total, so a refusal here means an id clash or a concurrent writer: the jobs added so far are cancelled
+  // (their reservations settle at 0) and the error is passed on.
+  private addFunded<T>(items: T[], step: StepName | undefined, add: (item: T) => Job): Job[] {
+    const jobs: Job[] = [];
+    try {
+      for (const item of items) {
+        const j = add(item);
+        jobs.push(j);
+        if (step) reserve(j.params.studio!.project, j.params.studio!.sub, step, j.id, j.params.max_credits);
+      }
+    } catch (e) {
+      for (const j of jobs) this.queue.cancel(j.id, "Not queued: the step budget could not reserve this batch. Nothing spent.");
+      throw e;
+    }
+    return jobs;
   }
 
   // Resolves what a job takes from earlier work just before it runs: the previous still (reference_previous) and the
@@ -966,20 +1035,24 @@ export class LocalCore implements Core {
     throw new Error(`Scene ${from} has no clip yet, and a scene continues from it: generate scene ${from} in the same batch or first.`);
   }
 
-  private clipJob(plan: ReturnType<typeof readPlan>, scene: ReturnType<typeof readPlan>["scenes"][number], a: { duration?: 4 | 6 | 8 | 10; resolution?: "360p" | "720p"; model?: string; max_credits?: number; prompt?: string }, batch: string, inBatch = new Map<number, Job>()) {
+  private clipCost(scene: ReturnType<typeof readPlan>["scenes"][number], a: { duration?: 4 | 6 | 8 | 10; resolution?: "360p" | "720p"; model?: string; max_credits?: number }) {
+    return a.max_credits ?? sceneSettings(scene, a).max_credits;
+  }
+
+  private clipJob(plan: ReturnType<typeof readPlan>, scene: ReturnType<typeof readPlan>["scenes"][number], a: { duration?: 4 | 6 | 8 | 10; resolution?: "360p" | "720p"; model?: string; max_credits?: number; prompt?: string }, batch: string, inBatch = new Map<number, Job>(), step?: StepName) {
     const set = sceneSettings(scene, a);
     const dir = clipsDir(plan.project, plan.sub);
     const from = scene.start?.kind === "continue" ? scene.start.from : undefined;
     const params: SceneParams = {
-      prompt: a.prompt ?? scene.prompt, type: "video", max_credits: a.max_credits ?? set.max_credits, duration: set.duration, resolution: set.resolution, model: set.model,
+      prompt: a.prompt ?? scene.prompt, type: "video", max_credits: this.clipCost(scene, a), duration: set.duration, resolution: set.resolution, model: set.model,
       aspect_ratio: plan.aspect,
       // A continue scene's first frame is filled in just before it runs (prepare), from its source clip's last frame.
       ...(from === undefined ? { first_frame: scene.storyboard } : this.chainSource(plan, from, inBatch)),
       reference_images: this.studioRefs(plan, scene),
       output_dir: dir, file_stem: this.freeStem(dir, plan.project, plan.sub, "clip", scene.n),
-      studio: { project: plan.project, sub: plan.sub, scene: scene.n, kind: "clip", input: sceneInput(plan, scene, "clip"), ...(from !== undefined && { from }) },
+      studio: { project: plan.project, sub: plan.sub, scene: scene.n, kind: "clip", input: sceneInput(plan, scene, "clip"), ...(from !== undefined && { from }), ...(step && { step }) },
     };
-    return this.queue.add(params, { batch });
+    return this.queue.add(params, { batch, preapproved: !!step });
   }
 
   async studio_storyboard(a: Args<"studio_storyboard">) {
@@ -1017,9 +1090,10 @@ export class LocalCore implements Core {
     picked.sort((x, y) => x.n - y.n);
     const ns = new Set(picked.map((s) => s.n));
     for (const s of picked) if (s.start?.kind === "continue" && !ns.has(s.start.from)) this.chainSource(plan, s.start.from, new Map());
+    const step = this.fundBatch(project, sub, picked.map((s) => this.clipCost(s, { duration, resolution, model, max_credits })));
     const batch = randomUUID().slice(0, 8);
     const inBatch = new Map<number, Job>();
-    const jobs = picked.map((s) => { const j = this.clipJob(plan, s, { duration, resolution, model, max_credits }, batch, inBatch); inBatch.set(s.n, j); return j; });
+    const jobs = this.addFunded(picked, step, (s) => { const j = this.clipJob(plan, s, { duration, resolution, model, max_credits }, batch, inBatch, step); inBatch.set(s.n, j); return j; });
     return { batch, held: picked.length, already_queued, quoted_max_credits: jobs.reduce((n, j) => n + j.params.max_credits, 0), ...(skipped.length && { skipped_unapproved: skipped }) };
   }
 
@@ -1029,8 +1103,9 @@ export class LocalCore implements Core {
     const s = this.pickScenes(plan, [scene], true).picked[0];
     const existing = this.studioJobs(project, sub, "clip", scene).find((j) => ["held", "queued", "running"].includes(j.status));
     if (existing) return { batch: existing.batch, held: 0, already_queued: [scene], job_id: existing.id, quoted_max_credits: 0 };
+    const step = this.fundBatch(project, sub, [this.clipCost(s, { duration, resolution, model })]);
     const batch = randomUUID().slice(0, 8);
-    const job = this.clipJob(plan, s, { duration, resolution, model, prompt }, batch);
+    const [job] = this.addFunded([s], step, (x) => this.clipJob(plan, x, { duration, resolution, model, prompt }, batch, new Map(), step));
     return { batch, held: 1, job_id: job.id, quoted_max_credits: job.params.max_credits };
   }
 

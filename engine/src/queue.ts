@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { readJson, writeJsonAtomic } from "./persist.js";
+import type { StepName } from "./steps.js";
 
 export type JobStatus = "held" | "queued" | "running" | "done" | "failed" | "cancelled";
 
@@ -41,7 +42,8 @@ export interface SceneParams {
   // Links a job to a Studio plan scene so its finished file is recorded in plan.json.
   // `from`: the scene whose last frame this clip starts on (display only; chain_from/chain_file do the work).
   // `input`: scene content identity at queue time, checked before running and attaching a finished result.
-  studio?: { project: string; sub: string; scene: number; kind: "storyboard" | "clip"; from?: number; input?: string };
+  // `step`: the owner-approved step whose credit budget reserved this job (see LocalCore.fundBatch).
+  studio?: { project: string; sub: string; scene: number; kind: "storyboard" | "clip"; from?: number; input?: string; step?: StepName };
 }
 
 export interface Job {
@@ -97,7 +99,7 @@ export class JobQueue {
   // Note text a Requeue added, removed again when the job next runs (it no longer describes the job).
   private requeueNote = new Map<string, string>();
 
-  constructor(private runner: JobRunner, private opts: { file?: string; pauseMs?: [number, number]; imagePauseMs?: [number, number]; onDone?: (job: Job) => void } = {}) {
+  constructor(private runner: JobRunner, private opts: { file?: string; pauseMs?: [number, number]; imagePauseMs?: [number, number]; onDone?: (job: Job) => void; onFinish?: (job: Job) => void; onRestore?: () => void } = {}) {
     this.pauseMs = opts.pauseMs ?? [PAUSE_MIN_MS, PAUSE_MAX_MS];
     this.imagePauseMs = opts.imagePauseMs ?? (opts.pauseMs ? this.pauseMs : [IMAGE_PAUSE_MIN_MS, IMAGE_PAUSE_MAX_MS]);
   }
@@ -111,6 +113,7 @@ export class JobQueue {
         j.status = "failed";
         j.error = STOPPED;
         j.finishedAt = new Date().toISOString();
+        this.finished(j);
       }
       // An approval does not outlive the process: after a restart the owner looks at paid work again.
       if (j.status === "queued" && needsOk(j.params)) j.status = "held";
@@ -119,12 +122,18 @@ export class JobQueue {
     for (const j of this.list()) if (j.status === "failed" || j.status === "cancelled") this.dropDependents(j);
     this.active = true;
     this.save();
+    try { this.opts.onRestore?.(); } catch (e) { console.error(`flow-mcp: onRestore failed: ${(e as Error).message}`); }
     // Deferred: the runner may use fields its owner assigns after construction.
     if (this.list().some((j) => j.status === "queued")) queueMicrotask(() => void this.work());
   }
 
   get pausedReason(): string | null {
     return this.manualPause ?? this.pacing;
+  }
+
+  // Every move to done, failed or cancelled passes here once (onDone runs first for done jobs).
+  private finished(job: Job): void {
+    try { this.opts.onFinish?.(job); } catch (e) { console.error(`flow-mcp: onFinish failed: ${(e as Error).message}`); }
   }
 
   private save(): void {
@@ -141,10 +150,11 @@ export class JobQueue {
     void this.work();
   }
 
-  add(params: SceneParams, opts: { batch?: string; flow?: FlowLocation } = {}): Job {
+  // preapproved: a paid job whose credits are already reserved in an owner-approved step budget (core.ts only).
+  add(params: SceneParams, opts: { batch?: string; flow?: FlowLocation; preapproved?: boolean } = {}): Job {
     const job: Job = {
       id: randomUUID().slice(0, 8),
-      status: needsOk(params) ? "held" : "queued",
+      status: needsOk(params) && !opts.preapproved ? "held" : "queued",
       params,
       files: [],
       attempts: 0,
@@ -213,6 +223,7 @@ export class JobQueue {
       job.status = "cancelled";
       if (note) job.note = [job.note, note].filter(Boolean).join(" · ");
       job.finishedAt = new Date().toISOString();
+      this.finished(job);
       this.dropDependents(job);
       this.save();
     }
@@ -228,6 +239,7 @@ export class JobQueue {
       j.finishedAt = new Date().toISOString();
       const what = prior.params.studio ? `scene ${prior.params.studio.scene}'s clip` : `the clip it continues from (job ${prior.id})`;
       j.note = [j.note, `Not run: ${what} ${prior.status === "failed" ? "failed" : "was cancelled"}, so there is no last frame to start from. Nothing spent.`].filter(Boolean).join(" · ");
+      this.finished(j);
       this.dropDependents(j);
     }
   }
@@ -299,9 +311,10 @@ export class JobQueue {
           // is re-queued here. Timeouts are never retried automatically: they may still have spent credits.
           const retryable = /agent finished without creating/i.test(job.error);
           job.status = retryable && job.attempts <= (job.params.retries ?? 1) ? "queued" : "failed";
-          if (job.status === "failed") this.dropDependents(job);
         }
         job.finishedAt = new Date().toISOString();
+        if (job.status === "done" || job.status === "failed") this.finished(job);
+        if (job.status === "failed") this.dropDependents(job);
         this.save();
         this.lastFinished = Date.now();
       }
