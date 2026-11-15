@@ -505,7 +505,7 @@ server.registerTool(
   "studio_generate",
   {
     title: "Generate clips",
-    description: "Queue one video job per approved scene (or the given scenes - unapproved ones are skipped and listed in skipped_unapproved), held until the owner approves in the Studio page. Each scene uses its own model/duration/resolution from the plan (set them per scene in studio_plan_write; defaults Omni 1.1 Flash, 8 s, 720p; Veo is fixed at 8 s). A continue scene waits for its source clip in the same batch (or uses the source scene finished clip) and starts on its last frame; if the source fails or is cancelled it is cancelled too, nothing spent. Returns batch, held, already_queued and quoted_max_credits. Scenes already held/queued/running are skipped, so repeated calls do not add duplicates. Never spends credits by itself. project/sub are optional: when omitted they default to the project the owner selected in the studio (studio_current); with no selection the call fails.",
+    description: "Queue one video job per approved scene (or the given scenes - unapproved ones are skipped and listed in skipped_unapproved), waiting for the owner's approval in the Studio page, unless the current Look or Assets step has an owner-approved budget that covers the whole batch (then they are queued at once and the reply says queued and step). Each scene uses its own model/duration/resolution from the plan (set them per scene in studio_plan_write; defaults Omni 1.1 Flash, 8 s, 720p; Veo is fixed at 8 s). A continue scene waits for its source clip in the same batch (or uses the source scene finished clip) and starts on its last frame; if the source fails or is cancelled it is cancelled too, nothing spent. Returns batch, held (or queued and step under a budget), already_queued and quoted_max_credits. Scenes already held/queued/running are skipped, so repeated calls do not add duplicates. Never spends credits by itself. project/sub are optional: when omitted they default to the project the owner selected in the studio (studio_current); with no selection the call fails.",
     inputSchema: shapes.studio_generate,
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },
@@ -516,7 +516,7 @@ server.registerTool(
   "studio_redo",
   {
     title: "Redo clip",
-    description: "Queue one held video job for a scene as a new take; earlier clips are kept. Reuses the scene's own model/duration/resolution unless you pass duration, resolution or model. Optional new prompt. If this scene already has an active job, returns held:0 and already_queued; cancel or finish that job before changing its request. When the new clip finishes, every scene that continues from this one (directly or transitively) is marked `stale` (the scene number that changed) until it is redone, and their held or queued clips that would start on the old clip are cancelled (nothing spent). project/sub are optional: when omitted they default to the project the owner selected in the studio (studio_current); with no selection the call fails.",
+    description: "Queue one video job for a scene as a new take, waiting for the owner's approval unless the current step has an approved budget that covers it (then the reply says queued and step, held 0); earlier clips are kept. Reuses the scene's own model/duration/resolution unless you pass duration, resolution or model. Optional new prompt. If this scene already has an active job, returns held:0 and already_queued; cancel or finish that job before changing its request. When the new clip finishes, every scene that continues from this one (directly or transitively) is marked `stale` (the scene number that changed) until it is redone, and their held or queued clips that would start on the old clip are cancelled (nothing spent). project/sub are optional: when omitted they default to the project the owner selected in the studio (studio_current); with no selection the call fails.",
     inputSchema: shapes.studio_redo,
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },
@@ -564,5 +564,26 @@ server.registerTool("studio_edit_task_update", {
   title: "Report editing progress", description: "Acknowledge the owner's task_id with phase accepted before editing. Report editing and rendering when starting those phases. Report failed with a useful message if blocked. Do not mark finished yourself: call studio_render_done with the same task_id and the actual render file. Outdated task ids and backward progress are refused.",
   inputSchema: shapes.studio_edit_task_update, annotations: { readOnlyHint: false, openWorldHint: false },
 }, (args) => reply(core.studio_edit_task_update(args)));
+
+server.registerTool("studio_step_read", {
+  title: "Read current step", description: "Read where the production is: { step (first step not yet approved, or null), status, paused, budget, remaining credits, feedback (owner's change requests), steps, rev }. Call it at the start of work and after the owner asks for changes. You cannot approve a step or set its budget: only the owner can.",
+  inputSchema: shapes.studio_step_read, annotations: { readOnlyHint: true, openWorldHint: false },
+}, (args) => reply(core.studio_step_read(args)));
+server.registerTool("studio_step_submit", {
+  title: "Submit step for review", description: "Hand the step you are working on to the owner for review, with a summary (3 lines or fewer, 400 characters) and optional flags (things the owner should check) and picks ({scene, clip} choices among a scene's takes). Refused while that step still has jobs held, queued or running. The owner then approves or asks for changes; you cannot approve your own step.",
+  inputSchema: shapes.studio_step_submit, annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+}, (args) => reply(core.studio_step_submit(args)));
+server.registerTool("studio_step_blocked", {
+  title: "Report step blocked", description: "Tell the owner the step you are working on cannot continue, with a plain reason (for example it needs more credits or a missing file). Call it instead of guessing. The owner decides how to proceed; you cannot resume or reopen a step.",
+  inputSchema: shapes.studio_step_blocked, annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+}, (args) => reply(core.studio_step_blocked(args)));
+server.registerTool("studio_production_plan_read", {
+  title: "Read production plan", description: "Read the sub-project's production-plan.md (your working plan for the whole video). Returns { text, rev }; pass that rev to studio_production_plan_write.",
+  inputSchema: shapes.studio_production_plan_read, annotations: { readOnlyHint: true, openWorldHint: false },
+}, (args) => reply(core.studio_production_plan_read(args)));
+server.registerTool("studio_production_plan_write", {
+  title: "Write production plan", description: "Replace production-plan.md (up to 400,000 characters). Pass `rev` from your last studio_production_plan_read: if the plan changed since, the write is refused; read again and merge. Returns { ok, rev }.",
+  inputSchema: shapes.studio_production_plan_write, annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+}, (args) => reply(core.studio_production_plan_write(args)));
 
 await server.connect(new StdioServerTransport());

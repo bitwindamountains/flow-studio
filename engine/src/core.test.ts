@@ -202,9 +202,9 @@ test("studio_generate skips still scenes and lists them in skipped_stills", asyn
   plan.scenes[1].kind = "still";
   P.writePlan(plan);
   core.queue.pause("fixture");
-  const r = await core.studio_generate({ project: "Bud", sub: "stl" } as never) as { held: number; skipped_stills: number[] };
+  const r = await core.studio_generate({ project: "Bud", sub: "stl" } as never) as { queued: number; skipped_stills: number[] };
   assert.deepEqual(r.skipped_stills, [2]);
-  assert.equal(r.held, 2);
+  assert.equal(r.queued, 2);
   assert.deepEqual(mine(core, "stl").map((j) => (j.params as { studio?: { scene: number } }).studio!.scene).sort(), [1, 3]);
   assert.equal(S.readSteps("Bud", "stl").steps.assets.reservations.length, 2);
   await assert.rejects(core.studio_redo({ project: "Bud", sub: "stl", scene: 2 } as never), /Scene 2 is a still; redo its image with studio_storyboard/);
@@ -222,4 +222,48 @@ test("studio_plan_write refuses a continue scene whose source is a still; studio
   const cur = P.readPlan("Bud", "stl2"); cur.scenes[0].storyboard = img; cur.scenes[0].kept = true; P.writePlan(cur);
   const r = await core.studio_to_remotion({ project: "Bud", sub: "stl2" } as never) as { scenes: { n: number; kind: string }[] };
   assert.deepEqual(r.scenes.map((s) => [s.n, s.kind]), [[1, "still"]]);
+});
+
+test("agent step tools: read, submit, blocked, picks, active jobs, no owner tools", async () => {
+  const { shapes } = await import("./core.js");
+  for (const k of ["studio_step_approve", "studio_step_budget", "studio_step_reopen", "studio_step_resume"]) assert.ok(!(k in shapes), k);
+  for (const k of ["studio_step_read", "studio_step_submit", "studio_step_blocked", "studio_production_plan_read", "studio_production_plan_write"]) assert.ok(k in shapes, k);
+  const { core, S } = await stepFixture("agt", 60, 2);
+  const rd = await core.studio_step_read({ project: "Bud", sub: "agt" } as never) as { step: string; status: string; budget: number; remaining: number; steps: { name: string; status: string }[]; rev: number; paused: boolean; feedback: unknown[] };
+  assert.equal(rd.step, "assets"); assert.equal(rd.status, "working"); assert.equal(rd.budget, 60); assert.equal(rd.remaining, 60);
+  assert.deepEqual(rd.steps.map((s) => s.name), ["idea", "plan", "look", "assets", "edit"]);
+  await assert.rejects(core.studio_step_submit({ project: "Bud", sub: "agt", step: "assets", summary: "x", picks: [{ scene: 1, clip: "C:/nope.mp4" }] } as never), /scene 1/i);
+  core.queue.pause("fixture");
+  await core.studio_generate({ project: "Bud", sub: "agt" } as never);
+  await assert.rejects(core.studio_step_submit({ project: "Bud", sub: "agt", step: "assets", summary: "x" } as never), /2 jobs still running/);
+  for (const j of mine(core, "agt")) core.queue.cancel((j as unknown as { id: string }).id);
+  const r = await core.studio_step_submit({ project: "Bud", sub: "agt", step: "assets", summary: "done", flags: [{ note: "check" }] } as never) as { steps: { assets: { status: string } } };
+  assert.equal(r.steps.assets.status, "review");
+  const b = await stepFixture("agb", 10, 1);
+  const rb = await b.core.studio_step_blocked({ project: "Bud", sub: "agb", step: "assets", reason: "no ref" } as never) as { steps: { assets: { status: string; blockedReason: string } } };
+  assert.deepEqual([rb.steps.assets.status, rb.steps.assets.blockedReason], ["blocked", "no ref"]);
+  void S;
+});
+
+test("production plan read/write uses revisions and refuses stale writes", async () => {
+  const { core, P } = await stepFixture("ppl", 10, 1);
+  const a = await core.studio_production_plan_read({ project: "Bud", sub: "ppl" } as never) as { text: string; rev: string };
+  assert.equal(a.text, "");
+  const w = await core.studio_production_plan_write({ project: "Bud", sub: "ppl", text: "one", rev: a.rev } as never) as { ok: boolean; rev: string };
+  assert.equal(w.ok, true);
+  await assert.rejects(core.studio_production_plan_write({ project: "Bud", sub: "ppl", text: "two", rev: a.rev } as never), /changed since/);
+  assert.equal(readFileSync(join(P.subDir("Bud", "ppl"), "production-plan.md"), "utf8"), "one");
+  assert.equal(((await core.studio_production_plan_read({ project: "Bud", sub: "ppl" } as never)) as { text: string }).text, "one");
+});
+
+test("funded studio_generate and studio_redo report queued and step with held 0", async () => {
+  const { core } = await stepFixture("fq", 100, 2);
+  core.queue.pause("fixture");
+  const r = await core.studio_generate({ project: "Bud", sub: "fq" } as never) as { queued: number; step: string; held: number };
+  assert.deepEqual([r.queued, r.step, r.held], [2, "assets", 0]);
+  const x = await core.studio_redo({ project: "Bud", sub: "fq", scene: 1 } as never) as unknown as { already_queued: number[] };
+  assert.deepEqual(x.already_queued, [1]); // active already: deduplicated
+  for (const j of mine(core, "fq")) core.queue.cancel((j as unknown as { id: string }).id);
+  const y = await core.studio_redo({ project: "Bud", sub: "fq", scene: 1 } as never) as unknown as { queued: number; step: string; held: number };
+  assert.deepEqual([y.queued, y.step, y.held], [1, "assets", 0]);
 });

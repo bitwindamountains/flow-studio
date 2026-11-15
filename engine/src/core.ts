@@ -14,7 +14,7 @@ import { ACCOUNTS_FILE, currentLocation, discoverAccounts, ensureAffordable, ens
 import { BIN, COMPUTER, IS_MAC, IS_WIN, moveToBin } from "./platform.js";
 import { PlanSchema, isStill, sceneSettings, projDir, subDir, safeName, addReference, createSub, listProjects, notesRev, planRev, readNotes, readPlan, uploadsDir, within, writeNotes, writePlan } from "./projects.js";
 import { readJson, writeJsonAtomic } from "./persist.js";
-import { blockStep, pauseWorking, readSteps, remaining, reserve, settle, type StepName } from "./steps.js";
+import { STEP_ORDER, blockStep, pauseWorking, readSteps, remaining, reserve, settle, submitStep, type StepName } from "./steps.js";
 import { clipsDir, handoff, listRenders, renderDone } from "./handoff.js";
 import { proposeLesson, readLessons } from "./lessons.js";
 import { TECHNIQUES, techniqueById } from "./techniques.js";
@@ -108,6 +108,7 @@ const PS = {
   project: z.string().min(1).optional().describe("Optional: defaults to the project the owner selected in the studio (see studio_current)."),
   sub: z.string().min(1).optional().describe("Optional: defaults to the sub-project the owner selected in the studio."),
 };
+const StepEnum = z.enum(STEP_ORDER);
 export const shapes = {
   status: { detailed: z.boolean().default(true).describe("false skips the plan/credits readout, which briefly opens Flow's account panel.") },
   generate: {
@@ -312,6 +313,11 @@ export const shapes = {
   studio_edit_notes_write: { ...PS, text: z.string(), rev: z.string().optional().describe("The `rev` from your last studio_edit_notes_read; the write is refused if the edit notes changed since.") },
   studio_render_done: { ...PS, task_id: z.string().optional(), file: z.string().min(1).describe("Absolute path of the finished render (mp4/webm/mov) inside the Remotion project's out/ folder.") },
   studio_renders: { ...PS },
+  studio_step_read: { ...PS },
+  studio_step_submit: { ...PS, step: StepEnum, summary: z.string().min(1).describe("At most 3 lines and 400 characters."), flags: z.array(z.object({ scene: z.number().int().optional(), at: z.number().optional(), note: z.string().max(200) })).default([]), picks: z.array(z.object({ scene: z.number().int(), clip: z.string() })).optional() },
+  studio_step_blocked: { ...PS, step: StepEnum, reason: z.string().min(1).max(400) },
+  studio_production_plan_read: { ...PS },
+  studio_production_plan_write: { ...PS, text: z.string().max(400_000), rev: z.string().optional().describe("The `rev` from your last studio_production_plan_read; the write is refused if the plan changed since.") },
   studio_notes_write: { ...PS, text: z.string(), rev: z.string().optional().describe("The notes `rev` from your last studio_notes_read; the write is refused if the notes changed since.") },
   studio_add_reference: { project: PS.project, sub: z.string().optional().describe("Omit for a project-level reference."), path: z.string().describe("A file already uploaded through the studio page (inside the uploads folder).") },
 };
@@ -373,6 +379,11 @@ export interface Core {
   studio_plan_write(a: Args<"studio_plan_write">): Promise<unknown>;
   studio_notes_read(a: Args<"studio_notes_read">): Promise<unknown>;
   studio_notes_write(a: Args<"studio_notes_write">): Promise<unknown>;
+  studio_step_read(a: Args<"studio_step_read">): Promise<unknown>;
+  studio_step_submit(a: Args<"studio_step_submit">): Promise<unknown>;
+  studio_step_blocked(a: Args<"studio_step_blocked">): Promise<unknown>;
+  studio_production_plan_read(a: Args<"studio_production_plan_read">): Promise<unknown>;
+  studio_production_plan_write(a: Args<"studio_production_plan_write">): Promise<unknown>;
   studio_edit_notes_read(a: Args<"studio_edit_notes_read">): Promise<unknown>;
   studio_edit_task_read(a: Args<"studio_edit_task_read">): Promise<unknown>;
   studio_edit_task_update(a: Args<"studio_edit_task_update">): Promise<unknown>;
@@ -903,6 +914,31 @@ export class LocalCore implements Core {
     }
   }
   async studio_renders(a: Args<"studio_renders">) { const { project, sub } = this.pick(a); return { renders: listRenders(project, sub) }; }
+  async studio_step_read(a: Args<"studio_step_read">) {
+    const { project, sub } = this.pick(a); const st = readSteps(project, sub);
+    const step = STEP_ORDER.find((n) => st.steps[n].status !== "approved") ?? null, x = step && st.steps[step];
+    return { step, status: x ? x.status : "approved", paused: !!x?.paused, budget: x?.budget ?? 0, remaining: x ? remaining(x) : 0, feedback: x?.feedback ?? [], steps: STEP_ORDER.map((name) => ({ name, status: st.steps[name].status })), rev: st.rev };
+  }
+  async studio_step_submit(a: Args<"studio_step_submit">) {
+    const { project, sub } = this.pick(a);
+    const active = this.queue.list().filter((j) => j.params.studio?.project === project && j.params.studio.sub === sub && j.params.studio.step === a.step && ["held", "queued", "running"].includes(j.status)).length;
+    if (active) throw new Error(`${active} jobs still running`);
+    if (a.picks?.length) {
+      const scenes = readPlan(project, sub).scenes;
+      for (const p of a.picks) {
+        const s = scenes.find((x) => x.n === p.scene);
+        if (!s || (p.clip !== s.clip && !this.takeHistory(project, sub, s).some((t) => t.clip === p.clip))) throw new Error(`Scene ${p.scene}: that clip is not one of its takes.`);
+      }
+    }
+    return submitStep(project, sub, a.step, { summary: a.summary, flags: a.flags ?? [], picks: a.picks });
+  }
+  async studio_step_blocked(a: Args<"studio_step_blocked">) { const { project, sub } = this.pick(a); return blockStep(project, sub, a.step, a.reason); }
+  async studio_production_plan_read(a: Args<"studio_production_plan_read">) {
+    const { project, sub } = this.pick(a); const text = readNotes(project, sub, "production-plan.md"); return { text, rev: notesRev(text) }; }
+  async studio_production_plan_write(a: Args<"studio_production_plan_write">) {
+    const { project, sub } = this.pick(a);
+    return { ok: true, rev: writeNotes(project, sub, a.text, a.rev, "production-plan.md") };
+  }
   async studio_notes_write(a: Args<"studio_notes_write">) {
     const { project, sub } = this.pick(a); const { text, rev } = a;
     return { ok: true, rev: writeNotes(project, sub, text, rev) };
@@ -1098,7 +1134,7 @@ export class LocalCore implements Core {
     const batch = randomUUID().slice(0, 8);
     const inBatch = new Map<number, Job>();
     const jobs = this.addFunded(picked, step, (s) => { const j = this.clipJob(plan, s, { duration, resolution, model, max_credits }, batch, inBatch, step); inBatch.set(s.n, j); return j; });
-    return { batch, held: picked.length, already_queued, quoted_max_credits: jobs.reduce((n, j) => n + j.params.max_credits, 0), ...(skipped.length && { skipped_unapproved: skipped }), ...(skipped_stills.length && { skipped_stills }) };
+    return { batch, ...(step ? { queued: picked.length, step, held: 0 } : { held: picked.length }), already_queued, quoted_max_credits: jobs.reduce((n, j) => n + j.params.max_credits, 0), ...(skipped.length && { skipped_unapproved: skipped }), ...(skipped_stills.length && { skipped_stills }) };
   }
 
   async studio_redo(a: Args<"studio_redo">) {
@@ -1111,7 +1147,7 @@ export class LocalCore implements Core {
     const step = this.fundBatch(project, sub, [this.clipCost(s, { duration, resolution, model })]);
     const batch = randomUUID().slice(0, 8);
     const [job] = this.addFunded([s], step, (x) => this.clipJob(plan, x, { duration, resolution, model, prompt }, batch, new Map(), step));
-    return { batch, held: 1, job_id: job.id, quoted_max_credits: job.params.max_credits };
+    return { batch, ...(step ? { queued: 1, step, held: 0 } : { held: 1 }), job_id: job.id, quoted_max_credits: job.params.max_credits };
   }
 
   async studio_status(a: Args<"studio_status">) {
