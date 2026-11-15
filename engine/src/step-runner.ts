@@ -10,28 +10,23 @@ const label = (n: StepName) => n[0].toUpperCase() + n.slice(1);
 export const stepPrompt = (step: StepName, project: string, sub: string) =>
   `Run the "${label(step)}" step for ${project}/${sub}. Follow the "${label(step)} step" section of your instructions. Call studio_step_read first; finish with studio_step_submit or studio_step_blocked.`;
 
-// Flags verified against the installed CLIs on 2026-11-15 (help output only, no agent run):
+// Flags verified against the installed CLI on 2026-11-15 (help output only, no agent run):
 // `claude --help` (2.1.325): -p/--print, --output-format json, --strict-mcp-config, --mcp-config, --settings,
 //   --setting-sources, --permission-mode dontAsk, -r/--resume <id>; --append-system-prompt-file is named in --bare's help
 //   and already used by pty.ts (verified 2026-10-31). With -p and no prompt argument the prompt is read from stdin.
-// `codex exec --help` (codex-cli 0.169.0): --json, -s/--sandbox workspace-write, -C/--cd, `-` = prompt from stdin.
-// `codex exec resume --help`: -c key=value, --json, [SESSION_ID] [PROMPT] (no -C/-s there: cwd comes from spawn, sandbox via -c).
 // The prompt always goes through stdin, so project/sub names never reach the command line (cmd.exe quoting).
+// Codex has no permission file equivalent to settings.headless.json yet, so headless steps refuse it (see start).
 const CLAUDE_HEADLESS = ["-p", "--output-format", "json", "--strict-mcp-config",
   "--mcp-config", `${STUDIO}/claude/mcp.json`,
   "--settings", `${STUDIO}/claude/settings.headless.json`,
   "--setting-sources", "project", // user/local allow rules (e.g. .claude/settings.local.json "Bash(python *)") must not widen these
   "--permission-mode", "dontAsk", // anything not allowed is denied, never prompted (nobody is there to answer)
   "--append-system-prompt-file", `${STUDIO}/claude/studio-prompt.md`];
-const args = (agent: StudioAgent, session?: string) => agent === "claude"
-  ? [...CLAUDE_HEADLESS, ...(session ? ["--resume", session] : [])]
-  : session ? ["exec", "resume", "--json", "-c", "sandbox_mode=workspace-write", session, "-"]
-    : ["exec", "--json", "-s", "workspace-write", "-C", CWD, "-"];
-// Claude's json result carries session_id; for Codex's JSONL events the field name is not in --help, so either is accepted.
-// ponytail: if Codex names it differently, later Codex runs just start fresh (no resume) until this is updated.
+export const CODEX_REFUSED = "Headless steps run with Claude Code for now. Switch the agent to Claude and press Resume.";
+// Claude's json result carries session_id.
 const sessionIn = (out: string) => {
   for (const line of [out.trim(), ...out.split(/\r?\n/)]) { // whole output first, in case the result JSON spans lines
-    try { const o = JSON.parse(line), id = o?.session_id ?? o?.thread_id; if (typeof id === "string" && /^[\w-]{1,100}$/.test(id)) return id; } catch { /* not a JSON line */ }
+    try { const id = JSON.parse(line)?.session_id; if (typeof id === "string" && /^[\w-]{1,100}$/.test(id)) return id; } catch { /* not a JSON line */ }
   }
   return undefined;
 };
@@ -42,6 +37,7 @@ type Run = { step: StepName; child: ChildProcess; stopped: boolean };
 // step in `working` first; this only reports a run that ended without submitting or blocking itself.
 export class StepRunner implements StepStarter {
   private runs = new Map<string, Run>();
+  private pending = new Map<string, StepName>(); // a start that arrived while the sub's previous child was still exiting
   private agent: () => StudioAgent;
   private launch: typeof spawn;
   private logDir: string;
@@ -54,30 +50,34 @@ export class StepRunner implements StepStarter {
 
   start(p: string, s: string, step: StepName): void {
     const key = `${p}/${s}`, x = readSteps(p, s).steps[step];
-    if (this.runs.has(key) || x.status !== "working" || x.paused) return;
-    const agent = this.agent(), session = readSession(p, s, agent), log = this.logPath(p, s, step);
+    if (this.runs.has(key)) { this.pending.set(key, step); return; } // run once this child closes
+    if (x.status !== "working" || x.paused) return;
+    if (this.agent() !== "claude") { blockStep(p, s, step, CODEX_REFUSED); return; }
+    const agent = "claude", session = readSession(p, s, agent), log = this.logPath(p, s, step);
     mkdirSync(dirname(log), { recursive: true });
     appendFileSync(log, `\n===== ${new Date().toISOString()} ${agent} ${label(step)}${session ? " (resumed)" : ""} =====\n`);
     let out = "", done = false;
     const finish = (code: number | null, error?: string) => {
       if (done) return; done = true;
-      const run = this.runs.get(key); this.runs.delete(key);
+      const run = this.runs.get(key), next = this.pending.get(key); this.runs.delete(key); this.pending.delete(key);
       const found = sessionIn(out);
       try {
         if (found) setSession(p, s, agent, found);
         else if (session && code !== 0) setSession(p, s, agent, undefined); // the next owner-started run begins a fresh session
-        if (run?.stopped || readSteps(p, s).steps[step].status !== "working") return;
-        const tail = out.slice(-300);
-        blockStep(p, s, step, error ? `Could not start ${agent}: ${error}`
+        const steps = readSteps(p, s).steps;
+        if (!run?.stopped && next !== step && steps[step].status === "working") blockStep(p, s, step, error ? `Could not start ${agent}: ${error}`
           : code === 0 ? "The agent stopped without finishing. Check the step log, then resume."
-          : `The agent exited with code ${code}${session && !found ? " while resuming its earlier session" : ""}. Last output: ${tail}`);
+          : `The agent exited with code ${code}${session && !found ? " while resuming its earlier session" : ""}. Last output: ${out.slice(-300)}`);
+        // A start dropped while this child was exiting runs now; start() re-checks it is still working and not paused.
+        if (next) this.start(p, s, next);
       } catch (e) { console.error(`flow-mcp: step run of ${key} ended: ${(e as Error).message}`); }
     };
     let child: ChildProcess;
     try {
       // cmd /c so the CLI shims resolve on PATH the way they do in a normal shell (as pty.ts does). Same env as the embedded agent.
-      const [file, a] = process.platform === "win32" ? ["cmd.exe", ["/c", agent, ...args(agent, session)]] : [agent, args(agent, session)];
-      child = this.launch(file, a, { cwd: CWD, env: process.env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+      const a = [...CLAUDE_HEADLESS, ...(session ? ["--resume", session] : [])];
+      const [file, argv] = process.platform === "win32" ? ["cmd.exe", ["/c", agent, ...a]] : [agent, a];
+      child = this.launch(file, argv, { cwd: CWD, env: process.env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
     } catch (e) { return finish(null, (e as Error).message); }
     this.runs.set(key, { step, child, stopped: false });
     const take = (d: Buffer | string) => { const t = d.toString(); out = (out + t).slice(-200_000); appendFileSync(log, t); };

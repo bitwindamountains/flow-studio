@@ -80,7 +80,7 @@ test("stop kills the child and does not block the step", () => {
   assert.equal(runner.running("P", v), null);
 });
 test("the session id from the first run is stored per agent and passed as resume on the next step", () => {
-  const { runner, calls, kids, set } = harness(), v = working();
+  const { runner, calls, kids } = harness(), v = working();
   runner.start("P", v, "idea");
   assert.ok(!calls[0].args.includes("--resume"));
   kids[0].stdout.emit("data", JSON.stringify({ type: "result", session_id: "11111111-2222-3333-4444-555555555555" }));
@@ -96,12 +96,6 @@ test("the session id from the first run is stored per agent and passed as resume
   assert.equal(S.readSteps("P", v).steps.plan.status, "blocked");
   assert.match(S.readSteps("P", v).steps.plan.blockedReason ?? "", /No conversation found/);
   assert.equal(S.readSession("P", v, "claude"), undefined);
-  // Codex resumes through its exec resume subcommand with its own id.
-  set("codex"); S.setSession("P", v, "codex", "thread-9");
-  S.startStep("P", v, "plan"); runner.start("P", v, "plan");
-  const cx = calls[2].args;
-  assert.deepEqual([cx.includes("exec"), cx.indexOf("resume") > cx.indexOf("exec"), cx.at(-2), cx.at(-1)], [true, true, "thread-9", "-"]);
-  kids[2].emit("close", 1);
 });
 test("a paused step is not started", () => {
   const { runner, calls } = harness(), v = working();
@@ -109,4 +103,31 @@ test("a paused step is not started", () => {
   runner.start("P", v, "idea");
   assert.equal(calls.length, 0);
   assert.equal(runner.running("P", v), null);
+});
+test("a headless run with Codex does not spawn and blocks the step", () => {
+  const { runner, calls } = harness("codex"), v = working();
+  runner.start("P", v, "idea");
+  assert.equal(calls.length, 0);
+  assert.equal(status(v).status, "blocked");
+  assert.equal(status(v).blockedReason, "Headless steps run with Claude Code for now. Switch the agent to Claude and press Resume.");
+});
+test("a start dropped while the previous child was still exiting runs once that child closes", () => {
+  const { runner, calls, kids } = harness(), v = working();
+  runner.start("P", v, "idea");
+  S.submitStep("P", v, "idea", { summary: "s", flags: [] }); S.approveStep("P", v, "idea"); S.startStep("P", v, "plan");
+  runner.start("P", v, "plan"); // the Idea child is still finishing its last turn
+  assert.equal(calls.length, 1);
+  kids[0].emit("close", 0);
+  assert.equal(calls.length, 2);
+  assert.equal(runner.running("P", v), "plan");
+  assert.equal(S.readSteps("P", v).steps.idea.status, "approved");
+  // The same after a reopen: stop, then Start of that step before the killed child has closed.
+  S.reopenStep("P", v, "plan"); runner.stop("P", v); S.startStep("P", v, "plan"); runner.start("P", v, "plan");
+  assert.equal(calls.length, 2);
+  kids[1].emit("close", 1);
+  assert.equal(calls.length, 3);
+  // A step the exiting child left working is blocked, never restarted.
+  kids[2].emit("close", 0);
+  assert.equal(calls.length, 3);
+  assert.equal(S.readSteps("P", v).steps.plan.status, "blocked");
 });
