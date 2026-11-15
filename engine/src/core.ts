@@ -524,13 +524,18 @@ export class LocalCore implements Core {
       }
       case "budget": setBudget(project, sub, step, a.credits ?? NaN); break;
       case "resume": {
-        if (readSteps(project, sub).steps[step].status !== "working") throw new Error(`${step[0].toUpperCase() + step.slice(1)} is not working.`);
-        resumeStep(project, sub, step); this.resumeStepJobs(project, sub, step); this.starter.start(project, sub, step);
+        // Blocked (e.g. on budget) restarts the step; a paused run is un-paused; a live run is never doubled.
+        const x = readSteps(project, sub).steps[step];
+        if (x.status === "blocked") startStep(project, sub, step);
+        else if (x.status === "working" && x.paused) resumeStep(project, sub, step);
+        else throw new Error(`${step[0].toUpperCase() + step.slice(1)} ${x.status === "working" ? "is already working" : `cannot resume from ${x.status}`}.`);
+        this.resumeStepJobs(project, sub, step); this.starter.start(project, sub, step);
         break;
       }
       case "start": {
-        if (step !== "idea" || Object.values(readSteps(project, sub).steps).some((x) => x.status !== "idle")) throw new Error("Only Idea can start, and only when every step is idle.");
-        run("idea");
+        // Any idle step whose earlier steps are all approved (startStep checks those): Idea first, or a step after a reopen.
+        if (readSteps(project, sub).steps[step].status !== "idle") throw new Error(`${step[0].toUpperCase() + step.slice(1)} is not idle.`);
+        run(step);
         break;
       }
     }

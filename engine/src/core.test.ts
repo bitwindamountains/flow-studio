@@ -387,7 +387,7 @@ test("resume releases only that sub's held step jobs and never restarts the step
   assert.deepEqual(starter.calls, [["start", "gresA", "assets"]]);
 });
 
-test("start begins Idea only when every step is idle; budget sets any step", async () => {
+test("start runs an idle step only when every earlier step is approved; budget sets any step", async () => {
   const P = await import("./projects.js"), S = await import("./steps.js"); const { LocalCore } = await import("./core.js");
   P.createSub("Gate", "gstart", "16:9");
   const starter = starterSpy(); const core = new LocalCore({ runner: async () => [], starter });
@@ -399,6 +399,29 @@ test("start begins Idea only when every step is idle; budget sets any step", asy
   assert.deepEqual(starter.calls, [["start", "gstart", "idea"]]);
   core.gate({ ...scope, step: "edit", action: "budget", credits: 25 });
   assert.equal(S.readSteps("Gate", "gstart").steps.edit.budget, 25);
+});
+
+test("reopen look then start look works; start assets while look is not approved is refused", async () => {
+  const { core, starter, steps, scope } = await gateFixture("greo", "assets", []);
+  core.gate({ ...scope, step: "look", action: "reopen" });
+  assert.throws(() => core.gate({ ...scope, step: "assets", action: "start" }), /look/i);
+  core.gate({ ...scope, step: "look", action: "start" });
+  assert.deepEqual([steps().look.status, steps().assets.status], ["working", "idle"]);
+  assert.deepEqual(starter.calls, [["stop", "greo"], ["start", "greo", "look"]]);
+});
+
+test("a step blocked on budget resumes once the budget is raised; an unpaused working step is not resumed", async () => {
+  const starter = starterSpy();
+  const { core, assets } = await stepFixture("gblk", 59, 3, undefined, undefined, starter);
+  core.queue.pause("fixture");
+  await assert.rejects(core.studio_generate({ project: "Bud", sub: "gblk" } as never), /needs 1 more credits/);
+  assert.equal(assets().status, "blocked");
+  core.gate({ project: "Bud", sub: "gblk", step: "assets", action: "budget", credits: 60 });
+  core.gate({ project: "Bud", sub: "gblk", step: "assets", action: "resume" });
+  assert.deepEqual([assets().status, assets().blockedReason], ["working", undefined]);
+  assert.deepEqual(starter.calls, [["start", "gblk", "assets"]]);
+  assert.throws(() => core.gate({ project: "Bud", sub: "gblk", step: "assets", action: "resume" }), /already working/i);
+  assert.deepEqual(starter.calls, [["start", "gblk", "assets"]], "no second run");
 });
 
 test("studio_status carries steps and the production plan without writing steps.json", async () => {

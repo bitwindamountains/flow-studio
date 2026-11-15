@@ -403,3 +403,19 @@ test("changes with empty text is 400", async () => {
     assert.deepEqual(calls, ["idea"]);
   } finally { srv.lastServer!.closeAllConnections(); await new Promise<void>(r => srv.lastServer!.close(() => r())); }
 });
+
+test("POST /api/step resume on a working step that is not paused is 409 and starts nothing", async () => {
+  process.env.STUDIO_PROJECTS = join(home, "step-projects");
+  const { LocalCore } = await import("./core.js"), srv = await import("./server.js");
+  const { createSub } = await import("./projects.js"); const S = await import("./steps.js");
+  createSub("Gate", "res"); S.startStep("Gate", "res", "idea");
+  const calls: string[] = [];
+  assert.equal(await srv.startServer(new LocalCore({ starter: { start: (_p, _s, n) => void calls.push(n), stop: () => {} } }), undefined, STUDIO), "owner");
+  try {
+    await page();
+    const base = `http://127.0.0.1:${port}`, h = { cookie: "fs_ui=" + /fs_ui=([0-9a-f]+)/.exec(lastSet)![1], origin: base };
+    const r = await fetch(base + "/api/step", { method: "POST", headers: h, body: JSON.stringify({ project: "Gate", sub: "res", step: "idea", action: "resume" }) });
+    assert.equal(r.status, 409);
+    assert.deepEqual(calls, []);
+  } finally { srv.lastServer!.closeAllConnections(); await new Promise<void>(r => srv.lastServer!.close(() => r())); }
+});
