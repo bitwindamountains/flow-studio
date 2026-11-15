@@ -51,15 +51,13 @@ test("changes returns the step to the agent with feedback kept in order; blocked
   a = readSteps("P", v).steps.idea;
   assert.equal(a.status, "working"); assert.equal(a.blockedReason, undefined);
 });
-test("pause blocks start until resume", () => {
+test("pause and resume", () => {
   const v = fresh();
   startStep("P", v, "idea"); pauseWorking("P", v);
   assert.equal(readSteps("P", v).steps.idea.paused, true);
-  assert.throws(() => startStep("P", v, "idea"), /paused/);
+  assert.throws(() => startStep("P", v, "idea"), /already working/);
   resumeStep("P", v, "idea");
   assert.equal(readSteps("P", v).steps.idea.paused, undefined);
-  startStep("P", v, "idea", "sess");
-  assert.equal(readSteps("P", v).steps.idea.session, "sess");
 });
 test("reopen resets later steps to idle and keeps their budgets", () => {
   const v = fresh();
@@ -96,4 +94,30 @@ test("setBudget refuses negatives, non-integers and a value below spent + reserv
   assert.throws(() => setBudget("P", v, "assets", 19), /20/);
   setBudget("P", v, "assets", 20);
   assert.equal(readSteps("P", v).steps.assets.budget, 20);
+});
+test("reserve validates credits and job id", () => {
+  const v = fresh();
+  setBudget("P", v, "assets", 50);
+  for (const bad of [-1, NaN, 1.5, Infinity]) assert.throws(() => reserve("P", v, "assets", "b", bad), /whole number/);
+  reserve("P", v, "assets", "j1", 5);
+  assert.throws(() => reserve("P", v, "assets", "j1", 5), /already has a reservation/);
+  assert.equal(readSteps("P", v).steps.assets.reservations.length, 1);
+});
+test("settle validates spent and stops after the first match", () => {
+  const v = fresh();
+  setBudget("P", v, "assets", 50); reserve("P", v, "assets", "j1", 5);
+  assert.throws(() => settle("P", v, "j1", -1), /0 or more/);
+  assert.throws(() => settle("P", v, "j1", NaN), /0 or more/);
+  assert.equal(readSteps("P", v).steps.assets.reservations.length, 1);
+  settle("P", v, "j1", 0);
+  assert.equal(readSteps("P", v).steps.assets.spent, 0);
+});
+test("startStep is refused from working, review and approved", () => {
+  const v = fresh();
+  startStep("P", v, "idea");
+  assert.throws(() => startStep("P", v, "idea"), /already working/);
+  submitStep("P", v, "idea", { summary: "s", flags: [] });
+  assert.throws(() => startStep("P", v, "idea"), /cannot start from review/);
+  approveStep("P", v, "idea");
+  assert.throws(() => startStep("P", v, "idea"), /cannot start from approved/);
 });

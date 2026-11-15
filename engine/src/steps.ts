@@ -61,16 +61,22 @@ export const startStep = (p: string, s: string, name: StepName, session?: string
   const first = STEP_ORDER.slice(0, STEP_ORDER.indexOf(name)).find(n => st.steps[n].status !== "approved");
   if (first) throw new Error(`${label(first)} is not approved.`);
   const x = st.steps[name];
-  if (x.status === "review" || x.status === "approved" || (x.status === "working" && x.paused)) throw new Error(`${label(name)} cannot start from ${x.paused ? "paused" : x.status}.`);
+  if (x.status === "working") throw new Error(`${label(name)} is already working.`);
+  if (x.status === "review" || x.status === "approved") throw new Error(`${label(name)} cannot start from ${x.status}.`);
   Object.assign(x, { status: "working", paused: undefined, blockedReason: undefined, session });
 });
 export const pauseWorking = (p: string, s: string) => change(p, s, st => { for (const n of STEP_ORDER) if (st.steps[n].status === "working") st.steps[n].paused = true; });
 export const resumeStep = (p: string, s: string, name: StepName) => change(p, s, st => { st.steps[name].paused = undefined; });
 export const reserve = (p: string, s: string, name: StepName, job: string, credits: number) => change(p, s, st => {
+  if (!Number.isInteger(credits) || credits < 0) throw new Error("Credits must be a whole number, 0 or more.");
+  if (STEP_ORDER.some(n => st.steps[n].reservations.some(r => r.job === job))) throw new Error(`Job ${job} already has a reservation.`);
   const short = credits - remaining(st.steps[name]);
   if (short > 0) throw new BudgetError(short);
   st.steps[name].reservations.push({ job, credits });
 });
-export const settle = (p: string, s: string, job: string, spent: number | undefined) => change(p, s, st => {
-  for (const n of STEP_ORDER) { const x = st.steps[n], i = x.reservations.findIndex(r => r.job === job); if (i >= 0) { x.spent += spent ?? x.reservations[i].credits; x.reservations.splice(i, 1); } }
-});
+export const settle = (p: string, s: string, job: string, spent: number | undefined) => {
+  if (spent !== undefined && !(Number.isFinite(spent) && spent >= 0)) throw new Error("Spent must be a number, 0 or more.");
+  return change(p, s, st => {
+    for (const n of STEP_ORDER) { const x = st.steps[n], i = x.reservations.findIndex(r => r.job === job); if (i >= 0) { x.spent += spent ?? x.reservations[i].credits; x.reservations.splice(i, 1); return; } }
+  });
+};
