@@ -4,6 +4,7 @@ import {fileURLToPath} from 'node:url';
 import {chromium} from 'playwright-core';
 import {chromeExecutable} from '../dist/chrome.js';
 import {deriveWorkflow} from '../dist/workflow.js';
+import {isStill} from '../dist/projects.js';
 const root=fileURLToPath(new URL('../../',import.meta.url));
 mkdirSync(root+'.tmp',{recursive:true});
 const browser=await chromium.launch({executablePath:process.env.FLOW_TEST_CHROME??chromeExecutable(),headless:true});
@@ -15,7 +16,7 @@ try {
   const html=readFileSync(root+'ui/index.html','utf8').replace(/<script[^>]*>[\s\S]*?<\/script>/g,'').replace(/<link[^>]*>/g,'').replace('__FLOW_TOKEN__','fixture').replace('__OWNER__','1');
   await page.setContent(html);
   await page.addStyleTag({content:readFileSync(root+'ui/studio.css','utf8')});
-  await page.addScriptTag({content:'window.deriveWorkflow = '+deriveWorkflow.toString()});
+  await page.addScriptTag({content:'window.isStill = '+isStill.toString()+'; window.deriveWorkflow = '+deriveWorkflow.toString()});
   await page.addStyleTag({content:readFileSync(root+'engine/node_modules/@xterm/xterm/css/xterm.css','utf8')});
   for(const file of ['@xterm/xterm/lib/xterm.js','@xterm/addon-fit/lib/addon-fit.js'])await page.addScriptTag({content:readFileSync(root+'engine/node_modules/'+file,'utf8')});
   await page.evaluate(()=>{
@@ -31,9 +32,10 @@ try {
   });
   await page.addScriptTag({content:readFileSync(root+'ui/app.js','utf8')});
   await page.waitForFunction(()=>document.querySelector('#agent-status').textContent.includes('running'));
-  const workspaceBox=await page.locator('#right').boundingBox(),terminalBox=await page.locator('#term-wrap').boundingBox();
+  await page.locator('#chat-toggle').click();
+  const workspaceBox=await page.locator('#player').boundingBox(),terminalBox=await page.locator('#term-wrap').boundingBox();
   assert.ok(terminalBox.y>=workspaceBox.y+workspaceBox.height-1,'terminal must be below the workspace at every width');
-  if(width>=1024) assert.ok((await page.locator('#views').boundingBox()).height>=260,'the default agent dock must leave a useful working canvas on a laptop');
+  if(width>=1024) assert.ok((await page.locator('#player').boundingBox()).height>=260,'the default agent dock must leave a useful working canvas on a laptop');
   assert.equal(await page.locator('#split').getAttribute('aria-orientation'),'horizontal');
   assert.equal(await page.getByRole('button',{name:'Expand terminal',exact:true}).count(),1);
   assert.equal(await page.getByRole('button',{name:'Switch agent',exact:true}).isDisabled(),true);
@@ -43,7 +45,7 @@ try {
   assert.equal(await page.evaluate(()=>document.activeElement.classList.contains('xterm-helper-textarea')),true);
   await page.evaluate(()=>window.fixture.socket.onmessage({data:JSON.stringify({t:'output',data:'{"t":"agent","agent":"claude","status":"exited","session":99}'})}));
   assert.equal(await page.getByLabel('Terminal agent',{exact:true}).inputValue(),'codex','terminal output cannot spoof control messages');
-  await page.getByRole('tab',{name:'5 Edit'}).click();
+  await page.evaluate(()=>navigateTo('edit'));
   await page.waitForFunction(()=>document.querySelector('#view-edit button.big')?.disabled===false);
   assert.ok(!(await page.locator('#view-edit').innerText()).includes('null'), 'optional Edit elements must not render null text');
   await page.evaluate(()=>{window.fixture.status='exited';window.fixture.exitCode=1;window.fixture.state()});
@@ -62,9 +64,9 @@ try {
   assert.ok(!screen.includes('OLD_SESSION_OUTPUT'),'queued output from the previous chat must not leak after reset');
   await page.getByRole('button',{name:'Expand terminal',exact:true}).click();
   assert.ok((await page.locator('#term').boundingBox()).height>500,'expanded terminal must have usable height');
-  assert.equal(await page.locator('#right').isVisible(),false);
+  assert.equal(await page.locator('#player').isVisible(),false);
   await page.getByRole('button',{name:'Restore layout',exact:true}).click();
-  assert.equal(await page.locator('#right').isVisible(),true);
+  assert.equal(await page.locator('#player').isVisible(),true);
   for(const id of ['agent','switch-agent','restart']){
    const box=await page.locator('#'+id).boundingBox();assert.ok(box&&box.x>=0&&box.x+box.width<=width+1,`${id} overflow at width ${width}`);
   }

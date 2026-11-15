@@ -17,18 +17,29 @@
     <feDisplacementMap in="SourceGraphic" in2="soft" scale="36" xChannelSelector="R" yChannelSelector="G" />
   </filter>
 </svg>
-<header class="glass workspace-bar">
-  <span class="mobile-brand">Flow Studio</span>
-  <label class="workspace-picker">Project <select id="project" aria-label="Project"></select></label>
-  <label class="workspace-picker">Ad <select id="sub" aria-label="Sub-project"></select></label>
-  <button id="new-project-toggle" type="button" aria-expanded="false">New project</button>
-  <button id="start-new-ad" type="button" disabled>Start new ad</button>
-  <button id="activity-toggle" type="button" aria-expanded="false">Review jobs (0)</button>
-  <div id="chips" aria-label="Accounts"></div>
+<header id="bar" class="glass workspace-bar">
+  <button id="project-menu" type="button" aria-expanded="false" aria-controls="project-panel"><span id="project-name">Projects</span> <span aria-hidden="true">&#9662;</span></button>
+  <ol id="steps" aria-label="Steps">
+    <li data-step="idea" data-status="idle">Idea</li>
+    <li data-step="plan" data-status="idle">Plan</li>
+    <li data-step="look" data-status="idle">Look</li>
+    <li data-step="assets" data-status="idle">Assets</li>
+    <li data-step="edit" data-status="idle">Edit</li>
+  </ol>
+  <button id="alerts" type="button" aria-expanded="false" hidden>0</button>
+  <button id="chat-toggle" type="button" aria-expanded="false" aria-controls="term-wrap">Chat</button>
 </header>
+<div id="project-panel" class="glass workspace-bar" hidden>
+  <label class="workspace-picker">Project <select id="project" aria-label="Project"></select></label>
+  <label class="workspace-picker">Video <select id="sub" aria-label="Video"></select></label>
+  <button id="new-project-toggle" type="button" aria-expanded="false">New project</button>
+  <button id="start-new-ad" type="button" disabled>Start new video</button>
+  <button id="activity-toggle" type="button" aria-expanded="false">Jobs (0)</button>
+  <div id="chips" aria-label="Accounts"></div>
+</div>
 <div id="project-setup" hidden>
-  <p id="project-setup-copy">Create a project or another cut. Existing work stays intact.</p>
-  <div class="row"><input id="new-project-name" aria-label="New project" placeholder="Project"><input id="new-sub-name" aria-label="New sub-project" placeholder="Sub-project"><select id="new-aspect" aria-label="Aspect"><option>9:16</option><option>16:9</option></select><button id="create-project" type="button">Create project</button></div>
+  <p id="project-setup-copy">Create a project or another video. Existing work stays intact.</p>
+  <div class="row"><input id="new-project-name" aria-label="New project" placeholder="Project"><input id="new-sub-name" aria-label="New video" placeholder="Video"><select id="new-aspect" aria-label="Aspect"><option>9:16</option><option>16:9</option></select><button id="create-project" type="button">Create project</button></div>
 </div>
 <div id="activity-panel" hidden aria-label="Pending generation approvals" style="max-height:35vh;overflow:auto;padding:0 20px"></div>
 <div id="health" hidden></div>
@@ -36,9 +47,17 @@
 <div id="reloaded" hidden>This window is not the owner's studio window, so it can't approve credits. Close this window, reopen Flow Studio.cmd, and choose Yes when asked to restart Studio. Wait for any active work to finish first.</div>
 <div id="toast" role="status" hidden></div>
 <main>
-  <div id="right">
-    <nav id="tabs" class="glass" role="tablist" aria-label="Production workflow">
-      <div class="rail-brand"><svg class="studio-mark" viewBox="0 0 32 32" fill="none" aria-hidden="true"><ellipse cx="16" cy="16" rx="14" ry="8" transform="rotate(-35 16 16)" stroke="currentColor" stroke-width="1.2"/><circle cx="16" cy="16" r="10" fill="currentColor" fill-opacity=".12"/><path d="m13 10 9 6-9 6V10Z" fill="currentColor"/><circle cx="26" cy="7" r="2" fill="#fff"/></svg><span>Flow Studio</span></div>
+  <section id="gate" aria-label="Review" hidden></section>
+  <section id="player" aria-label="Player"></section>
+  <div id="strip-row">
+  <div id="strip-bar">
+    <div id="strip-filter" role="group" aria-label="Show scenes"><button type="button" aria-pressed="true" data-filter="all">All</button><button type="button" aria-pressed="false" data-filter="flag">Flagged</button></div>
+    <button id="details-toggle" type="button" aria-expanded="false" aria-controls="right">Details</button>
+  </div>
+  <div id="strip" aria-label="Scenes"></div>
+  </div>
+  <div id="right" hidden>
+    <nav id="tabs" role="tablist" aria-label="Production workflow">
       <button role="tab" data-view="ideas" aria-selected="true">1 Ideas</button>
       <button role="tab" data-view="plan" aria-selected="false">2 Plan</button>
       <button role="tab" data-view="storyboard" aria-selected="false">3 Storyboard</button>
@@ -55,8 +74,8 @@
       <section id="view-edit" hidden></section>
     </div>
   </div>
-  <div id="split" role="separator" aria-orientation="horizontal" aria-label="Resize agent panel (arrow keys)" tabindex="0"></div>
-  <div id="term-wrap" aria-label="Agent conversation">
+  <div id="split" role="separator" aria-orientation="horizontal" aria-label="Resize agent panel (arrow keys)" tabindex="0" hidden></div>
+  <div id="term-wrap" aria-label="Agent conversation" hidden>
     <div id="term-bar">
       <label>Agent <select id="agent" aria-label="Terminal agent"><option value="claude">Claude Code</option><option value="codex">Codex CLI</option></select></label>
       <span id="agent-status" role="status" aria-live="polite">Connecting…</span>

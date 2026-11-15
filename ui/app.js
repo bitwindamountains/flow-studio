@@ -13,6 +13,7 @@ function connectionState(ok, message = "") {
   $("connection-message").textContent = message;
   if (!ok) for (const el of document.querySelectorAll('#views [data-write], #views input, #views textarea, #views select')) el.disabled = true;
   if ($("message-input")) updateComposer();
+  renderAlerts();
 }
 async function requestJson(path, options = {}) {
   try {
@@ -174,6 +175,14 @@ $("expand-terminal").onclick = () => {
   $("expand-terminal").setAttribute("aria-pressed", String(expanded));
   fit.fit(); term.focus();
 };
+// The terminal stays mounted while hidden, so the session and its scrollback survive closing Chat.
+$("chat-toggle").onclick = () => {
+  const open = $("term-wrap").hidden;
+  if (!open && document.querySelector("main.terminal-expanded")) $("expand-terminal").click();
+  $("term-wrap").hidden = $("split").hidden = !open;
+  $("chat-toggle").setAttribute("aria-expanded", String(open));
+  if (open) { fit.fit(); term.focus(); }
+};
 addEventListener("resize", () => fit.fit());
 fit.fit();
 if (OWNER) connect();
@@ -276,12 +285,30 @@ function updateContextLabel() {
 addEventListener("focus", () => publishContextSoon());
 $("new-project-toggle").onclick = () => {
   const box = $("project-setup"); box.hidden = !box.hidden;
-  $("project-setup-copy").textContent = "Create a project or another cut. Existing work stays intact.";
+  $("project-setup-copy").textContent = "Create a project or another video. Existing work stays intact.";
   $("create-project").textContent = "Create project";
   $("new-project-toggle").setAttribute("aria-expanded", String(!box.hidden));
 };
 $("start-new-ad").onclick = startNewAd;
 $("activity-toggle").onclick = () => { const box = $("activity-panel"); box.hidden = !box.hidden; $("activity-toggle").setAttribute("aria-expanded", String(!box.hidden)); refresh(true); };
+// Bar toggles: each shows or hides one panel and mirrors it in aria-expanded.
+function toggle(button, panel, open = panel.hidden) {
+  panel.hidden = !open; button.setAttribute("aria-expanded", String(open));
+}
+$("project-menu").onclick = () => toggle($("project-menu"), $("project-panel"));
+addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("project-panel").hidden) { toggle($("project-menu"), $("project-panel"), false); $("project-menu").focus(); } });
+$("details-toggle").onclick = () => toggle($("details-toggle"), $("right"));
+$("alerts").onclick = () => { $("alerts").setAttribute("aria-expanded", String($("alerts").getAttribute("aria-expanded") !== "true")); renderAlerts(); };
+// Notices stay out of the way behind the badge; the connection banner shows itself because it disables writes.
+function renderAlerts() {
+  const open = $("alerts").getAttribute("aria-expanded") === "true", health = !!$("health").dataset.active;
+  const count = [health, !OWNER, !dataFresh].filter(Boolean).length;
+  $("alerts").hidden = !count;
+  $("alerts").textContent = "! " + count;
+  $("alerts").setAttribute("aria-label", `Alerts: ${count}`);
+  $("health").hidden = !(open && health);
+  $("reloaded").hidden = !(open && !OWNER);
+}
 function startNewAd() {
   const project = cur().project;
   const subs = new Set(projects.find(p => p.project === project)?.subs || []);
@@ -290,8 +317,8 @@ function startNewAd() {
   $("new-project-name").value = project;
   $("new-sub-name").value = `ad-${String(number).padStart(2, "0")}`;
   $("new-aspect").value = data.plan?.aspect || "9:16";
-  $("project-setup-copy").textContent = "Start a fresh ad at Ideas. Your finished ad and its renders stay available in the cut selector.";
-  $("create-project").textContent = "Create ad";
+  $("project-setup-copy").textContent = "Start a fresh video at Ideas. Your finished video and its renders stay available in the Video picker.";
+  $("create-project").textContent = "Create video";
   $("project-setup").hidden = false;
   $("new-project-toggle").setAttribute("aria-expanded", "true");
   $("new-sub-name").focus(); $("new-sub-name").select();
@@ -356,12 +383,12 @@ loadProjects();
 
 // ---- health banner: /api/health/flow lists the Flow checks that failed (textContent only) ----
 fetch("/api/health/flow", { headers: { "x-flow-token": TOKEN } }).then((r) => (r.ok ? r.json() : null)).then((h) => {
-  if (h && h.ok === false && h.message) { $("health").textContent = "Flow check: " + h.message; $("health").hidden = false; }
+  if (h && h.ok === false && h.message) { $("health").textContent = "Flow check: " + h.message; $("health").dataset.active = "1"; renderAlerts(); }
 }).catch(() => {});
 
 // ======== step views ========
 // Plan text is written by Claude: every string goes in through textContent, never innerHTML.
-if (!OWNER) $("reloaded").hidden = false;
+renderAlerts();
 function h(tag, props, ...kids) {
   const e = document.createElement(tag);
   for (const [k, v] of Object.entries(props || {})) {
@@ -568,15 +595,13 @@ async function fetchData() {
   }
   if (view === "edit") {
     data.editNotes = await editNotes.load();
-    const r = await api("studio_renders", scope);
-    data.renders = r && r.renders ? r.renders : [];
     const task = await api("studio_edit_task_read", scope); data.editTask = task.task || null;
   }
-  if (view === "generate" || view === "storyboard") {
-    const [st, ls] = await Promise.all([api("studio_status", scope), get("/api/lessons")]);
-    data.status = st.error ? null : st;
-    data.lessons = ls.pending || [];
-  }
+  // The desk needs every step's status, each scene's jobs and the latest render, whichever stage view is open.
+  const [st, r] = await Promise.all([api("studio_status", scope), api("studio_renders", scope)]);
+  data.status = st.error ? null : st;
+  data.renders = r && r.renders ? r.renders : [];
+  if (view === "generate" || view === "storyboard") data.lessons = (await get("/api/lessons")).pending || [];
   if (notesKey() !== scopeKey || view !== requestedStage) { again = true; return false; }
   return true;
 }
@@ -619,10 +644,149 @@ function renderNavigation() {
   $("stage-heading").textContent = stageNames[view];
   updateContextLabel();
 }
+
+// ======== review desk: steps row, player and scene strip ========
+// Scene and plan text from the agent only ever reaches the DOM through h() (text nodes and attributes).
+const STEPS = ["idea", "plan", "look", "assets", "edit"];
+const STEP_ICON = { approved: "✓", working: "◌", review: "●", changes: "↺", blocked: "!", idle: "" };
+const STEP_WORD = { approved: "approved", working: "working", review: "ready for review", changes: "changes asked", blocked: "blocked", idle: "not started" };
+const MARK_ICON = { done: "✓", flag: "⚑", working: "◌", stale: "↻", none: "" };
+const MARK_WORD = { done: "done", flag: "flagged", working: "working", stale: "stale", none: "not started" };
+const isStillScene = (s) => s.kind === "still"; // no kind = clip
+const stepState = () => data.status?.steps?.steps || {};
+const currentStep = () => STEPS.find((n) => stepState()[n]?.status !== "approved") ?? null;
+let stripFilter = "all", stripSig = "";
+const collapsedSections = new Set();
+function selectScene(n) {
+  selectContextItem(n == null ? null : { kind: "scene", scene: n });
+  renderDesk();
+}
+// Precedence: flag, working, stale, done, none.
+function markOf(s, flagged, jobs, assetStepWorking) {
+  const asset = isStillScene(s) ? s.storyboard : s.clip;
+  if (flagged.has(s.n)) return "flag";
+  if ((jobs.get(s.n) || []).some((j) => ["held", "queued", "running"].includes(j.status)) || (!asset && assetStepWorking)) return "working";
+  if (s.stale !== undefined) return "stale";
+  return asset ? "done" : "none";
+}
+function renderSteps() {
+  const st = stepState(), now = currentStep();
+  for (const li of document.querySelectorAll("#steps li")) {
+    const step = li.dataset.step, status = st[step]?.status || "idle";
+    li.dataset.status = status;
+    if (step === now) li.setAttribute("aria-current", "step"); else li.removeAttribute("aria-current");
+    li.replaceChildren(h("span", { class: "step-icon", "aria-hidden": "true" }, STEP_ICON[status] || ""),
+      h("span", { class: "step-name" }, step[0].toUpperCase() + step.slice(1)), h("span", { class: "sr-only" }, ", " + (STEP_WORD[status] || status)));
+  }
+}
+function renderStrip(scenes, flags) {
+  const flagged = new Set(flags.map((f) => f.scene).filter((n) => n != null));
+  const jobs = new Map((data.status?.scenes || []).map((x) => [x.n, x.jobs || []]));
+  const now = currentStep(), assetStepWorking = (now === "look" || now === "assets") && stepState()[now]?.status === "working";
+  const tiles = scenes.map((s) => ({ s, kind: isStillScene(s) ? "still" : "clip", mark: markOf(s, flagged, jobs, assetStepWorking) }))
+    .filter((t) => stripFilter === "all" || t.mark === "flag");
+  const grouped = stripFilter === "all" && scenes.some((s) => s.section);
+  const sig = JSON.stringify([stripFilter, grouped, tiles.map((t) => [t.s.n, t.kind, t.mark, t.s.storyboard, t.s.section])]);
+  const strip = $("strip");
+  if (sig !== stripSig) {
+    stripSig = sig;
+    const focused = document.activeElement?.closest?.("#strip .tile")?.dataset.scene;
+    const tile = (t) => {
+      const b = h("button", { type: "button", class: "tile", tabindex: "-1", "data-scene": t.s.n, "data-kind": t.kind, "data-mark": t.mark, "aria-label": `Scene ${t.s.n}, ${t.kind}, ${MARK_WORD[t.mark]}` },
+        // ponytail: clips without a still show no thumbnail; a video frame per tile would be too heavy for hundreds of scenes.
+        t.s.storyboard ? h("img", { src: media(t.s.storyboard), alt: "", loading: "lazy", decoding: "async", onerror: (e) => { e.target.hidden = true; } }) : null,
+        h("span", { class: "tile-kind", "aria-hidden": "true" }, t.kind === "still" ? "▣" : "▶"),
+        t.mark === "none" ? null : h("span", { class: "tile-mark", "aria-hidden": "true" }, MARK_ICON[t.mark]),
+        h("span", { class: "tile-n", "aria-hidden": "true" }, String(t.s.n)));
+      b.onclick = () => selectScene(t.s.n);
+      return b;
+    };
+    let kids = tiles.map(tile);
+    if (grouped) {
+      const groups = [];
+      for (const t of tiles) {
+        const name = t.s.section || "";
+        if (groups.at(-1)?.name !== name) groups.push({ name, tiles: [] });
+        groups.at(-1).tiles.push(t);
+      }
+      kids = groups.map(({ name, tiles: list }) => {
+        const body = h("div", { class: "group-tiles", hidden: collapsedSections.has(name) }, list.map(tile));
+        const label = name ? h("button", { type: "button", class: "group-label", "aria-expanded": String(!collapsedSections.has(name)) }, name) : null;
+        if (label) label.onclick = () => {
+          const open = body.hidden;
+          if (open) collapsedSections.delete(name); else collapsedSections.add(name);
+          for (const g of strip.querySelectorAll(".group")) if (g.dataset.section === name) {
+            g.querySelector(".group-tiles").hidden = !open;
+            g.querySelector(".group-label").setAttribute("aria-expanded", String(open));
+          }
+          renderStrip(scenes, flags);
+        };
+        return h("div", { class: "group", role: "group", "data-section": name, "aria-label": name || "Scenes" }, label, body);
+      });
+    }
+    strip.replaceChildren(...(kids.length ? kids : [h("p", { class: "strip-empty" }, stripFilter === "flag" ? "No flags" : "No scenes")]));
+    if (focused) strip.querySelector(`.tile[data-scene="${Number(focused)}"]`)?.focus();
+  }
+  // Roving tabindex: the selected tile (or the first visible one) is the strip's single tab stop.
+  const all = [...strip.querySelectorAll(".tile")], visible = all.filter((b) => b.checkVisibility());
+  for (const b of all) { b.tabIndex = -1; if (Number(b.dataset.scene) === selection?.scene) b.setAttribute("aria-current", "true"); else b.removeAttribute("aria-current"); }
+  const stop = visible.find((b) => Number(b.dataset.scene) === selection?.scene) || visible[0];
+  if (stop) stop.tabIndex = 0;
+}
+$("strip").onkeydown = (e) => {
+  const tile = e.target.closest?.(".tile");
+  if (!tile) return;
+  const all = [...$("strip").querySelectorAll(".tile")].filter((b) => b.checkVisibility()), i = all.indexOf(tile);
+  const next = all[{ ArrowRight: i + 1, ArrowDown: i + 1, ArrowLeft: i - 1, ArrowUp: i - 1, Home: 0, End: all.length - 1 }[e.key]];
+  if (!next) return;
+  e.preventDefault();
+  selectScene(Number(next.dataset.scene));
+  next.focus();
+};
+// A mouse wheel scrolls the one-row strip sideways.
+$("strip").onwheel = (e) => {
+  const el = $("strip");
+  if (Math.abs(e.deltaY) > Math.abs(e.deltaX) && el.scrollWidth > el.clientWidth) { el.scrollLeft += e.deltaY; e.preventDefault(); }
+};
+for (const b of document.querySelectorAll("#strip-filter button")) b.onclick = () => {
+  stripFilter = b.dataset.filter;
+  for (const x of document.querySelectorAll("#strip-filter button")) x.setAttribute("aria-pressed", String(x === b));
+  renderDesk();
+};
+function renderPlayer(sel) {
+  const scenes = data.plan?.scenes || [], renders = data.renders || [];
+  const s = sel?.scene ? scenes.find((x) => x.n === sel.scene) : null;
+  let label = "Player", src = "", tag = "";
+  if (s) {
+    label = `Scene ${s.n}, ${isStillScene(s) ? "still" : "clip"}`;
+    const take = sel.kind === "take" ? data.status?.scenes?.find((x) => x.n === s.n)?.takes?.[sel.takeIndex - 1] : null;
+    if (take) { label += `, take ${sel.takeIndex}`; src = take.clip; tag = "video"; }
+    else if (isStillScene(s) || !s.clip) { src = s.storyboard; tag = "img"; }
+    else { src = s.clip; tag = "video"; }
+  } else if (renders.length) {
+    const r = renders.find((x) => sel?.kind === "render" && x.version === sel.version) || renders[renders.length - 1];
+    label = `Render v${r.version}`; src = r.path; tag = "video";
+  }
+  const el = $("player"), key = label + "\n" + (src || "");
+  if (el.dataset.key === key) return; // keep a playing video playing across refreshes
+  el.dataset.key = key;
+  el.setAttribute("aria-label", label);
+  const shown = !src ? h("p", { class: "player-empty" }, s ? "Not made yet" : have() ? "Select a scene" : "Choose a project")
+    : tag === "img" ? h("img", { src: media(src), alt: label }) : h("video", { src: media(src), controls: true, preload: "metadata", playsinline: true });
+  el.replaceChildren(shown, s || src ? h("span", { class: "player-label", "aria-hidden": "true" }, label) : null);
+}
+function renderDesk() {
+  $("project-name").textContent = have() ? `${cur().project} · ${cur().sub}` : "Projects";
+  renderSteps();
+  renderStrip(data.plan?.scenes || [], stepState()[currentStep()]?.flags || []);
+  renderPlayer(selection);
+  renderAlerts();
+}
 function render() {
   $("start-new-ad").disabled = !have() || !dataFresh;
   const pending = [...data.pending, ...data.other];
-  $("activity-toggle").textContent = `Review jobs (${pending.reduce((n, g) => n + g.jobs.length, 0)})`;
+  $("activity-toggle").textContent = `Jobs (${pending.reduce((n, g) => n + g.jobs.length, 0)})`;
+  renderDesk();
   if (!$("activity-panel").hidden) $("activity-panel").replaceChildren(...(pending.length ? pending.map(heldCard) : [h("p", {}, "No jobs waiting for credit approval.")]));
   renderNavigation();
   renderReadiness();
@@ -708,7 +872,7 @@ async function setAdReference(path, selected, scope = cur()) {
 }
 function referenceFigure(path, scope, selected) {
   const name = path.split(/[\\/]/).pop();
-  const action = btn(selected ? `Remove ${name} from this ad` : `Use ${name} for this ad`, () => setAdReference(path, !selected, scope));
+  const action = btn(selected ? `Remove ${name} from this video` : `Use ${name} for this video`, () => setAdReference(path, !selected, scope));
   return h("figure", {}, h("img", { src: media(path), alt: name }), h("figcaption", {}, name), action);
 }
 function renderPlan(el) {
@@ -734,12 +898,12 @@ function renderPlan(el) {
     kids.push(h("div", { class: "row" }, asp, sty), sceneSelector(p.scenes),
       p.scenes.length ? h("div", { class: "table-scroll" }, h("table", {}, h("thead", {}, h("tr", {}, ...["#", "Frame prompt", "Clip prompt", "Start", "Camera", "Duration", "Model · res", "Caption", "Voiceover", "References"].map((t) => h("th", {}, t)))), h("tbody", {}, rows))) : h("p", {}, "No scenes yet. Ask the agent to write the plan."),
       h("h3", {}, "Notes"), notesBox, lostBox,
-      h("h3", {}, "References for this ad"),
+      h("h3", {}, "References for this video"),
       h("p", { class: "dim" }, "These apply to every scene. Removing a reference clears scene approval and keeps earlier media and library files."),
-      picker("Add ad reference", async (f) => { const r = await apiOk("studio_add_reference", { ...c, path: await upload(f) }); await setAdReference(r.path, true, c); }),
-      (data.activeRefs || []).length ? h("div", { class: "refs" }, data.activeRefs.map(path => referenceFigure(path, c, true))) : h("p", { class: "dim" }, "No ad references selected. New ads start with an empty selection."),
-      h("details", {}, h("summary", {}, `Reference library (${(data.libraryRefs || []).length} unused for this ad)`),
-        h("p", { class: "dim" }, "Stored images are available to reuse. They are not automatically included in this ad."),
+      picker("Add video reference", async (f) => { const r = await apiOk("studio_add_reference", { ...c, path: await upload(f) }); await setAdReference(r.path, true, c); }),
+      (data.activeRefs || []).length ? h("div", { class: "refs" }, data.activeRefs.map(path => referenceFigure(path, c, true))) : h("p", { class: "dim" }, "No video references selected. New videos start with an empty selection."),
+      h("details", {}, h("summary", {}, `Reference library (${(data.libraryRefs || []).length} unused for this video)`),
+        h("p", { class: "dim" }, "Stored images are available to reuse. They are not automatically included in this video."),
         h("div", { class: "refs" }, (data.libraryRefs || []).map(path => referenceFigure(path, c, false)))));
     if (p.lessons && p.lessons.length) kids.push(h("details", {}, h("summary", {}, `Lessons (${p.lessons.length})`), h("ul", {}, p.lessons.map((l) => h("li", {}, `[${l.scope}] ${l.text}`)))));
   }
@@ -923,7 +1087,7 @@ function renderEdit(el) {
       taskActive(task) ? btn("Mark task stopped (does not stop agent)", () => owner("/api/edit-task/stop", { ...c, task_id: task.id }), true) : null) : null,
     stale.length ? h("p", { class: "err" }, `Redo stale kept scenes ${stale.map((s) => s.n).join(", ")} before editing.`) : null,
     h("h3", {}, "Edit notes"), box, lostBox,
-    h("div", { class: "row" }, go, renders.length ? btn("Start new ad", startNewAd) : null),
+    h("div", { class: "row" }, go, renders.length ? btn("Start new video", startNewAd) : null),
     h("div", { class: "edit-audio" }, picker("Music", async (f) => (files.music = await upload(f)), "audio/*"), picker("Voiceover", async (f) => (files.voiceover = await upload(f)), "audio/*")),
     files.music ? h("p", { class: "dim" }, "Music: " + files.music.split(/[\\/]/).pop()) : null,
     files.voiceover ? h("p", { class: "dim" }, "Voiceover: " + files.voiceover.split(/[\\/]/).pop()) : null),

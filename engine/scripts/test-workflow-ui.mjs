@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright-core';
 import { chromeExecutable } from '../dist/chrome.js';
 import { deriveWorkflow } from '../dist/workflow.js';
+import { isStill } from '../dist/projects.js';
 import { readCreativeGuide } from '../dist/creative-guide.js';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
@@ -18,7 +19,7 @@ try {
     await page.route('**/*', (r) => r.request().url() === 'http://workflow.test/' ? r.fulfill({ contentType: 'text/html', body: html }) : r.abort());
     await page.goto('http://workflow.test/');
     await page.addStyleTag({ content: readFileSync(root + 'ui/studio.css', 'utf8') });
-    await page.addScriptTag({ content: 'window.deriveWorkflow = ' + deriveWorkflow.toString() });
+    await page.addScriptTag({ content: 'window.isStill = ' + isStill.toString() + '; window.deriveWorkflow = ' + deriveWorkflow.toString() });
     await page.addStyleTag({ content: readFileSync(root + 'engine/node_modules/@xterm/xterm/css/xterm.css', 'utf8') });
     for (const file of ['@xterm/xterm/lib/xterm.js', '@xterm/addon-fit/lib/addon-fit.js'])
       await page.addScriptTag({ content: readFileSync(root + 'engine/node_modules/' + file, 'utf8') });
@@ -66,6 +67,8 @@ try {
     }, stageGuides);
     await page.addScriptTag({ content: readFileSync(root + 'ui/app.js', 'utf8') });
     await page.waitForFunction(() => !!data.workflow);
+    // The earlier stage views sit behind Details, the pickers behind the project menu, the composer behind Chat.
+    for (const id of ['details-toggle', 'project-menu', 'chat-toggle']) await page.locator('#' + id).click();
     const initialInputs = await page.evaluate(() => window.fixture.sent.filter(m => m.t === 'i' || m.t === 'submit-message').length);
     assert.equal(await page.getByRole('tab', {name:'5 Edit'}).getAttribute('aria-disabled'), 'true');
     await page.getByRole('tab', {name:'5 Edit'}).click({force:true});
@@ -74,13 +77,13 @@ try {
     await page.waitForFunction(() => document.querySelector('#notes')?.value === 'saved A');
     assert.equal(await page.locator('#view-plan .creative-guide').count(),1,'plan shows the owner guide basis');
     await page.locator('#view-plan .creative-guide summary').click();
-    await page.getByRole('button',{name:'Remove shared.png from this ad',exact:true}).click();
+    await page.getByRole('button',{name:'Remove shared.png from this video',exact:true}).click();
     await page.waitForFunction(()=>window.fixture.adSelections['A/ad']?.length===0);
-    assert.equal(await page.getByRole('button',{name:'Remove shared.png from this ad',exact:true}).count(),0);
+    assert.equal(await page.getByRole('button',{name:'Remove shared.png from this video',exact:true}).count(),0);
     await page.locator('#view-plan summary').filter({hasText:'Reference library'}).click();
-    await page.getByRole('button',{name:'Use added.png for this ad',exact:true}).click();
+    await page.getByRole('button',{name:'Use added.png for this video',exact:true}).click();
     await page.waitForFunction(()=>window.fixture.adSelections['A/ad']?.includes('added.png'));
-    await page.getByRole('button',{name:'Remove added.png from this ad',exact:true}).click();
+    await page.getByRole('button',{name:'Remove added.png from this video',exact:true}).click();
     await page.waitForFunction(()=>window.fixture.adSelections['A/ad']?.length===0);
     assert.deepEqual(await page.evaluate(()=>window.fixture.projectRefs.A),['shared.png'],'removal preserves stored library references');
     await page.evaluate(async()=>{window.fixture.scenes[0].references=['scene.png'];await refresh(true);});
@@ -174,10 +177,10 @@ try {
     assert.ok((await page.locator('#connection').innerText()).includes('Reload'));
     await page.evaluate(async () => { window.fixture.expired = false; await refresh(true); });
     const beforeNewAd = await page.evaluate(()=>({sent:window.fixture.sent.length,scenes:JSON.stringify(window.fixture.scenes),renders:JSON.stringify(window.fixture.renders)}));
-    await page.locator('#view-edit').getByRole('button',{name:'Start new ad',exact:true}).click();
+    await page.locator('#view-edit').getByRole('button',{name:'Start new video',exact:true}).click();
     assert.equal(await page.locator('#new-project-name').inputValue(),'A');
     assert.equal(await page.locator('#new-sub-name').inputValue(),'ad-01');
-    await page.getByRole('button',{name:'Create ad',exact:true}).click();
+    await page.getByRole('button',{name:'Create video',exact:true}).click();
     await page.waitForFunction(()=>view==='ideas' && data.plan?.sub==='ad-01' && data.plan.scenes.length===0);
     assert.deepEqual(await page.evaluate(()=>data.plan.references),[],'new cut has no inherited ad references');
     assert.equal(await page.getByRole('tab',{name:'2 Plan'}).getAttribute('aria-disabled'),'true');

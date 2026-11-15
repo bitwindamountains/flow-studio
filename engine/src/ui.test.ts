@@ -88,7 +88,7 @@ test("saving a recovered conflicting draft writes the draft rather than silently
 });
 
 function terminalHarness() {
-  const elements: Record<string, any> = Object.fromEntries(["term", "agent", "agent-status", "switch-agent", "restart", "expand-terminal", "mode-terminal", "mode-message", "message-input", "message-ready", "send-message", "message-status"].map((id) => [id, { value: "claude", checked: false, setAttribute() {} }]));
+  const elements: Record<string, any> = Object.fromEntries(["term", "agent", "agent-status", "switch-agent", "restart", "expand-terminal", "mode-terminal", "mode-message", "message-input", "message-ready", "send-message", "message-status", "chat-toggle", "term-wrap", "split"].map((id) => [id, { value: "claude", checked: false, setAttribute() {} }]));
   const sent: any[] = [];
   const timers: (() => void)[] = [];
   let socket: any;
