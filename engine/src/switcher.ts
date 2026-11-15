@@ -8,6 +8,7 @@ import { applySettings, ensureProjectGrid, readAccountPanel } from "./flow.js";
 import { earliestRefresh, isBlocked, loadAccounts, markExhausted, mergeAccounts, parseRefreshTime, pickAccount, saveAccounts, type Account } from "./accounts.js";
 import { readJson, writeJsonAtomic } from "./persist.js";
 import { Requeue, type FlowLocation, type Job, type JobQueue } from "./queue.js";
+import { readAccountBadge } from "./account-identity.js";
 
 export const ACCOUNTS_FILE = join(HOME_DIR, "accounts.json");
 export const FLOW_PROJECTS_FILE = join(HOME_DIR, "flow-projects.json");
@@ -60,10 +61,14 @@ export const projectKey = (email: string, studio?: { project: string; sub: strin
 const indexOf = (url: string) => Number(new URL(url).pathname.match(/^\/u\/(\d+)(\/|$)/)?.[1] ?? 0);
 const projectPath = (url: string) => new URL(url).pathname.match(/\/project\/[0-9a-f-]{36}/)?.[0];
 
-export async function activeAccount(page: Page): Promise<string | undefined> {
-  if (!/^https:\/\/flow\.google\.com\//.test(page.url()) || /\/about/.test(page.url())) return undefined;
-  const label = await page.getByRole("button", { name: /Google Account:/ }).first().getAttribute("aria-label", { timeout: 8000 }).catch(() => null);
-  return label?.match(/\(([^()\s]+@[^()\s]+)\)/)?.[1];
+export async function activeAccount(page: Page, allowPanel = false): Promise<string | undefined> {
+  const origin = page.url();
+  if (!/^https:\/\/flow\.google\.com\//.test(origin) || /\/about/.test(origin)) return undefined;
+  const badge = await readAccountBadge(page);
+  if (page.url() !== origin) return undefined;
+  if (badge || !allowPanel) return badge;
+  const panel = await readAccountPanel(page).catch(() => undefined);
+  return page.url() === origin ? panel?.email : undefined;
 }
 
 async function open(page: Page, n: number, path = "/"): Promise<void> {
@@ -74,7 +79,7 @@ async function open(page: Page, n: number, path = "/"): Promise<void> {
 
 export async function switchTo(page: Page, a: Account, path = "/"): Promise<void> {
   await open(page, a.index, path);
-  const shown = await activeAccount(page);
+  const shown = await activeAccount(page, true);
   // An index past the last signed-in account silently lands on /u/0/.
   if (indexOf(page.url()) !== a.index || shown !== a.email) throw new SwitchError(`acct ${a.index} (${mask(a.email)})`, shown);
 }
@@ -88,7 +93,7 @@ export async function discoverAccounts(page: Page, file = ACCOUNTS_FILE): Promis
     for (let n = 0; n < MAX_ACCOUNTS; n++) {
       await open(page, n);
       if (indexOf(page.url()) !== n) break;
-      const email = await activeAccount(page);
+      const email = await activeAccount(page, true);
       if (!email) break;
       const { credits, refresh } = await readAccountPanel(page).catch(() => ({ credits: undefined, refresh: undefined }));
       found.push({ index: n, email, credits, refreshTime: refresh && parseRefreshTime(refresh), checkedAt: new Date().toISOString() });
@@ -103,15 +108,15 @@ export async function discoverAccounts(page: Page, file = ACCOUNTS_FILE): Promis
 
 // Flow projects belong to one account (another /u/<n>/ gets a 404), so each account keeps its own project per
 // studio sub-project, stored as "/project/<id>" under "<email>|<project>/<sub>" (or "<email>|_default").
-function rememberProject(page: Page, email: string, job: Job): void {
+function rememberProject(page: Page, email: string, job: Job, file = FLOW_PROJECTS_FILE): void {
   const path = projectPath(page.url());
-  const map = readJson<Record<string, string>>(FLOW_PROJECTS_FILE, {});
+  const map = readJson<Record<string, string>>(file, {});
   const key = projectKey(email, job.params.studio);
-  if (path && map[key] !== path) writeJsonAtomic(FLOW_PROJECTS_FILE, { ...map, [key]: path });
+  if (path && map[key] !== path) writeJsonAtomic(file, { ...map, [key]: path });
 }
 
-async function openProjectFor(page: Page, a: Account, job: Job): Promise<void> {
-  const known = readJson<Record<string, string>>(FLOW_PROJECTS_FILE, {})[projectKey(a.email, job.params.studio)];
+async function openProjectFor(page: Page, a: Account, job: Job, file = FLOW_PROJECTS_FILE): Promise<void> {
+  const known = readJson<Record<string, string>>(file, {})[projectKey(a.email, job.params.studio)];
   if (known) {
     await switchTo(page, a, known);
     if (projectPath(page.url()) === known) return;
@@ -120,7 +125,37 @@ async function openProjectFor(page: Page, a: Account, job: Job): Promise<void> {
   await page.getByRole("button", { name: "New project" }).click({ timeout: 10_000 });
   await page.waitForURL((u) => /\/project\/[0-9a-f-]{36}/.test(u.pathname), { timeout: 30_000 });
   if (indexOf(page.url()) !== a.index) throw new SwitchError(`acct ${a.index} (${mask(a.email)})`, await activeAccount(page));
-  rememberProject(page, a.email, job);
+  rememberProject(page, a.email, job, file);
+}
+
+// Runs before generation's in-project check, including for free storyboard images.
+// Only a queue runner calls this; reading status never creates a Flow project.
+export async function ensureJobProject(page: Page, job: Job, file = FLOW_PROJECTS_FILE): Promise<void> {
+  const email = await activeAccount(page, true);
+  if (!email) {
+    if (!/^https:\/\/flow\.google\.com\//.test(page.url()) || /\/about/.test(page.url()))
+      throw new Error("Sign in to Google in the dedicated Flow window before generating. Nothing was generated.");
+    throw new Error("Flow is open, but Studio could not verify the active Google account. Open Account details in the dedicated Flow window and reload Flow, then retry. Nothing was generated.");
+  }
+  const account: Account = { email, index: indexOf(page.url()) };
+  const current = projectPath(page.url());
+  const known = readJson<Record<string, string>>(file, {})[projectKey(email, job.params.studio)];
+  if (job.params.agent_ref_assets?.length) {
+    if (!job.flow || job.flow.account !== accountId(email) || job.flow.flowProject !== current)
+      throw new Error("Cached agent assets require their original Flow account and project. Their source project could not be verified; nothing was generated.");
+    return;
+  }
+  if (usesFlowAssets(job.params)) {
+    if (known && current !== known) {
+      await switchTo(page, account, known);
+      if (projectPath(page.url()) !== known) throw new Error("The Flow project containing this scene's assets could not be opened. Nothing was generated.");
+    } else if (!current) throw new Error("This scene uses Flow assets. Open the Flow project containing those assets; an empty project would not contain them.");
+    return;
+  }
+  if (known && current === known) return;
+  // Non-Studio callers keep an explicitly open project. Studio cuts get their own cached project.
+  if (!job.params.studio && current && !known) { rememberProject(page, email, job, file); return; }
+  await openProjectFor(page, account, job, file);
 }
 
 // Back on a (possibly new) project page: same settings, fresh quote.
@@ -136,7 +171,7 @@ const when = (d: Date) => d.toLocaleString(undefined, { weekday: "short", hour: 
 
 // Characters and other "asset:" media live in one Flow project, so such a scene cannot move to another account.
 const usesFlowAssets = (p: Job["params"]) =>
-  [p.first_frame, p.last_frame, ...(p.reference_images ?? []), ...(p.attach ?? [])].some((r) => r?.startsWith("asset:"));
+  !!p.agent_ref_assets?.length || [p.first_frame, p.last_frame, ...(p.reference_images ?? []), ...(p.attach ?? []), ...(p.agent_refs ?? []).map(r => r.image)].some((r) => r?.startsWith("asset:"));
 
 // Everything the hop loop needs from the browser, so the loop itself can be tested with a fake.
 export interface AffordIO {
@@ -229,11 +264,12 @@ export async function ensureAffordable(page: Page, job: Job, file: string, queue
   const origin = page.url();
   const io: AffordIO = {
     read: async () => {
-      const email = await activeAccount(page);
-      const panel = FORCE()
-        ? { credits: loadAccounts(file).find((a) => a.email === email)?.credits, refresh: undefined }
-        : await readAccountPanel(page).catch(() => ({ credits: undefined, refresh: undefined }));
-      return { email, index: indexOf(page.url()), ...panel };
+      const start = page.url();
+      const forced = FORCE();
+      const panel = forced ? undefined : await readAccountPanel(page).catch(() => undefined);
+      const email = panel?.email ?? await activeAccount(page, true);
+      if (page.url() !== start) throw new Error("Flow changed accounts or projects while checking credits. Nothing was generated.");
+      return { email, index: indexOf(page.url()), credits: forced ? loadAccounts(file).find(a => a.email === email)?.credits : panel?.credits, refresh: panel?.refresh };
     },
     discover: () => discoverAccounts(page, file),
     reapply: () => reapply(page, job),
@@ -252,7 +288,7 @@ export async function ensureAffordable(page: Page, job: Job, file: string, queue
 
 // Where the page is now, recorded on every finished job.
 export async function currentLocation(page: Page): Promise<FlowLocation | undefined> {
-  const email = await activeAccount(page);
+  const email = await activeAccount(page, true);
   const flowProject = projectPath(page.url());
   return email && flowProject ? { account: accountId(email), flowProject } : undefined;
 }

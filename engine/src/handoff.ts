@@ -1,6 +1,8 @@
 import { existsSync, linkSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, extname, join, relative } from "node:path";
 import { safeName, within, type Plan } from "./projects.js";
+import { readJson, writeJsonAtomic } from "./persist.js";
+import { z } from "zod";
 
 // Read lazily so tests can point STUDIO_REMOTION at a temp dir.
 export const remotionRoot = () => process.env.STUDIO_REMOTION ?? String.raw`D:\flow-studio\remotion\my-video`;
@@ -23,6 +25,10 @@ export function moveExcl(src: string, dest: string): void {
 const staticPath = (file: string) => relative(join(remotionRoot(), "public"), file).split("\\").join("/");
 
 const AUDIO = [".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac"];
+const AudioManifest = z.object({ owner: z.literal("flow-studio-audio-v1"),
+  imports: z.array(z.object({ kind: z.enum(["music", "voiceover"]), source: z.string(), file: z.string().regex(/^(bg|vo)(-v\d+)?\.(mp3|wav|m4a|aac|ogg|flac)$/) })),
+  current: z.object({ music: z.string().optional(), voiceover: z.string().optional() }),
+});
 // The studio's own captions.json: an array of { scene: number, ... }. Anything else in that place is not ours.
 const ours = (f: string) => { try { const c = JSON.parse(readFileSync(f, "utf8")); return Array.isArray(c) && c.every((x) => typeof x?.scene === "number"); } catch { return false; } };
 
@@ -30,23 +36,42 @@ export function handoff(plan: Plan, opts: { music?: string; voiceover?: string }
   const kept = plan.scenes.filter((s) => s.kept === true);
   if (!kept.length) throw new Error("no kept scenes to hand off");
   for (const s of kept) {
+    if (s.stale !== undefined) throw new Error(`Scene ${s.n} is stale after scene ${s.stale} changed - redo it before editing.`);
     if (!s.clip) throw new Error(`scene ${s.n} is kept but has no clip`);
     if (!existsSync(s.clip)) throw new Error(`scene ${s.n} clip file is missing: ${s.clip}`);
   }
   if (opts.music && opts.voiceover && existsSync(opts.music) && existsSync(opts.voiceover) && samePath(realpathSync(opts.music), realpathSync(opts.voiceover)))
     throw new Error("music and voiceover are the same file.");
   const dir = subPublicDir(plan.project, plan.sub);
+  const manifestFile = join(dir, "audio-manifest.json");
+  const manifest = AudioManifest.parse(readJson(manifestFile, { owner: "flow-studio-audio-v1", imports: [], current: {} }));
+  const selected = { ...manifest.current };
   const audio = ([["music", opts.music, "bg"], ["voiceover", opts.voiceover, "vo"]] as const).flatMap(([what, p, name]) => {
     if (!p) return [];
+    const imported = manifest.imports.find((a) => a.kind === what && samePath(a.source, p));
+    if (imported) {
+      const file = join(dir, imported.file);
+      if (!within(file, [dir]) || !existsSync(file)) throw new Error(`${what}: imported audio is missing; upload it again.`);
+      selected[what] = imported.file;
+      return [];
+    }
     if (!existsSync(p)) throw new Error(`${what} file not found: ${p}`);
     const ext = extname(p).toLowerCase();
     if (!AUDIO.includes(ext)) throw new Error(`${what} must be an audio file (${AUDIO.join(", ")}).`);
-    const dest = join(dir, name + ext);
-    if (existsSync(dest)) throw new Error(`${what}: ${dest} already exists; it is never overwritten.`);
+    let file = name + ext;
+    for (let v = 2; existsSync(join(dir, file)); v++) file = `${name}-v${v}${ext}`;
+    const dest = join(dir, file);
+    selected[what] = file;
     return [{ what, p, dest }];
   });
   const captions = join(dir, "captions.json");
   if (existsSync(captions) && !ours(captions)) throw new Error(`${captions} was not written by the studio; it is never overwritten.`);
+  // Validate reused audio before moving any replacement upload, so failure leaves every new source intact.
+  for (const file of Object.values(selected)) {
+    const incoming = audio.some((a) => basename(a.dest) === file);
+    if (!incoming && (!manifest.imports.some((a) => a.file === file) || !within(join(dir, file), [dir]) || !existsSync(join(dir, file))))
+      throw new Error("Registered audio is missing or invalid; upload the audio again.");
+  }
   mkdirSync(dir, { recursive: true });
   // Both audio moves or neither: a failed second move puts the first one back.
   const done: { p: string; dest: string }[] = [];
@@ -54,8 +79,11 @@ export function handoff(plan: Plan, opts: { music?: string; voiceover?: string }
     for (const a of done) moveExcl(a.dest, a.p);
     throw e;
   }
+  for (const a of audio) manifest.imports.push({ kind: a.what, source: a.p, file: basename(a.dest) });
+  try { if (manifest.imports.length) writeJsonAtomic(manifestFile, { ...manifest, current: selected }); }
+  catch (error) { for (const a of done) moveExcl(a.dest, a.p); throw error; }
   writeFileSync(captions, JSON.stringify(plan.scenes.map((s) => ({ scene: s.n, caption: s.caption, voiceover: s.voiceover })), null, 2));
-  return { dir, clips: kept.map((s) => staticPath(s.clip!)), captions: staticPath(captions), ...Object.fromEntries(audio.map((a) => [a.what, staticPath(a.dest)])) };
+  return { dir, clips: kept.map((s) => staticPath(s.clip!)), captions: staticPath(captions), ...Object.fromEntries(Object.entries(selected).map(([what, file]) => [what, staticPath(join(dir, file))])) };
 }
 
 const RENDER = /^v(\d+)\.(mp4|webm|mov)$/i;

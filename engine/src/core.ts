@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { z } from "zod";
 import { assemble, localVoices, speakLocally, voiceTrack } from "./assemble.js";
 import { GEMINI_VOICES, geminiKey, saveGeminiKey, speakWithGemini } from "./gemini.js";
@@ -10,13 +10,17 @@ import { burnCaptions, captionedName, captionSetup, previewCaptions, transcribe 
 import { characterLook, createCharacter, downloadAsset, trashAsset, editCharacter, getFlowState, listAssets, listCharacters, rememberCharacter, runAgentBatch, runContinue, runEdit, runGeneration } from "./flow.js";
 import { JobQueue, type Job, type JobRunner, type SceneParams } from "./queue.js";
 import { HOME_DIR, getFlowPage } from "./chrome.js";
-import { ACCOUNTS_FILE, currentLocation, discoverAccounts, ensureAffordable, findSource, goToSource } from "./switcher.js";
+import { ACCOUNTS_FILE, currentLocation, discoverAccounts, ensureAffordable, ensureJobProject, findSource, goToSource } from "./switcher.js";
 import { BIN, COMPUTER, IS_MAC, IS_WIN, moveToBin } from "./platform.js";
 import { PlanSchema, sceneSettings, projDir, subDir, safeName, addReference, createSub, listProjects, notesRev, planRev, readNotes, readPlan, uploadsDir, within, writeNotes, writePlan } from "./projects.js";
 import { readJson, writeJsonAtomic } from "./persist.js";
 import { clipsDir, handoff, listRenders, renderDone } from "./handoff.js";
 import { proposeLesson, readLessons } from "./lessons.js";
 import { TECHNIQUES, techniqueById } from "./techniques.js";
+import { activeEdit, readEdit, startEdit, updateEdit, finishEdit } from "./edit-tasks.js";
+import { deriveWorkflow } from "./workflow.js";
+import { UiContextSchema, UiContextStore, UiPublicationSchema, type UiContext } from "./ui-context.js";
+import { creativeGuideInfo, readCreativeGuide } from "./creative-guide.js";
 
 export const OUTPUT_ROOT = process.env.FLOW_MCP_OUTPUT ?? join(homedir(), "flow-mcp-out");
 const words = (s: string) => s.split(/[^a-z0-9]+/i).filter((w) => w.length > 3).map((w) => w.toLowerCase());
@@ -275,6 +279,9 @@ export const shapes = {
   studio_projects: {},
   studio_select: { project: z.string().min(1), sub: z.string().min(1) },
   studio_current: {},
+  studio_workflow_read: { ...PS },
+  studio_context_read: {},
+  studio_guide_read: { stage: z.enum(["ideas", "plan", "storyboard"]) },
   studio_references: { ...PS },
   studio_new: { project: z.string().min(1), sub: z.string().min(1), aspect: z.enum(["9:16", "16:9"]).default("9:16") },
   studio_plan_read: { ...PS },
@@ -299,8 +306,10 @@ export const shapes = {
   studio_propose_lesson: { text: z.string().min(1), scope: z.string().default("global") },
   studio_accounts_refresh: {},
   studio_edit_notes_read: { ...PS },
+  studio_edit_task_read: { ...PS },
+  studio_edit_task_update: { ...PS, task_id: z.string().min(1), phase: z.enum(["accepted", "editing", "rendering", "failed"]), message: z.string().max(2000).optional() },
   studio_edit_notes_write: { ...PS, text: z.string(), rev: z.string().optional().describe("The `rev` from your last studio_edit_notes_read; the write is refused if the edit notes changed since.") },
-  studio_render_done: { ...PS, file: z.string().min(1).describe("Absolute path of the finished render (mp4/webm/mov) inside the Remotion project's out/ folder.") },
+  studio_render_done: { ...PS, task_id: z.string().optional(), file: z.string().min(1).describe("Absolute path of the finished render (mp4/webm/mov) inside the Remotion project's out/ folder.") },
   studio_renders: { ...PS },
   studio_notes_write: { ...PS, text: z.string(), rev: z.string().optional().describe("The notes `rev` from your last studio_notes_read; the write is refused if the notes changed since.") },
   studio_add_reference: { project: PS.project, sub: z.string().optional().describe("Omit for a project-level reference."), path: z.string().describe("A file already uploaded through the studio page (inside the uploads folder).") },
@@ -353,6 +362,9 @@ export interface Core {
   studio_projects(): Promise<unknown>;
   studio_select(a: Args<"studio_select">): Promise<unknown>;
   studio_current(): Promise<unknown>;
+  studio_workflow_read(a: Args<"studio_workflow_read">): Promise<unknown>;
+  studio_context_read(): Promise<unknown>;
+  studio_guide_read(a: Args<"studio_guide_read">): Promise<unknown>;
   studio_references(a: Args<"studio_references">): Promise<unknown>;
   studio_add_reference(a: Args<"studio_add_reference">): Promise<unknown>;
   studio_new(a: Args<"studio_new">): Promise<unknown>;
@@ -361,6 +373,8 @@ export interface Core {
   studio_notes_read(a: Args<"studio_notes_read">): Promise<unknown>;
   studio_notes_write(a: Args<"studio_notes_write">): Promise<unknown>;
   studio_edit_notes_read(a: Args<"studio_edit_notes_read">): Promise<unknown>;
+  studio_edit_task_read(a: Args<"studio_edit_task_read">): Promise<unknown>;
+  studio_edit_task_update(a: Args<"studio_edit_task_update">): Promise<unknown>;
   studio_edit_notes_write(a: Args<"studio_edit_notes_write">): Promise<unknown>;
   studio_render_done(a: Args<"studio_render_done">): Promise<unknown>;
   studio_renders(a: Args<"studio_renders">): Promise<unknown>;
@@ -397,7 +411,17 @@ const NO_SELECTION = "No project selected in the studio - ask the owner to pick 
 const READING_ACCOUNTS = "Reading Google accounts…";
 const BUSY = "A generation is running in the Flow tab. Wait for it to finish (flow_wait), then retry.";
 
+// Content identity, independent of plan rev: unrelated captions/notes and other scenes may change safely.
+const sceneInput = (plan: ReturnType<typeof readPlan>, scene: ReturnType<typeof readPlan>["scenes"][number], kind: "storyboard" | "clip") => JSON.stringify([
+  plan.aspect, scene.prompt, scene.frame_prompt, scene.camera, scene.start ?? { kind: "frame" }, scene.references ?? [],
+  ...(kind === "clip" ? [scene.storyboard, scene.model, scene.duration, scene.resolution] : []),
+  "ad-references", plan.references ?? [],
+]);
+
 export class LocalCore implements Core {
+  private uiContext = new UiContextStore();
+  private editSession = randomUUID();
+  private editScopes = new Map<string, { project: string; sub: string }>();
   readonly queue: JobQueue;
   private selection: { project: string; sub: string } | null;
   private lastFrame: (video: string) => Promise<string>;
@@ -411,6 +435,7 @@ export class LocalCore implements Core {
   // Resolves what a job takes from earlier work just before it runs: the previous still (reference_previous) and the
   // last frame of the clip it continues from (chain_previous / a plan scene that starts as "continue").
   private async prepare(job: Job): Promise<void> {
+    this.checkStudioJob(job);
     const { chain_from, chain_file, reference_from } = job.params;
     if (reference_from) {
       const still = this.queue.get(reference_from)?.files.find((f) => /\.(jpe?g|png|webp)$/i.test(f));
@@ -434,6 +459,15 @@ export class LocalCore implements Core {
     if (clip) job.params.first_frame = await this.lastFrame(clip);
   }
 
+  private checkStudioJob(job: Job): void {
+    const st = job.params.studio;
+    if (!st) return;
+    const plan = readPlan(st.project, st.sub);
+    const scene = plan.scenes.find((s) => s.n === st.scene);
+    if (!scene || !st.input || st.input !== sceneInput(plan, scene, st.kind) || (st.kind === "clip" && !scene.approved))
+      throw new Error(`Scene ${st.scene} changed or is not approved - approve the scene and queue it again. Nothing spent.`);
+  }
+
   // Every finished job records where its media sits in Flow (account + project), so edits and continues find it.
   private defaultRunner: JobRunner = async (job) => {
     const files = await this.runJob(job);
@@ -448,9 +482,19 @@ export class LocalCore implements Core {
     if (source) {
       const loc = findSource(this.queue.list(), source);
       await goToSource(await getFlowPage(), loc, ACCOUNTS_FILE);
-    }
+    } else if (job.params.agent_ref_assets?.length) {
+      if (!job.flow) throw new Error("Cached agent assets have no verified source Flow project. Review the failed batch before retrying; nothing was generated.");
+      await goToSource(await getFlowPage(), job.flow, ACCOUNTS_FILE);
+      await ensureJobProject(await getFlowPage(), job);
+    } else await ensureJobProject(await getFlowPage(), job);
     if (job.params.continue_from) return runContinue(job);
-    if (job.params.agent_scenes) return runAgentBatch(job);
+    if (job.params.agent_scenes) {
+      // Bind before uploads so even a failed batch can safely reuse its cached assets on retry.
+      const location = await currentLocation(await getFlowPage());
+      if (!location) throw new Error("The Flow account and project for this agent batch could not be verified.");
+      job.flow = location;
+      return runAgentBatch(job);
+    }
     if (job.params.edit_asset) return runEdit(job);
     return runGeneration(job, (page) => ensureAffordable(page, job, ACCOUNTS_FILE, this.queue));
   }
@@ -549,7 +593,7 @@ export class LocalCore implements Core {
             agent_numbers: pick.map((i) => numbers[i]),
             agent_scene_refs: p.agent_scene_refs ? pick.map((i) => p.agent_scene_refs![i]) : undefined,
             file_stem: `scene-${String(numbers[pick[0]]).padStart(2, "0")}`,
-          }),
+          }, { flow: job.flow }),
         );
         continue;
       }
@@ -629,6 +673,35 @@ export class LocalCore implements Core {
     return { ok: true };
   }
   async studio_current() { return this.selection; }
+  async studio_context_read() { return { context: this.uiContext.read() }; }
+  async studio_guide_read(a: Args<"studio_guide_read">) { return readCreativeGuide(a.stage); }
+  validateUiContext(raw: unknown): UiContext {
+    const context = UiContextSchema.parse(raw);
+    const plan = readPlan(context.project, context.sub), item = context.selection;
+    if (item?.kind === "render") {
+      if (!listRenders(context.project, context.sub).some(r => r.version === item.version)) throw new Error("The selected render no longer exists.");
+    } else if (item) {
+      const scene = plan.scenes.find(s => s.n === item.scene);
+      if (!scene) throw new Error("The selected scene no longer exists.");
+      if (item.kind === "take" && !this.takeHistory(context.project, context.sub, scene)[item.takeIndex - 1]) throw new Error("The selected take no longer exists.");
+    }
+    return context;
+  }
+  publishUiContext(raw: unknown) {
+    const input = UiPublicationSchema.parse(raw);
+    this.validateUiContext(input.context);
+    return this.uiContext.publish(input);
+  }
+  async studio_workflow_read(a: Args<"studio_workflow_read">) {
+    const { project, sub } = this.pick(a), plan = readPlan(project, sub);
+    const file = (path?: string) => { try { return !!path && statSync(path).isFile(); } catch { return false; } };
+    const active = (n: number) => this.queue.list().some(j => j.params.studio?.project === project && j.params.studio.sub === sub && j.params.studio.scene === n && ["held", "queued", "running"].includes(j.status));
+    return deriveWorkflow({ plan, scenes: plan.scenes.map(s => ({
+      n: s.n, validPlan: !!s.prompt.trim(),
+      validSource: s.start?.kind !== "continue" || (s.start.from < s.n && plan.scenes.some(source => source.n === (s.start as { from: number }).from)),
+      storyboardExists: file(s.storyboard), clipExists: file(s.clip), hasTakes: this.takeHistory(project, sub, s).length > 0, hasActiveJob: active(s.n),
+    })), renderVersions: listRenders(project, sub).map(r => r.version), editTaskPhase: readEdit(project, sub)?.phase ?? null });
+  }
   private pickProject(p?: string): string {
     const r = p ?? this.selection?.project;
     if (!r) throw new Error(NO_SELECTION);
@@ -644,7 +717,9 @@ export class LocalCore implements Core {
   async studio_references(a: Args<"studio_references">) {
     const { project, sub } = this.pick(a);
     const ls = (d: string) => (existsSync(d) ? readdirSync(d).filter((f) => statSync(join(d, f)).isFile()).map((f) => join(d, f)) : []);
-    return { project: ls(join(projDir(project), "references")), sub: ls(join(subDir(project, sub), "references")) };
+    const shared = ls(join(projDir(project), "references")), local = ls(join(subDir(project, sub), "references"));
+    const active = [...new Set(readPlan(project, sub).references ?? [])];
+    return { project: shared, sub: local, active, library: [...shared, ...local].filter(path => !active.includes(path)) };
   }
   async studio_new({ project, sub, aspect }: Args<"studio_new">) { return { dir: createSub(project, sub, aspect) }; }
   async studio_plan_read(a: Args<"studio_plan_read">) {
@@ -652,7 +727,7 @@ export class LocalCore implements Core {
     const lessons = readLessons();
     const note = lessons.length > 60 ? `Lessons has ${lessons.length} rules - propose merges to the owner.` : undefined;
     const plan = readPlan(project, sub);
-    return { ...plan, rev: plan.rev ?? 0, lessons, ...(note && { note }) };
+    return { ...plan, rev: plan.rev ?? 0, lessons, creative_guide: creativeGuideInfo(), ...(note && { note }) };
   }
   // Only proposes: nothing reaches the rulebook until the owner approves in the studio page.
   async studio_propose_lesson({ text, scope }: Args<"studio_propose_lesson">) { return proposeLesson(text, scope); }
@@ -676,6 +751,9 @@ export class LocalCore implements Core {
     const old = (() => { try { return readPlan(project, sub); } catch { return undefined; } })();
     if (rev !== (old?.rev ?? 0)) throw new Error("Plan changed since you read it — call studio_plan_read again.");
     const refRoots = [join(projDir(project), "references"), join(subDir(project, sub), "references"), uploadsDir()];
+    // Omission in an older client must not turn an explicit selection back into shared inheritance.
+    const adReferences = plan.references ?? old?.references;
+    for (const r of adReferences ?? []) if (!within(r, refRoots)) throw new Error(`Ad reference ${r} must be inside the project's references folder or the uploads folder.`);
     for (const s of plan.scenes) for (const r of s.references ?? [])
       if (!within(r, refRoots)) throw new Error(`Scene ${s.n}: reference ${r} must be inside the project's references folder or the uploads folder (use studio_add_reference).`);
     for (const s of plan.scenes) {
@@ -690,13 +768,21 @@ export class LocalCore implements Core {
       const o = old?.scenes.find((x) => x.n === s.n);
       // storyboard/clip/stale are engine-owned (recorded by finished jobs) and approved/kept are the owner's
       // (UI token routes): whatever the caller sends for them is ignored.
-      const { approved: _a, kept: _k, storyboard: _s, clip: _c, storyboard_flow: _sf, clip_flow: _cf, stale: _st, ...rest } = s;
+      const { approved: _a, kept: _k, storyboard: _s, clip: _c, storyboard_flow: _sf, clip_flow: _cf, stale: _st, takes: _takes, ...rest } = s;
       if (!o) return rest;
       // Approval belongs to what was approved: changing the content clears it.
-      const changed = s.prompt !== o.prompt || s.camera !== o.camera || s.frame_prompt !== o.frame_prompt || !same(s.start ?? { kind: "frame" }, o.start ?? { kind: "frame" }) || !same(s.references ?? [], o.references ?? []);
-      return { ...rest, storyboard: o.storyboard, clip: o.clip, storyboard_flow: o.storyboard_flow, clip_flow: o.clip_flow, stale: rest.start?.kind === "continue" ? o.stale : undefined, approved: changed ? false : o.approved, kept: o.kept };
+      const changed = s.prompt !== o.prompt || s.camera !== o.camera || s.frame_prompt !== o.frame_prompt || !same(s.start ?? { kind: "frame" }, o.start ?? { kind: "frame" }) || !same(s.references ?? [], o.references ?? []) || !same(adReferences, old?.references);
+      return { ...rest, storyboard: o.storyboard, clip: o.clip, storyboard_flow: o.storyboard_flow, clip_flow: o.clip_flow, takes: o.takes, stale: rest.start?.kind === "continue" ? o.stale : undefined, approved: changed ? false : o.approved, kept: o.kept };
     });
-    writePlan({ ...plan, scenes, project: safeName(project), sub: safeName(sub) });
+    writePlan({ ...plan, references: adReferences, scenes, project: safeName(project), sub: safeName(sub) });
+    const current = readPlan(project, sub);
+    for (const job of this.queue.list()) {
+      const st = job.params.studio;
+      if (st?.project !== safeName(project) || st.sub !== safeName(sub) || !["held", "queued"].includes(job.status)) continue;
+      const scene = current.scenes.find((s) => s.n === st.scene);
+      if (!scene || st.input !== sceneInput(current, scene, st.kind) || (st.kind === "clip" && !scene.approved))
+        this.queue.cancel(job.id, `Scene ${st.scene} changed - approve the scene and queue it again. Nothing spent.`);
+    }
     return { ok: true, rev: planRev(project, sub) };
   }
   async studio_add_reference(a: Args<"studio_add_reference">) { return { path: addReference(this.pickProject(a.project), a.sub, a.path) }; }
@@ -708,7 +794,43 @@ export class LocalCore implements Core {
     const { project, sub } = this.pick(a);
     return { ok: true, rev: writeNotes(project, sub, a.text, a.rev, "edit-notes.md") };
   }
-  async studio_render_done(a: Args<"studio_render_done">) { const { project, sub } = this.pick(a); return renderDone(project, sub, a.file); }
+  async studio_render_done(a: Args<"studio_render_done">) {
+    const { project, sub } = this.pick(a);
+    const task = readEdit(project, sub);
+    if (a.task_id && task?.id === a.task_id && task.phase === "finished" && task.render && resolve(a.file).toLowerCase() === resolve(task.render.path).toLowerCase()) return task.render;
+    if ((a.task_id && (task?.id !== a.task_id || !activeEdit(task))) || (activeEdit(task) && !a.task_id))
+      throw new Error("Render task_id does not match an active editing task. Read the current task before registering a render.");
+    const render = renderDone(project, sub, a.file);
+    if (a.task_id) finishEdit(project, sub, a.task_id, render);
+    return render;
+  }
+  async studio_edit_task_read(a: Args<"studio_edit_task_read">) {
+    const scope = this.pick(a); let task = readEdit(scope.project, scope.sub);
+    if (task && activeEdit(task) && task.session !== this.editSession)
+      task = updateEdit(scope.project, scope.sub, task.id, "failed", "Studio restarted during this task. Review the terminal and renders before starting again.");
+    return { task };
+  }
+  async studio_edit_task_update(a: Args<"studio_edit_task_update">) {
+    const { project, sub } = this.pick(a);
+    return { task: updateEdit(project, sub, a.task_id, a.phase, a.message) };
+  }
+  startEditTask(a: { project: string; sub: string }) {
+    const scope = this.pick(a), plan = readPlan(scope.project, scope.sub);
+    if (!plan.scenes.some((s) => s.kept && s.clip)) throw new Error("Keep at least one clip before editing.");
+    if (plan.scenes.some((s) => s.kept && s.stale !== undefined)) throw new Error("Redo stale kept scenes before editing.");
+    this.editScopes.set(scope.project + "/" + scope.sub, scope);
+    return startEdit(scope.project, scope.sub, this.editSession);
+  }
+  stopEditTask(a: { project: string; sub: string; task_id: string }) {
+    const { project, sub } = this.pick(a);
+    return updateEdit(project, sub, a.task_id, "failed", "Marked stopped by the owner. This does not stop a running agent or render; check the terminal before retrying.");
+  }
+  interruptEditTasks(message: string) {
+    for (const { project, sub } of this.editScopes.values()) {
+      const task = readEdit(project, sub);
+      if (task?.session === this.editSession && activeEdit(task)) updateEdit(project, sub, task.id, "failed", message);
+    }
+  }
   async studio_renders(a: Args<"studio_renders">) { const { project, sub } = this.pick(a); return { renders: listRenders(project, sub) }; }
   async studio_notes_write(a: Args<"studio_notes_write">) {
     const { project, sub } = this.pick(a); const { text, rev } = a;
@@ -721,6 +843,16 @@ export class LocalCore implements Core {
     const plan = readPlan(st.project, st.sub);
     const scene = plan.scenes.find((x) => x.n === st.scene);
     if (!scene) return;
+    if (st.input !== sceneInput(plan, scene, st.kind)) {
+      job.note = "Finished file preserved, but the scene changed while generating; result was not attached to the plan.";
+      return;
+    }
+    if (st.kind === "clip") {
+      scene.takes ??= [];
+      if (scene.clip && !scene.takes.some((t) => t.clip === scene.clip)) scene.takes.push({ clip: scene.clip, flow: scene.clip_flow });
+      if (!scene.takes.some((t) => t.clip === job.files[0])) scene.takes.push({ clip: job.files[0], flow: job.flow, fromClip: this.chainedClip(job), createdAt: new Date().toISOString() });
+      if (scene.clip !== job.files[0]) scene.kept = false;
+    }
     scene[st.kind] = job.files[0];
     scene[`${st.kind}_flow`] = job.flow;
     if (st.kind === "storyboard") scene.approved = false; // a new still must be looked at again
@@ -731,6 +863,20 @@ export class LocalCore implements Core {
   // The clip a chained job started from (its source job's video, or a finished clip on disk).
   private chainedClip(j: Job): string | undefined {
     return j.params.chain_file ?? (j.params.chain_from ? this.queue.get(j.params.chain_from)?.files.find((f) => /\.(mp4|webm|mov)$/i.test(f)) : undefined);
+  }
+
+  restoreTake(a: { project: string; sub: string; scene: number; clip: string }) {
+    const { project, sub } = this.pick(a), plan = readPlan(project, sub);
+    const scene = plan.scenes.find((s) => s.n === a.scene);
+    const history = scene ? this.takeHistory(project, sub, scene) : [];
+    const take = history.find((t) => t.clip === a.clip);
+    if (!scene || !take || !within(take.clip, [clipsDir(project, sub)]) || !existsSync(take.clip)) throw new Error("That take is not available for this scene.");
+    if (this.studioJobs(project, sub, "clip", scene.n).some((j) => ["held", "queued", "running"].includes(j.status))) throw new Error("Finish or cancel this scene's active job before restoring a take.");
+    if (scene.clip === take.clip) return { ok: true };
+    scene.takes = history;
+    scene.clip = take.clip; scene.clip_flow = take.flow; scene.kept = false;
+    this.clipChanged(plan, scene, { id: "restored", files: [take.clip], params: { chain_file: take.fromClip } } as Job);
+    writePlan(plan); return { ok: true };
   }
 
   // A clip for scene N just finished (redo or generate). Only now has N really changed, so a cancelled or never-approved
@@ -769,6 +915,13 @@ export class LocalCore implements Core {
     return this.queue.list().filter((j) => j.params.studio?.project === project && j.params.studio.sub === sub && j.params.studio.kind === kind && j.params.studio.scene === scene);
   }
 
+  private takeHistory(project: string, sub: string, scene: ReturnType<typeof readPlan>["scenes"][number]) {
+    const entries = [...(scene.takes ?? []), ...this.studioJobs(project, sub, "clip", scene.n)
+      .filter((j) => j.status === "done" && j.files[0]).map((j) => ({ clip: j.files[0], flow: j.flow, fromClip: this.chainedClip(j), createdAt: j.finishedAt })),
+      ...(scene.clip ? [{ clip: scene.clip, flow: scene.clip_flow }] : [])];
+    return entries.filter((take, index) => entries.findIndex((x) => x.clip === take.clip) === index && within(take.clip, [clipsDir(project, sub)]) && existsSync(take.clip));
+  }
+
   // First free stem: scene-NN, then scene-NN<sep>2, <sep>3... Never reuses a name on disk or in a live job.
   private freeStem(dir: string, project: string, sub: string, kind: "storyboard" | "clip", n: number): string {
     const base = `scene-${String(n).padStart(2, "0")}`;
@@ -782,16 +935,14 @@ export class LocalCore implements Core {
     return stem;
   }
 
-  private studioRefs(project: string, scene: { references?: string[] }): string[] {
-    const dir = join(projDir(project), "references");
-    const shared = existsSync(dir) ? readdirSync(dir).filter((f) => statSync(join(dir, f)).isFile()).map((f) => join(dir, f)) : [];
-    return [...(scene.references ?? []).map((r) => resolve(r)), ...shared];
+  private studioRefs(plan: ReturnType<typeof readPlan>, scene: { references?: string[] }): string[] {
+    return [...new Set([...(scene.references ?? []), ...(plan.references ?? [])].map(r => resolve(r)))];
   }
 
   // approvedOnly applies to an explicit list too: unapproved scenes are skipped and reported, never queued.
   private pickScenes(plan: ReturnType<typeof readPlan>, scenes: number[] | undefined, approvedOnly: boolean) {
     const all = scenes
-      ? scenes.map((n) => {
+      ? [...new Set(scenes)].map((n) => {
         const s = plan.scenes.find((x) => x.n === n);
         if (!s) throw new Error(`Unknown scene ${n}.`);
         return s;
@@ -824,9 +975,9 @@ export class LocalCore implements Core {
       aspect_ratio: plan.aspect,
       // A continue scene's first frame is filled in just before it runs (prepare), from its source clip's last frame.
       ...(from === undefined ? { first_frame: scene.storyboard } : this.chainSource(plan, from, inBatch)),
-      reference_images: this.studioRefs(plan.project, scene),
+      reference_images: this.studioRefs(plan, scene),
       output_dir: dir, file_stem: this.freeStem(dir, plan.project, plan.sub, "clip", scene.n),
-      studio: { project: plan.project, sub: plan.sub, scene: scene.n, kind: "clip", ...(from !== undefined && { from }) },
+      studio: { project: plan.project, sub: plan.sub, scene: scene.n, kind: "clip", input: sceneInput(plan, scene, "clip"), ...(from !== undefined && { from }) },
     };
     return this.queue.add(params, { batch });
   }
@@ -838,16 +989,18 @@ export class LocalCore implements Core {
     const picked = this.pickScenes(plan, scenes, false).picked;
     // A continue scene has no still of its own: its first frame is the last frame of the clip it continues from.
     const continues = picked.filter((s) => s.start?.kind === "continue").map((s) => s.n);
-    const own = picked.filter((s) => s.start?.kind !== "continue");
+    const already_queued = picked.filter((s) => this.studioJobs(project, sub, "storyboard", s.n).some((j) => ["held", "queued", "running"].includes(j.status))).map((s) => s.n);
+    const own = picked.filter((s) => s.start?.kind !== "continue" && !already_queued.includes(s.n));
     const noFrame = own.filter((s) => !s.frame_prompt?.trim()).map((s) => s.n);
     const job_ids = own.map((s) => this.queue.add({
       prompt: s.frame_prompt?.trim() || s.prompt, type: "image", max_credits: 0, aspect_ratio: plan.aspect,
-      reference_images: this.studioRefs(project, s),
+      reference_images: this.studioRefs(plan, s),
       output_dir: dir, file_stem: this.freeStem(dir, plan.project, plan.sub, "storyboard", s.n),
-      studio: { project: plan.project, sub: plan.sub, scene: s.n, kind: "storyboard" },
+      studio: { project: plan.project, sub: plan.sub, scene: s.n, kind: "storyboard", input: sceneInput(plan, s, "storyboard") },
     }).id);
     return {
       job_ids,
+      already_queued,
       ...(continues.length && { skipped_continue: continues }),
       ...(noFrame.length && { note: `Scene(s) ${noFrame.join(", ")} have no frame_prompt, so the clip prompt was drawn instead. Add a frame_prompt (what the still shows) to each scene with studio_plan_write.` }),
     };
@@ -856,7 +1009,10 @@ export class LocalCore implements Core {
   async studio_generate(a: Args<"studio_generate">) {
     const { project, sub } = this.pick(a); const { scenes, duration, resolution, model, max_credits } = a;
     const plan = readPlan(project, sub);
-    const { picked, skipped } = this.pickScenes(plan, scenes, true);
+    const selection = this.pickScenes(plan, scenes, true);
+    const skipped = selection.skipped;
+    const already_queued = selection.picked.filter((s) => this.studioJobs(project, sub, "clip", s.n).some((j) => ["held", "queued", "running"].includes(j.status))).map((s) => s.n);
+    const picked = selection.picked.filter((s) => !already_queued.includes(s.n));
     // Sources first (start.from is always an earlier n), and every continue checked before anything is queued.
     picked.sort((x, y) => x.n - y.n);
     const ns = new Set(picked.map((s) => s.n));
@@ -864,13 +1020,15 @@ export class LocalCore implements Core {
     const batch = randomUUID().slice(0, 8);
     const inBatch = new Map<number, Job>();
     const jobs = picked.map((s) => { const j = this.clipJob(plan, s, { duration, resolution, model, max_credits }, batch, inBatch); inBatch.set(s.n, j); return j; });
-    return { batch, held: picked.length, quoted_max_credits: jobs.reduce((n, j) => n + j.params.max_credits, 0), ...(skipped.length && { skipped_unapproved: skipped }) };
+    return { batch, held: picked.length, already_queued, quoted_max_credits: jobs.reduce((n, j) => n + j.params.max_credits, 0), ...(skipped.length && { skipped_unapproved: skipped }) };
   }
 
   async studio_redo(a: Args<"studio_redo">) {
     const { project, sub } = this.pick(a); const { scene, prompt, duration, resolution, model } = a;
     const plan = readPlan(project, sub);
-    const s = this.pickScenes(plan, [scene], false).picked[0];
+    const s = this.pickScenes(plan, [scene], true).picked[0];
+    const existing = this.studioJobs(project, sub, "clip", scene).find((j) => ["held", "queued", "running"].includes(j.status));
+    if (existing) return { batch: existing.batch, held: 0, already_queued: [scene], job_id: existing.id, quoted_max_credits: 0 };
     const batch = randomUUID().slice(0, 8);
     const job = this.clipJob(plan, s, { duration, resolution, model, prompt }, batch);
     return { batch, held: 1, job_id: job.id, quoted_max_credits: job.params.max_credits };
@@ -883,6 +1041,7 @@ export class LocalCore implements Core {
     return {
       scenes: plan.scenes.map((s) => ({
         n: s.n, storyboard: s.storyboard, approved: s.approved, clip: s.clip, kept: s.kept, start: s.start, stale: s.stale,
+        takes: this.takeHistory(project, sub, s),
         jobs: mine.filter((j) => j.params.studio!.scene === s.n).map((j) => ({ id: j.id, kind: j.params.studio!.kind, status: j.status, batch: j.batch, credits: j.credits, note: j.note, error: j.error })),
       })),
       pending: this.queue.pendingApproval().filter((g) => g.jobs.some((j) => j.params.studio?.project === plan.project && j.params.studio.sub === plan.sub)),

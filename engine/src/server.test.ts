@@ -19,6 +19,76 @@ const NAV = { "sec-fetch-site": "none", "sec-fetch-mode": "navigate" };
 const page = (headers: Record<string, string> = NAV) => new Promise<string>((ok, bad) =>
   get(`http://127.0.0.1:${port}/`, { agent: false, headers }, (r) => { lastSet = String(r.headers["set-cookie"] ?? ""); let t = ""; r.on("data", (c) => (t += c)); r.on("end", () => ok(t)); }).on("error", bad));
 
+test("screen context is owner-published, client-readable, scoped and never approval authority", async () => {
+  process.env.STUDIO_PROJECTS = join(home, "context-projects");
+  const { LocalCore } = await import("./core.js"), srv = await import("./server.js");
+  const { createSub, readPlan, writePlan } = await import("./projects.js");
+  createSub("Context", "ad"); const plan = readPlan("Context", "ad");
+  plan.scenes = [{ n: 2, prompt: "move camera" }]; writePlan(plan);
+  const core = new LocalCore(); await srv.startServer(core, undefined, STUDIO);
+  try {
+    const html = await page(), token = /data-token="(\w+)"/.exec(html)![1], cookie = "fs_ui=" + /fs_ui=([0-9a-f]+)/.exec(lastSet)![1];
+    const base = `http://127.0.0.1:${port}`;
+    const post = (path: string, body: object, owner = false, origin = base) => fetch(base + path, { method: "POST", headers: owner ? { cookie, origin } : { "x-flow-token": token }, body: JSON.stringify(body) });
+    const input = { context: { project: "Context", sub: "ad", stage: "plan", selection: { kind: "scene", scene: 2 } }, windowId: "window", sequence: 1 };
+    assert.deepEqual(await core.studio_context_read(), { context: null });
+    assert.equal((await post("/api/ui-context", input)).status, 403);
+    assert.equal((await post("/api/ui-context", input, true, "http://foreign.test")).status, 403);
+    assert.equal((await post("/api/publishUiContext", input)).status, 404);
+    assert.equal((await post("/api/validateUiContext", input.context)).status, 404);
+    assert.equal((await post("/api/ui-context", input, true)).status, 200);
+    const read = await (await post("/api/studio_context_read", {})).json() as { context: { stage: string } };
+    assert.equal(read.context.stage, "plan");
+    assert.equal((await post("/api/ui-context", { ...input, sequence: 2, context: { ...input.context, selection: { kind: "scene", scene: 99 } } }, true)).status, 400);
+    assert.equal(readPlan("Context", "ad").scenes[0].approved, undefined);
+    assert.equal(core.queue.list().length, 0);
+    assert.equal(await core.studio_current(), null);
+    const workflow = await core.studio_workflow_read({ project: "Context", sub: "ad" });
+    assert.equal(workflow.stages.generate.access, "locked");
+    const guide = await (await post("/api/studio_guide_read", {stage:"ideas"})).json() as {source:string;revision:string;text:string};
+    assert.equal(guide.source,"docs/Google Flow Prompt Fix Log.md");
+    assert.ok(guide.text.length > 0, "the guide has text for the ideas stage");
+    const guidedPlan = await core.studio_plan_read({project:"Context",sub:"ad"}) as {creative_guide:{revision:string;tool:string}};
+    assert.equal(guidedPlan.creative_guide.revision,guide.revision);
+    assert.equal(guidedPlan.creative_guide.tool,"studio_guide_read");
+    assert.equal((await post("/api/studio_guide_read",{stage:"unknown"})).status,400);
+  } finally { await new Promise<void>(r => srv.lastServer!.close(() => r())); }
+});
+
+test("take restoration and edit submissions are owner-only; progress and render completion use the bound task", async () => {
+  process.env.STUDIO_PROJECTS = join(home, "task-projects");
+  const { LocalCore } = await import("./core.js"), srv = await import("./server.js");
+  const { createSub, readPlan, writePlan } = await import("./projects.js");
+  const { clipsDir, rendersDir } = await import("./handoff.js");
+  createSub("Owner", "task"); mkdirSync(clipsDir("Owner", "task"), { recursive: true });
+  const clip = join(clipsDir("Owner", "task"), "scene-01.mp4"); writeFileSync(clip, "clip");
+  const plan = readPlan("Owner", "task"); plan.scenes = [{ n: 1, prompt: "fixture", kept: true, clip }]; writePlan(plan);
+  const core = new LocalCore(); assert.equal(await srv.startServer(core, undefined, STUDIO), "owner");
+  try {
+    const html = await page(), token = /data-token="(\w+)"/.exec(html)![1], cookie = "fs_ui=" + /fs_ui=([0-9a-f]+)/.exec(lastSet)![1];
+    const base = `http://127.0.0.1:${port}`, scope = { project: "Owner", sub: "task" };
+    const post = (path: string, body: object, owner = false) => fetch(base + path, { method: "POST", headers: owner ? { cookie, origin: base } : { "x-flow-token": token }, body: JSON.stringify(body) });
+    for (const route of ["/api/take", "/api/edit-task/start", "/api/edit-task/stop"])
+      assert.equal((await post(route, { ...scope, scene: 1, clip, task_id: "fake" })).status, 403);
+    assert.equal((await post("/api/startEditTask", scope)).status, 404, "private helpers are not generic API methods");
+    const start = await post("/api/edit-task/start", scope, true); assert.equal(start.status, 200);
+    const { task } = await start.json() as { task: { id: string } };
+    assert.equal((await post("/api/edit-task/start", scope, true)).status, 400);
+    const update = await post("/api/studio_edit_task_update", { ...scope, task_id: task.id, phase: "accepted" }); assert.equal(update.status, 200);
+    assert.equal((await post("/api/studio_edit_task_update", { ...scope, task_id: "wrong", phase: "rendering" })).status, 400);
+    mkdirSync(join(home, "remotion", "out"), { recursive: true });
+    const loose = join(home, "remotion", "out", "unbound.mp4"); writeFileSync(loose, "render");
+    await assert.rejects(core.studio_render_done({ ...scope, file: loose, task_id: "wrong" }), /task/i);
+    await assert.rejects(core.studio_render_done({ ...scope, file: loose }), /task/i);
+    assert.ok((await import("node:fs")).existsSync(loose), "invalid task ids must not move the render");
+    mkdirSync(rendersDir("Owner", "task"), { recursive: true });
+    const render = join(rendersDir("Owner", "task"), "v1.mp4"); writeFileSync(render, "render");
+    await core.studio_render_done({ ...scope, file: render, task_id: task.id });
+    const finished = await core.studio_edit_task_read(scope) as { task: { phase: string; render: { version: number } } };
+    assert.equal(finished.task.phase, "finished"); assert.equal(finished.task.render.version, 1);
+  } finally { srv.lastServer!.closeAllConnections(); await new Promise((r) => srv.lastServer!.close(r)); }
+});
+
 test("server: /api/approve needs the UI token, never the flow token", async () => {
   const { LocalCore } = await import("./core.js");
   const srv = await import("./server.js"); // namespace, so lastServer is read live
@@ -119,8 +189,8 @@ test("pty websocket: garbage frames and a throwing spawner never crash the serve
   const html = await page();
   const ui = /fs_ui=([0-9a-f]+)/.exec(lastSet)![1];
   const ws = new WebSocket(`ws://127.0.0.1:${port}/pty`, { headers: { origin: `http://127.0.0.1:${port}`, cookie: "fs_ui=" + ui } });
-  const first = await new Promise<string>((ok, bad) => { ws.once("message", (d) => ok(d.toString())); ws.once("error", bad); });
-  assert.match(first, /could not start claude: no claude here/);
+  const first = await new Promise<string>((ok, bad) => { ws.on("message", (d) => { if (!d.toString().startsWith('{"t":"agent"')) ok(d.toString()); }); ws.once("error", bad); });
+  assert.match(JSON.parse(first).data, /could not start claude: no claude here/i);
   for (const g of ["null", "5", "[]", "garbage", '"x"', '{"t":"i","d":1}', '{"t":"r","cols":-1}']) ws.send(g);
   ws.send(JSON.stringify({ t: "restart" })); // spawner still throws: reported, not thrown
   await new Promise((r) => setTimeout(r, 200));
@@ -158,6 +228,9 @@ test("server: scene and cancel-job need the UI token and do only their one thing
   assert.equal(readPlan("P", "ss").scenes[0].approved, undefined);
   assert.equal(core.queue.list().find((j) => j.id === held.id)!.status, "held");
   const h = { cookie: "fs_ui=" + ui, origin: base };
+  assert.equal((await post("/api/scene", scene, h)).status, 400, "own-frame approval needs a storyboard still");
+  const still = join(home, "still.png"); writeFileSync(still, "image");
+  const withStill = readPlan("P", "ss"); withStill.scenes[0].storyboard = still; writePlan(withStill);
   const media = (p: string) => fetch(`${base}/media?path=${encodeURIComponent(p)}&token=${flow}`).then((r) => r.status);
   const { projDir } = await import("./projects.js");
   writeFileSync(join(projDir("P"), "references", "a.png"), "x");

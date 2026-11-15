@@ -30,6 +30,7 @@ export const SceneSchema = z.object({
   // Engine-owned: where the storyboard still / clip sits in Flow (hashed account id + Flow project path).
   storyboard_flow: z.object({ account: z.string(), flowProject: z.string() }).optional(),
   clip_flow: z.object({ account: z.string(), flowProject: z.string() }).optional(),
+  takes: z.array(z.object({ clip: z.string(), flow: z.object({ account: z.string(), flowProject: z.string() }).optional(), fromClip: z.string().optional(), createdAt: z.string().optional() })).optional(),
   // Engine-owned: the scene whose clip changed after this clip was made, so this clip no longer joins it.
   stale: z.number().int().optional(),
 });
@@ -39,6 +40,8 @@ export const PlanSchema = z.object({
   sub: z.string().min(1),
   aspect: z.enum(["9:16", "16:9"]),
   style: z.enum(["A", "B"]).optional(),
+  // Explicit ad-wide selection. Folder contents are never implicitly selected.
+  references: z.array(z.string()).optional(),
   // Bumped by every writePlan; studio_plan_write must name the rev it read, so a stale copy cannot overwrite newer work.
   rev: z.number().int().min(0).optional(),
   // Ideas tab: scenario options Claude proposes, and the id of the one the owner picked in chat.
@@ -87,7 +90,7 @@ export function createSub(project: string, sub: string, aspect: "9:16" | "16:9" 
   mkdirSync(join(projDir(project), "references"), { recursive: true });
   mkdirSync(join(dir, "storyboard"), { recursive: true });
   writeFileSync(join(dir, "notes.md"), "");
-  writePlanFile({ project: safeName(project), sub: safeName(sub), aspect, scenes: [] });
+  writePlanFile({ project: safeName(project), sub: safeName(sub), aspect, references: [], scenes: [] });
   return dir;
 }
 

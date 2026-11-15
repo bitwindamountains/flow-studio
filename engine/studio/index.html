@@ -9,6 +9,8 @@
 <link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@600;800;900&family=Hanken+Grotesk:wght@400;500;700&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
 <style>
 [hidden]{display:none!important}
+.skip-link{position:absolute;top:-40px;left:6px;background:var(--tally);color:var(--ink);padding:8px 12px;border-radius:4px;font:700 14px var(--mono);z-index:100;transition:top .2s}
+.skip-link:focus{top:6px;outline:2px solid var(--bone);outline-offset:2px}
 :root{
   --ink:#14110e; --ink2:#1d1915; --ink3:#2a241e; --line:#3a322a;
   --bone:#f3eadb; --dim:#b3a793; --tally:#ff5a1f; --go:#9fe06a; --warn:#ffc53d; --bad:#ff4d4d;
@@ -16,8 +18,8 @@
   --r:12px;
 }
 *{box-sizing:border-box;margin:0}
-html{background:var(--ink);color:var(--bone);font:500 17px/1.4 var(--body);-webkit-text-size-adjust:100%}
-body{min-height:100vh;padding:0 16px 104px;background:
+html{background:var(--ink);color:var(--bone);font:500 17px/1.4 var(--body);-webkit-text-size-adjust:100%;overflow-x:hidden}
+body{min-height:100vh;padding:0 16px 104px;scroll-padding-top:70px;background:
   radial-gradient(1200px 500px at 85% -10%,rgba(255,90,31,.16),transparent 60%),
   radial-gradient(900px 600px at -10% 30%,rgba(255,197,61,.06),transparent 60%),var(--ink)}
 body::before{content:"";position:fixed;inset:0;pointer-events:none;opacity:.07;z-index:50;
@@ -47,7 +49,7 @@ label.f:first-child{margin-top:0}
 input[type=text],input[type=number],select,textarea{width:100%;font:500 17px var(--body);color:var(--bone);background:var(--ink);border:2px solid var(--line);border-radius:10px;padding:10px 12px;outline:none;-webkit-appearance:none;appearance:none}
 select{background-image:linear-gradient(45deg,transparent 50%,var(--dim) 50%),linear-gradient(135deg,var(--dim) 50%,transparent 50%);background-position:calc(100% - 20px) 50%,calc(100% - 13px) 50%;background-size:7px 7px;background-repeat:no-repeat;padding-right:38px}
 textarea{min-height:96px;resize:vertical;line-height:1.4}
-input:focus,select:focus,textarea:focus{border-color:var(--tally)}
+input:focus,select:focus,textarea:focus{outline:2px solid var(--tally);outline-offset:2px;border-color:var(--tally)}
 .seg{display:flex;flex-wrap:wrap;gap:6px}
 .seg button{flex:1 1 0;min-width:0;min-height:42px;padding:0 10px;font:700 16px var(--mono);color:var(--bone);background:var(--ink);border:2px solid var(--line);border-radius:10px;cursor:pointer}
 .seg button.on{background:var(--bone);color:var(--ink);border-color:var(--bone)}
@@ -172,6 +174,7 @@ audio{width:100%;margin-top:8px;filter:invert(1) hue-rotate(180deg)}
 @media(min-width:760px){.pickrow{grid-template-columns:1fr 1fr}}
 </style></head>
 <body>
+<a href="#main" class="skip-link">Skip to main content</a>
 <div class="clapper"></div>
 <div class="wrap">
   <header>
@@ -193,7 +196,7 @@ audio{width:100%;margin-top:8px;filter:invert(1) hue-rotate(180deg)}
   </nav>
 
   <div class="cols">
-    <main>
+    <main id="main">
       <!-- CAST -->
       <section class="panel on" data-panel="cast">
         <div class="step">Step 1</div>
@@ -429,8 +432,8 @@ audio{width:100%;margin-top:8px;filter:invert(1) hue-rotate(180deg)}
   <button class="roll" id="roll">Roll</button>
 </div></div>
 
-<dialog id="picker"><h2 style="font-size:34px">Pick from Flow</h2><p class="empty">Media already in the open Flow project.</p><div class="lib" id="pickList"></div><div style="margin-top:16px"><button class="btn small ghost" onclick="picker.close()">Close</button></div></dialog>
-<dialog id="viewer"><div class="viewbar"><button type="button" class="btn small ghost" id="viewerTrash" style="border-color:var(--bad);color:var(--bad)">Move to <span data-place="bin">the Mac's Trash</span></button><button type="button" class="btn small" onclick="viewer.close()" autofocus>Close</button></div><div id="viewerBody"></div><p class="empty" id="viewerPath"></p></dialog>
+<dialog id="picker"><h2 style="font-size:34px">Pick from Flow</h2><p class="empty">Media already in the open Flow project.</p><div class="lib" id="pickList"></div><div style="margin-top:16px"><button class="btn small ghost" onclick="picker.close()" aria-label="Close picker">Close</button></div></dialog>
+<dialog id="viewer"><div class="viewbar"><button type="button" class="btn small ghost" id="viewerTrash" style="border-color:var(--bad);color:var(--bad)">Move to <span data-place="bin">the Mac's Trash</span></button><button type="button" class="btn small" onclick="viewer.close()" autofocus aria-label="Close viewer">Close</button></div><div id="viewerBody"></div><p class="empty" id="viewerPath"></p></dialog>
 <input type="file" id="file" hidden>
 <script>
 const TOKEN = "__FLOW_TOKEN__";
@@ -446,7 +449,7 @@ const api = async (method, body = {}) => {
   return data;
 };
 const media = (path) => `/media?token=${TOKEN}&path=${encodeURIComponent(path)}`;
-const toast = (msg, bad) => { const t = Object.assign(document.createElement("div"), { className: "toast" + (bad ? " bad" : ""), textContent: msg }); document.body.append(t); setTimeout(() => t.remove(), bad ? 7000 : 3200); };
+const toast = (msg, bad) => { const t = Object.assign(document.createElement("div"), { className: "toast" + (bad ? " bad" : ""), role: "alert", "aria-live": "polite", textContent: msg }); document.body.append(t); setTimeout(() => t.remove(), bad ? 7000 : 3200); };
 const guard = () => { if (!LIVE) { toast("Not connected — start Flow Studio first.", true); return false; } return true; };
 
 // Prices Flow quotes on a Pro plan, x1 take.
@@ -513,7 +516,7 @@ function slotHtml(kind, i, val, label) {
   const name = val ? (val.asset ?? val.name) : "";
   const pic = val?.path && /\.(jpe?g|png|webp|gif)$/i.test(val.path);
   return `<div class="slot" data-slot="${kind}" data-i="${i}">${pic ? `<img src="${media(val.path)}">` : ""}
-    ${val ? `<button class="x" data-clear="${kind}" data-i="${i}">×</button><span class="tag">${esc(name)}</span>`
+    ${val ? `<button class="x" data-clear="${kind}" data-i="${i}" aria-label="Remove">×</button><span class="tag">${esc(name)}</span>`
           : `<span>${label}</span><span class="two"><button type="button" data-src="upload">Upload</button><button type="button" data-src="flow">${/music|voiceover/.test(kind) ? "My narrations" : "From Flow"}</button></span>`}</div>`;
 }
 function setSlot(kind, idx, val) {

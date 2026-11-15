@@ -30,7 +30,9 @@ export type WhileIdle = (fn: () => Promise<boolean>) => Promise<boolean | undefi
 export function checkFlow(page: Page, whileIdle?: WhileIdle, read: (p: Page) => Promise<number | undefined> = readCredits): Promise<Health> {
   return (inflight ??= (async () => {
     const checks: Check[] = [];
-    checks.push(await run("signed in", "Flow isn't signed in. Sign in to Google in the Flow window.", async () => !!(await activeAccount(page))));
+    checks.push(await run("signed in", "Flow's signed-in controls weren't found. Check sign-in in the dedicated Flow window.", async () =>
+      !!(await activeAccount(page)) || /^https:\/\/flow\.google\.com\//.test(page.url()) &&
+      await page.getByRole("button", { name: "Account details" }).first().isVisible().catch(() => false)));
     checks.push(await run("account switcher", `Flow's account menu wasn't found - Flow may have changed. ${REMAP}`,
       () => page.getByRole("button", { name: "Account details" }).first().isVisible()));
     if (page.url().includes("/project/")) {

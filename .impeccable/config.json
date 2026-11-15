@@ -1,0 +1,17 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "cramped-padding",
+        "value": "*",
+        "files": [
+          ".superpowers/brainstorm/1096-1794728216/content/layouts.html"
+        ],
+        "createdAt": "2026-11-15T07:42:15.165Z",
+        "reason": "Claude: throwaway brainstorm wireframe (tiny scaled-down badges/labels), already decided and superseded; not product UI"
+      }
+    ]
+  }
+}

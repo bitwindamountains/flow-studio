@@ -9,7 +9,7 @@ import { CACHE_DIR as CAPTIONS_DIR } from "./captions.js";
 import { HOME_DIR } from "./chrome.js";
 import { LocalCore, OUTPUT_ROOT, shapes, type Core } from "./core.js";
 import { loadAccounts } from "./accounts.js";
-import { PtyHub, startClaude } from "./pty.js";
+import { PtyHub, startAgent } from "./pty.js";
 import { flowHealth, formatHealth } from "./health.js";
 import { projectsRoot, readPlan, writePlan } from "./projects.js";
 import { remotionRoot } from "./handoff.js";
@@ -26,6 +26,7 @@ const VENDOR: Record<string, [string, string]> = {
   "xterm.css": [nm("@xterm/xterm/css/xterm.css"), "text/css"],
   "addon-fit.js": [nm("@xterm/addon-fit/lib/addon-fit.js"), "text/javascript"],
   "app.js": [UI_DIR + "app.js", "text/javascript"],
+  "studio.css": [UI_DIR + "studio.css", "text/css"],
 };
 const sameSecret = (a: string, b: string) => timingSafeEqual(createHash("sha256").update(a).digest(), createHash("sha256").update(b).digest());
 const CSP = `default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self'; connect-src 'self' ws://127.0.0.1:${PORT} ws://localhost:${PORT}; base-uri 'none'; form-action 'none'`;
@@ -89,7 +90,7 @@ export type ServerRole = "owner" | "client" | "none";
 export let lastServer: Server | undefined; // test hook: lets a test close the listener
 
 // opts.studio: only the standalone Studio (studio.ts) hands out the one-shot UI token; Claude's MCP process never does.
-export async function startServer(core: Core, spawner = startClaude, opts: { studio?: boolean } = {}): Promise<ServerRole> {
+export async function startServer(core: Core, spawner = startAgent, opts: { studio?: boolean } = {}): Promise<ServerRole> {
   // Snapshot the page and its scripts once: an edit to ui/ or node_modules after start (e.g. by Claude) never reaches the owner's window.
   const page = readFileSync(STUDIO_HTML, "utf8");
   const assets = new Map(Object.entries(VENDOR).map(([k, [file]]) => [k, readFileSync(file)]));
@@ -108,7 +109,8 @@ export async function startServer(core: Core, spawner = startClaude, opts: { stu
 
   const allowedHosts = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`]);
 
-  const hub = new PtyHub(spawner);
+  const hub = new PtyHub(spawner, (message) => { if (core instanceof LocalCore) core.interruptEditTasks(message); },
+    raw => { if (!(core instanceof LocalCore)) throw new Error("Screen context unavailable."); return core.validateUiContext(raw); });
   const wss = new WebSocketServer({ noServer: true });
   const allowedOrigins = new Set([`http://127.0.0.1:${PORT}`, `http://localhost:${PORT}`]);
 
@@ -155,6 +157,12 @@ export async function startServer(core: Core, spawner = startClaude, opts: { stu
         return json(res, 200, { approved: core.queue.approve({ batch: body.batch, job_id: body.job_id }).map((j) => j.id) });
       }
 
+      if (req.method === "POST" && url.pathname === "/api/ui-context") {
+        if (!ownerOk(req)) return json(res, 403, { error: "Only the owner window can publish screen context." });
+        if (!(core instanceof LocalCore)) return json(res, 404, { error: "Not found." });
+        return json(res, 200, { context: core.publishUiContext(JSON.parse((await readBody(req, 8192)).toString())) });
+      }
+
       if (req.method === "POST" && (url.pathname === "/api/lessons/resolve" || url.pathname === "/api/lessons/add")) {
         if (!ownerOk(req)) return json(res, 403, { error: "Only the studio page can change lessons." });
         const b = JSON.parse((await readBody(req, 64 * 1024)).toString() || "{}") as { id?: string; action?: "save" | "discard"; editedText?: string; text?: string; scope?: string };
@@ -164,6 +172,18 @@ export async function startServer(core: Core, spawner = startClaude, opts: { stu
       }
 
       // Owner-only actions: UI token, never the flow token Claude can read.
+      if (req.method === "POST" && ["/api/take", "/api/edit-task/start", "/api/edit-task/stop"].includes(url.pathname)) {
+        if (!ownerOk(req)) return json(res, 403, { error: "Only the studio page can do this." });
+        if (!(core instanceof LocalCore)) return json(res, 404, { error: "Not found." });
+        const raw = JSON.parse((await readBody(req, 64 * 1024)).toString() || "{}");
+        const scope = z.object({ project: z.string().min(1), sub: z.string().min(1) }).parse(raw);
+        if (url.pathname === "/api/take") {
+          const take = z.object({ scene: z.number().int().min(1), clip: z.string().min(1) }).parse(raw);
+          return json(res, 200, core.restoreTake({ ...scope, ...take }));
+        }
+        if (url.pathname.endsWith("/start")) return json(res, 200, { task: core.startEditTask(scope) });
+        return json(res, 200, { task: core.stopEditTask({ ...scope, task_id: z.string().min(1).parse(raw.task_id) }) });
+      }
       if (req.method === "POST" && ["/api/scene", "/api/cancel-job"].includes(url.pathname)) {
         if (!ownerOk(req)) return json(res, 403, { error: "Only the studio page can do this." });
         const b = JSON.parse((await readBody(req, 64 * 1024)).toString() || "{}") as { project?: string; sub?: string; n?: number; approved?: unknown; kept?: unknown; id?: string };
@@ -177,6 +197,8 @@ export async function startServer(core: Core, spawner = startClaude, opts: { stu
         const plan = readPlan(String(b.project), String(b.sub));
         const scene = plan.scenes.find((x) => x.n === b.n);
         if (!scene) return json(res, 400, { error: "Unknown scene." });
+        if (b.approved === true && scene.start?.kind !== "continue" && (!scene.storyboard || !existsSync(scene.storyboard)))
+          return json(res, 400, { error: `Scene ${scene.n}: generate and review its storyboard still before approving.` });
         if (typeof b.approved === "boolean") scene.approved = b.approved;
         if (typeof b.kept === "boolean") scene.kept = b.kept;
         writePlan(plan);
@@ -204,7 +226,7 @@ export async function startServer(core: Core, spawner = startClaude, opts: { stu
       }
 
       const method = url.pathname.match(/^\/api\/(\w+)$/)?.[1] as keyof Core | undefined;
-      if (req.method === "POST" && method && typeof core[method] === "function") {
+      if (req.method === "POST" && method && Object.hasOwn(shapes, method) && typeof core[method] === "function") {
         const raw = (await readBody(req, 1024 * 1024)).toString() || "{}";
         const shape = (shapes as Record<string, z.ZodRawShape>)[method];
         const args = shape ? z.object(shape).parse(JSON.parse(raw)) : undefined;

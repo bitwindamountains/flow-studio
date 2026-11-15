@@ -5,6 +5,9 @@
   "main": "index.js",
   "scripts": {
     "test": "tsc && node --test \"dist/**/*.test.js\"",
+    "test:terminal": "npm run build && node scripts/test-terminal-ui.mjs",
+    "test:accounts": "npm run build && node scripts/test-account-identity.mjs",
+    "test:workflow": "npm run build && node scripts/test-workflow-ui.mjs",
     "build": "tsc",
     "start": "node dist/index.js",
     "login": "node dist/login.js",

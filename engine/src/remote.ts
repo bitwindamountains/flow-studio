@@ -42,6 +42,9 @@ export class RemoteCore implements Core {
   studio_projects = () => call("studio_projects", {});
   studio_select = (a: unknown) => call("studio_select", a);
   studio_current = () => call("studio_current", {});
+  studio_workflow_read = (a: unknown) => call("studio_workflow_read", a);
+  studio_context_read = () => call("studio_context_read", {});
+  studio_guide_read = (a: unknown) => call("studio_guide_read", a);
   studio_references = (a: unknown) => call("studio_references", a);
   studio_new = (a: unknown) => call("studio_new", a);
   studio_plan_read = (a: unknown) => call("studio_plan_read", a);
@@ -49,6 +52,8 @@ export class RemoteCore implements Core {
   studio_notes_read = (a: unknown) => call("studio_notes_read", a);
   studio_notes_write = (a: unknown) => call("studio_notes_write", a);
   studio_edit_notes_read = (a: unknown) => call("studio_edit_notes_read", a);
+  studio_edit_task_read = (a: unknown) => call("studio_edit_task_read", a);
+  studio_edit_task_update = (a: unknown) => call("studio_edit_task_update", a);
   studio_edit_notes_write = (a: unknown) => call("studio_edit_notes_write", a);
   studio_render_done = (a: unknown) => call("studio_render_done", a);
   studio_renders = (a: unknown) => call("studio_renders", a);

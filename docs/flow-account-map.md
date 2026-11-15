@@ -5,6 +5,14 @@ Mapped live in the studio Brave profile (`data/chrome-profile`, CDP 9333) with s
 ## Browser
 Brave works: Google sign-in and Flow both accept it. Launcher sets `FLOW_MCP_CHROME` to Brave.
 
+## Account identity recovery (2026-11-02)
+
+The original badge mapping below is historical. The detector now accepts case differences, line breaks, directional marks and emails outside parentheses. When a generation preflight cannot read the badge, it opens Account details, reads a unique email from the bounded account panel and closes the panel. It never infers identity from credits, an account index or a stored account. Ambiguous/missing identity still blocks generation.
+
+Passive health checks do not open that panel while jobs are busy. Detailed Flow status now reports `account_verified` separately from `signedIn`, and identity failures on an open Flow page report verification failure rather than always asking the owner to sign in. Existing wrong-account and cached-reference/project guards remain in force.
+
+Verification: `cd engine; npm.cmd run test:accounts` uses isolated Chromium fixtures with no CDP connection, production profile, network or generation. Live verification requires restarting Studio to load the compiled engine; no failed job is automatically retried by this fix.
+
 ## Active account
 - Flow's URL carries the Google session index as a path segment: `https://flow.google.com/u/<n>/...`.
 - Email: `getByRole("button", { name: /Google Account:/ })` → aria-label `Google Account: <name> (<email>)[, …]`; email is the text in parentheses.

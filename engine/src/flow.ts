@@ -5,6 +5,8 @@ import type { Locator, Page } from "playwright-core";
 import { HOME_DIR, getFlowPage, inEnglish } from "./chrome.js";
 import type { Job } from "./queue.js";
 import { extractZip } from "./platform.js";
+import { ReferenceUploadCache, resetReferenceComposer, assertReferenceCount, agentReferenceFiles } from "./reference-assets.js";
+import { readAccountBadge, readPanelIdentity } from "./account-identity.js";
 
 export interface FlowState {
   url: string;
@@ -12,6 +14,7 @@ export interface FlowState {
   inProject: boolean;
   plan?: string;
   credits_remaining?: number;
+  account_verified?: boolean;
   composer?: string;
   hint?: string;
 }
@@ -31,10 +34,13 @@ export async function getFlowState(detailed = false): Promise<FlowState> {
   const inProject = /\/project\//.test(url);
   const state: FlowState = { url, signedIn, inProject };
   if (!signedIn) state.hint = "Not signed in. Run `npm run login` and sign in to Google in the Flow Chrome window.";
-  else if (!inProject) state.hint = "Signed in, but no project is open. Open or create a project in the Flow Chrome window.";
+  else if (!inProject) state.hint = "No Flow project is open yet. Studio opens or creates the ad's Flow project when a queued job starts.";
   else if (detailed) {
     state.plan = await page.getByRole("button", { name: "Account details" }).innerText().then((t) => t.trim().split("\n")[0], () => undefined);
-    state.credits_remaining = await readCredits(page).catch(() => undefined);
+    const panel = await readAccountPanel(page).catch(() => undefined);
+    state.credits_remaining = panel?.credits;
+    state.account_verified = !!panel?.email;
+    if (!state.account_verified) state.hint = "Flow is open, but Studio could not verify the active Google account. Open Account details in the dedicated Flow window and reload Flow before retrying.";
     state.composer = await settingsTrigger(page).innerText().then((t) => t.replace(/\s+/g, " ").trim(), () => undefined);
   }
   return state;
@@ -92,7 +98,7 @@ export async function readCredits(page: Page): Promise<number | undefined> {
 }
 
 // Balance plus the panel's "Credits refresh daily at <h:mm AM/PM>" line (per account; see docs/flow-account-map.md).
-export async function readAccountPanel(page: Page): Promise<{ credits?: number; refresh?: string }> {
+export async function readAccountPanel(page: Page): Promise<{ email?: string; credits?: number; refresh?: string }> {
   await dismissOverlays(page);
   await scrollToTop(page);
   await page.getByRole("button", { name: "Account details" }).click({ timeout: 5000 });
@@ -101,7 +107,8 @@ export async function readAccountPanel(page: Page): Promise<{ credits?: number; 
     await link.waitFor({ state: "visible", timeout: 5000 });
     const n = Number((await link.innerText()).replace(/[^\d]/g, ""));
     const refresh = await page.getByText(/Credits refresh/).first().textContent({ timeout: 2000 }).catch(() => null);
-    return { credits: Number.isNaN(n) ? undefined : n, refresh: refresh ?? undefined };
+    const email = await readAccountBadge(page, 250) ?? await readPanelIdentity(page);
+    return { email, credits: Number.isNaN(n) ? undefined : n, refresh: refresh ?? undefined };
   } finally {
     await dismissOverlays(page);
     await pause(page, 300);
@@ -315,6 +322,7 @@ async function openSettings(page: Page): Promise<void> {
 
 async function pickRadio(page: Page, name: string | RegExp): Promise<void> {
   const radio = page.getByRole("radio", { name, exact: typeof name === "string" }).first();
+  await radio.waitFor({ state: "visible", timeout: 5000 }).catch(() => {});
   if (!(await radio.isVisible().catch(() => false))) {
     throw new Error(`Flow has no "${name}" option for the current mode/model.`);
   }
@@ -373,7 +381,11 @@ export async function applySettings(page: Page, job: Job): Promise<number> {
   if (s.type === "video") await pickRadio(page, framesMode ? "Frames" : "Ingredients");
   if (s.aspect_ratio) await pickRadio(page, s.aspect_ratio);
   const model = s.type === "image" && LEGACY_IMAGE_MODEL.test(s.model ?? "") ? LATEST_IMAGE_MODEL : s.model;
-  if (model) await pickModel(page, model);
+  if (model) {
+    await pickModel(page, model);
+    // Model changes/menu dismissal can close settings. Reopen before reading the lower controls.
+    await openSettings(page);
+  }
   if (s.type === "video" && s.resolution) await pickRadio(page, new RegExp(`^${s.resolution}`));
   if (s.type === "video" && s.duration) await pickRadio(page, `${s.duration}s`);
   await pickRadio(page, `x${s.variants ?? 1}`);
@@ -387,6 +399,23 @@ export async function applySettings(page: Page, job: Job): Promise<number> {
 }
 
 const ASSET_PREFIX = "asset:";
+const referenceUploads = new ReferenceUploadCache();
+
+async function uploadReferenceAsset(page:Page,job:Job,file:string,label:string):Promise<string>{
+  if(file.startsWith(ASSET_PREFIX))return file.slice(ASSET_PREFIX.length).trim();
+  const {currentLocation}=await import("./switcher.js");
+  const location=await currentLocation(page);
+  if(!location)return uploadAsset(page,job,file,label);
+  return referenceUploads.get(`${location.account}|${location.flowProject}`,file,(digest,contents)=>uploadAsset(page,job,file,`${label}-${digest.slice(0,12)}`,contents));
+}
+
+async function clearImageReferences(page:Page):Promise<boolean>{
+  return resetReferenceComposer({
+    clear:async()=>{const clear=page.getByRole("button",{name:"Clear prompt"});if(await clear.isVisible().catch(()=>false))await clear.click();},
+    count:()=>page.getByRole("button",{name:"Ingredient",exact:true}).count(),
+    reload:async()=>{await page.goto(inEnglish(page.url()),{waitUntil:"domcontentloaded"});await ensureProjectGrid(page);},
+  });
+}
 
 // Waits for THIS upload by its own name until Flow has finished processing it (its picture carries a media id), so
 // a half-processed upload can never be taken for the next generation's result.
@@ -403,12 +432,12 @@ async function waitForUpload(page: Page, name: string, timeoutMs: number): Promi
 
 // Uploads under a unique filename so the asset can be picked unambiguously afterwards.
 // "asset:<name>" refers to something already in the Flow project (image, video, character) and skips the upload.
-async function uploadAsset(page: Page, job: Job, file: string, label: string): Promise<string> {
+async function uploadAsset(page: Page, job: Job, file: string, label: string, contents?:Buffer): Promise<string> {
   if (file.startsWith(ASSET_PREFIX)) return file.slice(ASSET_PREFIX.length).trim();
-  if (!existsSync(file)) throw new Error(`File not found: ${file}`);
+  if (!contents && !existsSync(file)) throw new Error(`File not found: ${file}`);
   const name = `fm-${job.id}-${label}${extname(file).toLowerCase()}`;
   const staged = join(mkdtempSync(join(tmpdir(), "flow-mcp-")), name);
-  copyFileSync(file, staged);
+  if(contents)writeFileSync(staged,contents);else copyFileSync(file, staged);
   await scrollToTop(page);
   await page.getByRole("button", { name: "Add media menu" }).click();
   const chooser = page.waitForEvent("filechooser", { timeout: 10_000 });
@@ -796,6 +825,12 @@ export async function runGeneration(job: Job, afford?: (page: Page) => Promise<u
   }
   if (afford) await afford(page);
 
+  if(s.type==="image" && await clearImageReferences(page)){
+    await setAgentMode(page,false);
+    job.credits=await applySettings(page,job);
+    if(job.credits>s.max_credits)throw new Error("Flow's image quote changed after resetting references; nothing was generated.");
+  }
+
   if (s.first_frame) {
     await attachAsset(page, page.getByRole("button", { name: "Start", exact: true }), await uploadAsset(page, job, s.first_frame, "start"));
   }
@@ -811,14 +846,19 @@ export async function runGeneration(job: Job, afford?: (page: Page) => Promise<u
       .join(" · ");
     s.reference_images = [];
   }
+  const referenceNames=new Set<string>();
   for (const [i, ref] of (s.reference_images ?? []).entries()) {
-    const name = await uploadAsset(page, job, ref, `ref${i + 1}`);
-    await attachAsset(page, page.getByRole("button", { name: "Add ingredients to the prompt box" }), name);
+    const name = await (s.type==="image"?uploadReferenceAsset(page,job,ref,`ref${i+1}`):uploadAsset(page,job,ref,`ref${i+1}`));
+    if(s.type==="image"&&referenceNames.has(name))continue;
+    try{await attachAsset(page, page.getByRole("button", { name: "Add ingredients to the prompt box" }), name);}
+    catch(error){referenceUploads.clear();throw error;}
+    referenceNames.add(name);
   }
-  const wanted = (s.reference_images ?? []).length;
-  if (wanted) {
-    const attached = await page.getByRole("button", { name: "Ingredient" }).count();
-    if (attached < wanted) throw new Error(`Only ${attached} of ${wanted} reference image(s) attached in Flow; nothing was generated.`);
+  const wanted = s.type==="image"?referenceNames.size:(s.reference_images ?? []).length;
+  if (wanted || s.type === "image") {
+    const attached = await page.getByRole("button", { name: "Ingredient", exact:s.type==="image" }).count();
+    if(s.type==="image")assertReferenceCount(attached,wanted);
+    else if (attached < wanted) throw new Error(`Only ${attached} of ${wanted} reference image(s) attached in Flow; nothing was generated.`);
   }
 
   await typePrompt(page, s.prompt);
@@ -1447,21 +1487,22 @@ async function agentRound(
   const beforeNames = new Set<string>(seenBefore.filter((a) => !a.id).map((a) => a.name));
   await scrollToTop(page);
 
-  const clear = page.getByRole("button", { name: "Clear prompt" });
-  if (await clear.isVisible().catch(() => false)) await clear.click();
   // Reference images ride along as ingredient chips, attached the way the + button does, once per round (the composer
   // is cleared between rounds). The script then names them, and each scene says which ones it uses.
   const refs = s.agent_refs ?? [];
   const assets = s.agent_ref_assets ?? [];
+  if(await clearImageReferences(page)){await setAgentMode(page,true);await setAgentSettings(page,"Never",aspect);}
   if (refs.length) {
-    for (const [k, name] of assets.entries()) {
+    for (const [k, name] of [...new Set(assets)].entries()) {
       step(job, `attaching reference ${k + 1} of ${assets.length}`);
-      await attachAsset(page, page.getByRole("button", { name: "Add ingredients to the prompt box" }), name);
+      try{await attachAsset(page, page.getByRole("button", { name: "Add ingredients to the prompt box" }), name);}
+      catch(error){referenceUploads.clear();throw error;}
       await pause(page, 700);
     }
-    const attached = await page.getByRole("button", { name: "Ingredient" }).count();
-    if (attached < assets.length) throw new Error(`Only ${attached} of ${assets.length} reference image(s) attached in the agent composer.`);
+    const attached = await page.getByRole("button", { name: "Ingredient", exact:true }).count();
+    assertReferenceCount(attached,new Set(assets).size);
   }
+  else assertReferenceCount(await page.getByRole("button",{name:"Ingredient",exact:true}).count(),0);
   const usesOf = (i: number) => s.agent_scene_refs?.[i];
   const script = indexes
     .map((i) => {
@@ -1698,7 +1739,7 @@ export async function runAgentBatch(job: Job): Promise<string[]> {
       for (const [k, r] of s.agent_refs.entries()) {
         step(job, `uploading reference ${k + 1} of ${s.agent_refs.length} (${r.name})`);
         const label = r.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 24) || `ref${k + 1}`;
-        assets.push(await uploadAsset(page, job, r.image, label));
+        assets.push(await uploadReferenceAsset(page, job, r.image, label));
       }
       s.agent_ref_assets = assets;
     }
@@ -1739,16 +1780,7 @@ export async function runAgentBatch(job: Job): Promise<string[]> {
   const numberOf = (i: number) => s.agent_numbers?.[i] ?? base + i;
   const stillFails = Number(process.env.FLOW_MCP_SIMULATE_FAILED ?? 0); // test hook: pretend this scene failed for good
   // A scene made one by one keeps its references: the uploaded copies when there are some, else the original files.
-  const refsFor = (i: number): string[] | undefined => {
-    const refs = s.agent_refs ?? [];
-    if (!refs.length) return undefined;
-    const uses = s.agent_scene_refs?.[i];
-    const picked = refs
-      .map((r, k) => ({ r, k }))
-      .filter(({ r }) => !uses || uses.some((u) => u.toLowerCase() === r.name.toLowerCase()))
-      .slice(0, 3);
-    return picked.length ? picked.map(({ r, k }) => (s.agent_ref_assets?.[k] ? `${ASSET_PREFIX}${s.agent_ref_assets[k]}` : r.image)) : undefined;
-  };
+  const refsFor = (i: number): string[] | undefined => agentReferenceFiles(s,i);
   for (const [n, i] of missing.entries()) {
     job.progress = `re-running scene ${numberOf(i)} one by one (${n + 1}/${missing.length})`;
     if (numberOf(i) === stillFails && !job.params.agent_numbers) {

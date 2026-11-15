@@ -13,6 +13,7 @@ test("createSub makes the folder layout and 9:16 default", () => {
   assert.ok(!existsSync(join(d, "clips")), "clips live in Remotion public, not here");
   assert.ok(existsSync(join(d, "..", "references")));
   assert.equal(P.readPlan("Aqua", "v1").aspect, "9:16");
+  assert.deepEqual(P.readPlan("Aqua", "v1").references, [], "new ads must not inherit shared product references");
   assert.deepEqual(P.listProjects(), [{ project: "Aqua", subs: ["v1"] }]);
 });
 

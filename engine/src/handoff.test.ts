@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -29,6 +29,16 @@ test("kept clips in scene order as staticFile paths; unkept skipped; nothing cop
   assert.ok(!existsSync(join(r.dir, "a.mp4")));
 });
 
+test("stale kept clips refuse handoff before moving audio or writing captions", () => {
+  const p = mk("Stale");
+  p.scenes[2].stale = 1;
+  const music = join(tmp, "stale.wav");
+  writeFileSync(music, "music");
+  assert.throws(() => handoff(p, { music }), /Scene 3.*stale.*redo/i);
+  assert.ok(existsSync(music));
+  assert.ok(!existsSync(join(subPublicDir("Stale", "s"), "captions.json")));
+});
+
 test("music and voiceover moved in as bg.<ext> / vo.<ext>", () => {
   const m = join(tmp, "m.wav"); writeFileSync(m, "m");
   const v = join(tmp, "v.mp3"); writeFileSync(v, "v");
@@ -36,6 +46,28 @@ test("music and voiceover moved in as bg.<ext> / vo.<ext>", () => {
   assert.deepEqual([r.music, r.voiceover], ["Aud/s/bg.wav", "Aud/s/vo.mp3"]);
   assert.equal(readFileSync(join(r.dir, "bg.wav"), "utf8"), "m");
   assert.ok(!existsSync(m) && !existsSync(v));
+});
+
+test("revision audio is reusable and replacements preserve previous imported files", () => {
+  const plan = mk("Versions");
+  const first = join(tmp, "first.wav"), next = join(tmp, "next.wav");
+  writeFileSync(first, "first"); writeFileSync(next, "next");
+  const a = handoff(plan, { music: first });
+  assert.equal(handoff(plan, { music: first }).music, a.music);
+  const b = handoff(plan, { music: next });
+  assert.notEqual(a.music, b.music);
+  assert.equal(readFileSync(join(subPublicDir("Versions", "s"), "bg.wav"), "utf8"), "first");
+  assert.equal(handoff(plan, {}).music, b.music);
+});
+
+test("missing current voiceover does not orphan newly supplied replacement music", () => {
+  const plan = mk("AudioRecovery"), first = join(tmp, "recovery-first.wav"), voice = join(tmp, "recovery-voice.wav"), replacement = join(tmp, "recovery-next.wav");
+  writeFileSync(first, "first"); writeFileSync(voice, "voice"); writeFileSync(replacement, "replacement");
+  handoff(plan, { music: first, voiceover: voice });
+  unlinkSync(join(subPublicDir("AudioRecovery", "s"), "vo.wav"));
+  assert.throws(() => handoff(plan, { music: replacement }), /missing/i);
+  assert.ok(existsSync(replacement), "replacement remains in uploads if another selected file is missing");
+  assert.ok(!existsSync(join(subPublicDir("AudioRecovery", "s"), "bg-v2.wav")));
 });
 
 test("captions.json carries planned caption + voiceover text, rewritten on each handoff", () => {
@@ -62,12 +94,14 @@ test("audio: only audio extensions, never the same file twice, both moves or nei
   assert.throws(() => handoff(p, { music: txt }), /audio file/);
   const m = join(tmp, "m2.mp3"); writeFileSync(m, "m");
   assert.throws(() => handoff(p, { music: m, voiceover: m }), /same file/);
-  // vo.mp3 already there: refused before anything moves, so the music stays in uploads.
+  // Existing audio is never overwritten: replacements get their own immutable version.
   mkdirSync(subPublicDir("Aud2", "s"), { recursive: true });
   writeFileSync(join(subPublicDir("Aud2", "s"), "vo.mp3"), "old");
   const v = join(tmp, "v2.mp3"); writeFileSync(v, "v");
-  assert.throws(() => handoff(p, { music: m, voiceover: v }), /already exists/);
-  assert.ok(existsSync(m) && existsSync(v) && !existsSync(join(subPublicDir("Aud2", "s"), "bg.mp3")));
+  const imported = handoff(p, { music: m, voiceover: v });
+  assert.equal(imported.voiceover, "Aud2/s/vo-v2.mp3");
+  assert.equal(readFileSync(join(subPublicDir("Aud2", "s"), "vo.mp3"), "utf8"), "old");
+  assert.ok(!existsSync(m) && !existsSync(v));
   // A captions.json the studio did not write is never overwritten.
   writeFileSync(join(subPublicDir("Aud2", "s"), "captions.json"), '{"owner":true}');
   assert.throws(() => handoff(p, {}), /not written by the studio/);

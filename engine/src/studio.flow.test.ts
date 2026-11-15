@@ -33,6 +33,192 @@ async function write(core: { studio_plan_write(a: unknown): Promise<unknown> }, 
 }
 const until = async (f: () => boolean) => { for (let i = 0; i < 200 && !f(); i++) await new Promise((r) => setTimeout(r, 10)); };
 
+test("reference selections are per ad, removable with rev checks, and never delete shared files", async () => {
+  const {core,readPlan}=await setup("ref-selection",[{n:1,prompt:"x",approved:true}]);
+  const {projDir,writePlan}=await import("./projects.js");
+  const shared=join(projDir("P"),"references","product.png");writeFileSync(shared,"image");
+  const initial=await core.studio_references({project:"P",sub:"ref-selection"}) as {active:string[];project:string[]};
+  assert.deepEqual(initial.active,[]);
+  assert.ok(initial.project.includes(shared));
+  const plan=readPlan("P","ref-selection");
+  await core.studio_plan_write({project:"P",sub:"ref-selection",rev:plan.rev!,plan:{...plan,references:[shared]}} as never);
+  assert.equal(readPlan("P","ref-selection").scenes[0].approved,false,"changing ad references clears approval");
+  core.queue.pause("inspect jobs");
+  await core.studio_storyboard({project:"P",sub:"ref-selection"} as never);
+  const job=core.queue.list().at(-1)!;
+  assert.deepEqual(job.params.reference_images,[shared]);
+  const selected=readPlan("P","ref-selection");
+  await core.studio_plan_write({project:"P",sub:"ref-selection",rev:selected.rev!,plan:{...selected,references:[]}} as never);
+  assert.equal(job.status,"cancelled","a waiting job with removed references cannot run");
+  assert.ok(existsSync(shared));
+  await assert.rejects(core.studio_plan_write({project:"P",sub:"ref-selection",rev:selected.rev!,plan:{...selected,references:[]}} as never),/Plan changed/);
+  const legacy=readPlan("P","ref-selection"); delete legacy.references;writePlan(legacy);
+  assert.deepEqual((await core.studio_references({project:"P",sub:"ref-selection"}) as {active:string[]}).active,[],"a legacy folder is a library, not a selection");
+  await core.studio_storyboard({project:"P",sub:"ref-selection"} as never);
+  assert.deepEqual(core.queue.list().at(-1)!.params.reference_images,[],"unused folder files never reach Flow");
+});
+
+test("default storyboards forward each frame prompt directly with selected references",async()=>{
+  const {LocalCore}=await import("./core.js"),{createSub,readPlan,writePlan,subDir}=await import("./projects.js");
+  createSub("P","direct-board");
+  const referenceFolder=join(subDir("P","direct-board"),"references");mkdirSync(referenceFolder,{recursive:true});
+  const reference=join(referenceFolder,"chosen.png");writeFileSync(reference,"image");
+  const plan=readPlan("P","direct-board");
+  plan.references=[reference];plan.scenes=[{n:1,prompt:"clip action one",frame_prompt:"exact first still"},{n:2,prompt:"continue",start:{kind:"continue",from:1}},{n:3,prompt:"clip action three",frame_prompt:"exact third still"}];writePlan(plan);
+  const requests:{prompt:string;refs:string[];agent:unknown;cap:number}[]=[];
+  const core=new LocalCore({runner:async job=>{
+    requests.push({prompt:job.params.prompt,refs:job.params.reference_images??[],agent:job.params.agent_scenes,cap:job.params.max_credits});
+    mkdirSync(job.params.output_dir,{recursive:true});const file=join(job.params.output_dir,job.params.file_stem+".png");writeFileSync(file,"still");return[file];
+  },queueOpts:{pauseMs:[0,0]}});
+  await core.studio_storyboard({project:"P",sub:"direct-board"});
+  await until(()=>core.queue.list().every(j=>j.status==="done"));
+  assert.deepEqual(requests,[{prompt:"exact first still",refs:[reference],agent:undefined,cap:0},{prompt:"exact third still",refs:[reference],agent:undefined,cap:0}]);
+  const scenes=readPlan("P","direct-board").scenes;
+  assert.ok(scenes[0].storyboard&&scenes[2].storyboard);assert.notEqual(scenes[0].storyboard,scenes[2].storyboard);assert.equal(scenes[1].storyboard,undefined);
+});
+
+test("direct storyboard stills keep separate scene files and skip continuation scenes",async()=>{
+  const {LocalCore}=await import("./core.js"),{createSub,readPlan,writePlan}=await import("./projects.js");
+  createSub("P","board-batch");const plan=readPlan("P","board-batch");
+  plan.scenes=[{n:1,prompt:"one"},{n:2,prompt:"continue",start:{kind:"continue",from:1}},{n:3,prompt:"three"}];writePlan(plan);
+  let submitted=0;
+  const core=new LocalCore({runner:async job=>{
+    submitted++;mkdirSync(job.params.output_dir,{recursive:true});const file=join(job.params.output_dir,job.params.file_stem+".png");writeFileSync(file,"still");return[file];
+  },queueOpts:{pauseMs:[0,0]}});
+  const result=await core.studio_storyboard({project:"P",sub:"board-batch"}) as {skipped_continue:number[]};
+  await until(()=>core.queue.list().every(j=>j.status==="done"));
+  assert.equal(submitted,2);assert.deepEqual(result.skipped_continue,[2]);
+  const scenes=readPlan("P","board-batch").scenes;
+  assert.ok(scenes[0].storyboard?.endsWith("scene-01.png"));assert.equal(scenes[1].storyboard,undefined);assert.ok(scenes[2].storyboard?.endsWith("scene-03.png"));
+});
+
+test("a legacy scene's newly selected image never gets old folder images appended",async()=>{
+  const {core,readPlan}=await setup("explicit-only",[{n:1,prompt:"white product"}]);
+  const {projDir,subDir,writePlan}=await import("./projects.js");
+  const old=join(projDir("P"),"references","old-silver.png");writeFileSync(old,"old");
+  const folder=join(subDir("P","explicit-only"),"references");mkdirSync(folder,{recursive:true});
+  const selected=join(folder,"new-white.png");writeFileSync(selected,"new");
+  const plan=readPlan("P","explicit-only");delete plan.references;plan.scenes[0].references=[selected];writePlan(plan);
+  core.queue.pause("inspect references");await core.studio_storyboard({project:"P",sub:"explicit-only"});
+  assert.deepEqual(core.queue.list().at(-1)!.params.reference_images,[selected]);
+});
+
+test("editing one scene during storyboard generation cannot attach its obsolete result",async()=>{
+  const {LocalCore}=await import("./core.js"),{createSub,readPlan,writePlan}=await import("./projects.js");
+  createSub("P","board-batch-stale");const plan=readPlan("P","board-batch-stale");plan.scenes=[{n:1,prompt:"one"},{n:2,prompt:"two"}];writePlan(plan);
+  const core=new LocalCore({runner:async job=>{
+    if(job.params.studio!.scene===1){const changed=readPlan("P","board-batch-stale");changed.scenes[0].prompt="new first frame";writePlan(changed);}
+    mkdirSync(job.params.output_dir,{recursive:true});const file=join(job.params.output_dir,job.params.file_stem+".png");writeFileSync(file,"still");return[file];
+  },queueOpts:{pauseMs:[0,0]}});
+  await core.studio_storyboard({project:"P",sub:"board-batch-stale"});await until(()=>core.queue.list().every(j=>j.status==="done"));
+  const after=readPlan("P","board-batch-stale");assert.equal(after.scenes[0].storyboard,undefined);assert.ok(after.scenes[1].storyboard);
+  assert.ok(core.queue.list()[0].files.length);assert.match(core.queue.list()[0].note!,/scene changed/);
+});
+
+test("repeated generation skips scenes already held instead of adding duplicate approvals", async () => {
+  const { core } = await setup("dedupe", [{ n: 1, prompt: "x", approved: true }]);
+  await core.studio_generate({ project: "P", sub: "dedupe" } as never);
+  const second = await core.studio_generate({ project: "P", sub: "dedupe" } as never) as { held: number; already_queued: number[] };
+  assert.equal(core.queue.list().length, 1);
+  assert.equal(second.held, 0);
+  assert.deepEqual(second.already_queued, [1]);
+});
+
+test("repeated storyboard requests do not duplicate queued stills", async () => {
+  const { core } = await setup("dedupe-still", [{ n: 1, prompt: "x" }]);
+  core.queue.pause("fixture");
+  await core.studio_storyboard({ project: "P", sub: "dedupe-still" });
+  await core.studio_storyboard({ project: "P", sub: "dedupe-still" });
+  assert.equal(core.queue.list().length, 1);
+});
+
+test("redo does not add another paid job while a take is already held", async () => {
+  const { core } = await setup("dedupe-redo", [{ n: 1, prompt: "x", approved: true }]);
+  await core.studio_redo({ project: "P", sub: "dedupe-redo", scene: 1 });
+  await core.studio_redo({ project: "P", sub: "dedupe-redo", scene: 1, prompt: "changed" });
+  assert.equal(core.queue.list().length, 1);
+});
+
+test("take history retains earlier clips and owner restoration invalidates continuation clips", async () => {
+  const { core, readPlan } = await setup("take-history", [{ n: 1, prompt: "x", approved: true }, { n: 2, prompt: "y", start: { kind: "continue", from: 1 }, clip: "dependent.mp4" }]);
+  const a = await core.studio_generate({ project: "P", sub: "take-history", scenes: [1] } as never) as { batch: string };
+  core.queue.approve({ batch: a.batch });
+  await until(() => !!readPlan("P", "take-history").scenes[0].clip);
+  const first = readPlan("P", "take-history").scenes[0].clip!;
+  const b = await core.studio_redo({ project: "P", sub: "take-history", scene: 1 } as never) as { batch: string };
+  core.queue.approve({ batch: b.batch });
+  await until(() => readPlan("P", "take-history").scenes[0].clip !== first);
+  // Existing queue history remains usable for projects made before per-scene take history was added.
+  const { writePlan } = await import("./projects.js");
+  const legacy = readPlan("P", "take-history"); delete legacy.scenes[0].takes; writePlan(legacy);
+  const state = await core.studio_status({ project: "P", sub: "take-history" } as never) as unknown as { scenes: { takes: { clip: string }[] }[] };
+  assert.equal(state.scenes[0].takes.length, 2);
+  const restore = core as unknown as { restoreTake(a: object): void };
+  restore.restoreTake({ project: "P", sub: "take-history", scene: 1, clip: first });
+  assert.equal(readPlan("P", "take-history").scenes[0].clip, first);
+  assert.equal(readPlan("P", "take-history").scenes[0].kept, false);
+  assert.equal(readPlan("P", "take-history").scenes[1].stale, 1);
+  assert.throws(() => restore.restoreTake({ project: "P", sub: "take-history", scene: 1, clip: "outside.mp4" }), /take/i);
+});
+
+test("agent and Studio restarts expose interrupted edits as failed without silently resubmitting", async () => {
+  const scope = { project: "P", sub: "task-restart" };
+  const { core } = await setup(scope.sub, [{ n: 1, prompt: "fixture", kept: true, clip: "fixture.mp4" }]);
+  core.startEditTask(scope); core.interruptEditTasks("Agent restarted");
+  assert.equal(((await core.studio_edit_task_read(scope)) as { task: { phase: string } }).task.phase, "failed");
+  core.startEditTask(scope);
+  const { LocalCore } = await import("./core.js");
+  const restarted = new LocalCore();
+  assert.equal(((await restarted.studio_edit_task_read(scope)) as { task: { phase: string } }).task.phase, "failed");
+});
+
+test("plan changes cancel waiting jobs and retry cannot run an obsolete prompt", async () => {
+  const { core, readPlan } = await setup("audit-old", [{ n: 1, prompt: "old", approved: true }]);
+  await core.studio_generate({ project: "P", sub: "audit-old" } as never);
+  const job = core.queue.list()[0];
+  await write(core, "audit-old", [{ n: 1, prompt: "new" }]);
+  assert.equal(job.status, "cancelled");
+  core.queue.retry(job.id);
+  core.queue.approve({ job_id: job.id });
+  await until(() => job.status === "failed" || job.status === "done");
+  assert.equal(job.status, "failed");
+  assert.equal(readPlan("P", "audit-old").scenes[0].clip, undefined);
+});
+
+test("redo requires scene approval and a replacement clip must be kept again", async () => {
+  const { core, readPlan } = await setup("audit-keep", [{ n: 1, prompt: "x", approved: false }]);
+  await assert.rejects(core.studio_redo({ project: "P", sub: "audit-keep", scene: 1 } as never), /approv/i);
+  const { writePlan } = await import("./projects.js");
+  const p = readPlan("P", "audit-keep");
+  p.scenes[0] = { ...p.scenes[0], approved: true, kept: true, clip: "previous.mp4" };
+  writePlan(p);
+  const r = await core.studio_redo({ project: "P", sub: "audit-keep", scene: 1 } as never) as { batch: string };
+  core.queue.approve({ batch: r.batch });
+  await until(() => core.queue.list()[0].status === "done");
+  assert.equal(readPlan("P", "audit-keep").scenes[0].kept, false);
+});
+
+test("a running result cannot attach to a scene edited while it was generating", async () => {
+  const { readPlan } = await setup("audit-running", [{ n: 1, prompt: "old", approved: true }]);
+  const { LocalCore } = await import("./core.js");
+  let release!: () => void;
+  let started!: () => void;
+  const running = new Promise<void>((r) => { started = r; });
+  const blocked = new Promise<void>((r) => { release = r; });
+  const core = new LocalCore({ queueOpts: { pauseMs: [0, 0] }, runner: async () => {
+    started();
+    await blocked;
+    return ["preserved-late-result.mp4"];
+  } });
+  const r = await core.studio_generate({ project: "P", sub: "audit-running" } as never) as { batch: string };
+  core.queue.approve({ batch: r.batch });
+  await running;
+  await write(core, "audit-running", [{ n: 1, prompt: "new" }]);
+  release();
+  await until(() => ["done", "failed"].includes(core.queue.list()[0].status));
+  assert.equal(readPlan("P", "audit-running").scenes[0].clip, undefined);
+});
+
 test("storyboard queues image jobs that run without approval", async () => {
   const { core, readPlan } = await setup("aa", [{ n: 1, prompt: "x" }, { n: 2, prompt: "y" }]);
   const r = (await core.studio_storyboard({ project: "P", sub: "aa" } as never)) as { job_ids: string[] };
@@ -158,13 +344,13 @@ test("to_remotion copies nothing, returns staticFile paths, moves music in and n
   assert.equal(out.music, "P/rm/bg.mp3");
   assert.equal(readFileSync(join(subPublicDir("P", "rm"), "bg.mp3"), "utf8"), "tune");
   assert.ok(!existsSync(song), "music moved, not copied");
-  assert.deepEqual(readdirSync(subPublicDir("P", "rm")).sort(), ["bg.mp3", "captions.json", "clips"]);
+  assert.deepEqual(readdirSync(subPublicDir("P", "rm")).sort(), ["audio-manifest.json", "bg.mp3", "captions.json", "clips"]);
   assert.deepEqual(readdirSync(clipsDir("P", "rm")).sort(), ["scene-01.mp4", "scene-02.mp4"]);
   const song2 = join(home, "uploads", "song2.mp3");
   writeFileSync(song2, "other");
-  await assert.rejects(call({ music: song2 }), /already exists/);
+  assert.equal(((await call({ music: song2 })) as { music: string }).music, "P/rm/bg-v2.mp3");
   assert.equal(readFileSync(join(subPublicDir("P", "rm"), "bg.mp3"), "utf8"), "tune");
-  assert.ok(existsSync(song2));
+  assert.ok(!existsSync(song2));
 });
 
 test("clip jobs download straight into the Remotion public clips folder", async () => {
@@ -226,8 +412,9 @@ test("generate with no settings queues Omni 1.1 Flash / 8s / 720p, max 20; scene
 });
 
 test("redo reuses the scene's own settings; an override duration wins", async () => {
-  const { core } = await setup("set2", [{ n: 1, prompt: "x", model: "Omni 1.1 Flash", duration: 4, resolution: "360p" }]);
+  const { core } = await setup("set2", [{ n: 1, prompt: "x", approved: true, model: "Omni 1.1 Flash", duration: 4, resolution: "360p" }]);
   await core.studio_redo({ project: "P", sub: "set2", scene: 1 } as never);
+  core.queue.cancel(core.queue.list()[0].id);
   await core.studio_redo({ project: "P", sub: "set2", scene: 1, duration: 10 } as never);
   const [a, b] = core.queue.list().map((j) => j.params);
   assert.deepEqual([a.model, a.duration, a.resolution], ["Omni 1.1 Flash", 4, "360p"]);
@@ -379,10 +566,10 @@ test("generate: a source scene outside the batch uses its finished clip; none at
 
 test("a finished redo marks continuing scenes stale transitively; a dependent redo on the new clip clears it", async () => {
   const { core, readPlan } = await chainSetup("ch6", [
-    { n: 1, prompt: "x", clip: "C:\\c\\1.mp4" },
-    { n: 2, prompt: "y", clip: "C:\\c\\2.mp4", start: cont(1) },
-    { n: 3, prompt: "z", clip: "C:\\c\\3.mp4", start: cont(2) },
-    { n: 4, prompt: "w", clip: "C:\\c\\4.mp4" },
+    { n: 1, prompt: "x", approved: true, clip: "C:\\c\\1.mp4" },
+    { n: 2, prompt: "y", approved: true, clip: "C:\\c\\2.mp4", start: cont(1) },
+    { n: 3, prompt: "z", approved: true, clip: "C:\\c\\3.mp4", start: cont(2) },
+    { n: 4, prompt: "w", approved: true, clip: "C:\\c\\4.mp4" },
   ]);
   const r = (await core.studio_redo({ project: "P", sub: "ch6", scene: 1 } as never)) as { batch: string };
   assert.deepEqual(readPlan("P", "ch6").scenes.map((s) => s.stale), [undefined, undefined, undefined, undefined]); // nothing changed yet
@@ -402,7 +589,7 @@ test("a finished redo marks continuing scenes stale transitively; a dependent re
 });
 
 test("a cancelled source redo leaves no stale marks", async () => {
-  const { core, readPlan } = await chainSetup("ch7", [{ n: 1, prompt: "x", clip: "C:\\c\\1.mp4" }, { n: 2, prompt: "y", clip: "C:\\c\\2.mp4", start: cont(1) }]);
+  const { core, readPlan } = await chainSetup("ch7", [{ n: 1, prompt: "x", approved: true, clip: "C:\\c\\1.mp4" }, { n: 2, prompt: "y", approved: true, clip: "C:\\c\\2.mp4", start: cont(1) }]);
   const r = (await core.studio_redo({ project: "P", sub: "ch7", scene: 1 } as never)) as { job_id: string };
   core.queue.cancel(r.job_id);
   await new Promise((res) => setTimeout(res, 50));
@@ -410,7 +597,7 @@ test("a cancelled source redo leaves no stale marks", async () => {
 });
 
 test("a held dependent chained to the old clip is cancelled when the source redo finishes", async () => {
-  const { core, readPlan } = await chainSetup("ch8", [{ n: 1, prompt: "x", clip: "C:\\c\\1.mp4" }, { n: 2, prompt: "y", clip: "C:\\c\\2.mp4", start: cont(1) }]);
+  const { core, readPlan } = await chainSetup("ch8", [{ n: 1, prompt: "x", approved: true, clip: "C:\\c\\1.mp4" }, { n: 2, prompt: "y", approved: true, clip: "C:\\c\\2.mp4", start: cont(1) }]);
   await core.studio_redo({ project: "P", sub: "ch8", scene: 2 } as never); // starts on the old clip of scene 1
   const r = (await core.studio_redo({ project: "P", sub: "ch8", scene: 1 } as never)) as { batch: string };
   const [dep] = core.queue.list();
@@ -423,7 +610,7 @@ test("a held dependent chained to the old clip is cancelled when the source redo
 });
 
 test("a dependent finishing on an outdated source keeps stale", async () => {
-  const { core, readPlan } = await chainSetup("ch9", [{ n: 1, prompt: "x", clip: "C:\\c\\1.mp4" }, { n: 2, prompt: "y", clip: "C:\\c\\2.mp4", start: cont(1) }]);
+  const { core, readPlan } = await chainSetup("ch9", [{ n: 1, prompt: "x", approved: true, clip: "C:\\c\\1.mp4" }, { n: 2, prompt: "y", approved: true, clip: "C:\\c\\2.mp4", start: cont(1) }]);
   const { writePlan } = await import("./projects.js");
   const r = (await core.studio_redo({ project: "P", sub: "ch9", scene: 2 } as never)) as { batch: string };
   // Scene 1's clip changes while this one is already under way (a running job is never cancelled).

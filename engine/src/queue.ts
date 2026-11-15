@@ -40,7 +40,8 @@ export interface SceneParams {
   file_stem: string;
   // Links a job to a Studio plan scene so its finished file is recorded in plan.json.
   // `from`: the scene whose last frame this clip starts on (display only; chain_from/chain_file do the work).
-  studio?: { project: string; sub: string; scene: number; kind: "storyboard" | "clip"; from?: number };
+  // `input`: scene content identity at queue time, checked before running and attaching a finished result.
+  studio?: { project: string; sub: string; scene: number; kind: "storyboard" | "clip"; from?: number; input?: string };
 }
 
 export interface Job {
@@ -77,8 +78,8 @@ export class Requeue extends Error {}
 const PAUSE_MIN_MS = Number(process.env.FLOW_MCP_PAUSE_MIN_S ?? 25) * 1000;
 const PAUSE_MAX_MS = Number(process.env.FLOW_MCP_PAUSE_MAX_S ?? 70) * 1000;
 // Free image jobs (storyboard stills) are quick and cheap for Flow, so they wait less (owner's choice, 2026-10-31).
-const IMAGE_PAUSE_MIN_MS = Number(process.env.FLOW_MCP_IMAGE_PAUSE_MIN_S ?? 5) * 1000;
-const IMAGE_PAUSE_MAX_MS = Number(process.env.FLOW_MCP_IMAGE_PAUSE_MAX_S ?? 15) * 1000;
+const IMAGE_PAUSE_MIN_MS = Number(process.env.FLOW_MCP_IMAGE_PAUSE_MIN_S ?? 3) * 1000;
+const IMAGE_PAUSE_MAX_MS = Number(process.env.FLOW_MCP_IMAGE_PAUSE_MAX_S ?? 5) * 1000;
 
 const STOPPED = "Studio stopped while this was generating — it may have spent credits. Check Flow before retrying.";
 const needsOk = (p: SceneParams) => p.type === "video" || Boolean(p.edit_asset || p.continue_from);
@@ -140,7 +141,7 @@ export class JobQueue {
     void this.work();
   }
 
-  add(params: SceneParams, opts: { batch?: string } = {}): Job {
+  add(params: SceneParams, opts: { batch?: string; flow?: FlowLocation } = {}): Job {
     const job: Job = {
       id: randomUUID().slice(0, 8),
       status: needsOk(params) ? "held" : "queued",
@@ -148,11 +149,13 @@ export class JobQueue {
       files: [],
       attempts: 0,
       batch: opts.batch,
+      flow: opts.flow ? { ...opts.flow } : undefined,
       createdAt: new Date().toISOString(),
     };
     this.jobs.set(job.id, job);
     this.save();
-    void this.work();
+    // Let one Studio request enqueue its scenes before choosing a compatible image batch.
+    queueMicrotask(()=>void this.work());
     return job;
   }
 

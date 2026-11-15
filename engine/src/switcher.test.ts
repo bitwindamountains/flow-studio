@@ -1,11 +1,66 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { MIN_VIDEO_COST, SwitchError, affordLoop, findSource, planSwitch, projectKey, type AffordIO } from "./switcher.js";
+import { MIN_VIDEO_COST, SwitchError, accountId, affordLoop, findSource, planSwitch, projectKey, ensureJobProject, type AffordIO } from "./switcher.js";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Requeue, type Job } from "./queue.js";
 import type { Account } from "./accounts.js";
 
 const now = new Date("2026-10-31T10:00:00");
 const later = new Date("2026-11-01T04:59:00").toISOString();
+
+test("a homepage job opens its saved Flow project before generation, or creates and remembers one", async () => {
+  const file = join(mkdtempSync(join(tmpdir(),"flow-open-")),"projects.json");
+  const id = "/project/11111111-1111-1111-1111-111111111111";
+  const job = {params:{type:"image",studio:{project:"P",sub:"ad"}}} as Job;
+  let url = "https://flow.google.com/?hl=en", created = 0;
+  const page = {
+    url:()=>url, goto:async(next:string)=>{url=next;}, waitForTimeout:async()=>{},
+    waitForURL:async(fn:(u:URL)=>boolean)=>assert.ok(fn(new URL(url))),
+    getByRole:(_role:string,options:{name:string|RegExp})=>({
+      first:()=>({getAttribute:async()=>"Google Account: A (a@x.test)"}),waitFor:async()=>{},
+      click:async()=>{assert.equal(options.name,"New project");created++;url="https://flow.google.com/u/0"+id;},
+    }),
+  } as never;
+  await ensureJobProject(page,job,file);
+  assert.equal(created,1);
+  assert.equal(JSON.parse(readFileSync(file,"utf8"))["a@x.test|P/ad"],id);
+  url="https://flow.google.com/";
+  await ensureJobProject(page,job,file);
+  assert.equal(created,1,"saved project is reopened, not duplicated");
+  assert.ok(url.includes(id));
+});
+
+test("Flow assets never trigger creation of an empty project when their project is unavailable", async () => {
+  const file=join(mkdtempSync(join(tmpdir(),"flow-asset-")),"projects.json"); writeFileSync(file,"{}");
+  const job={params:{type:"video",reference_images:["asset:Person"],studio:{project:"P",sub:"ad"}}} as Job;
+  let clicks=0;
+  const page={url:()=>"https://flow.google.com/",getByRole:()=>({first:()=>({getAttribute:async()=>"Google Account: A (a@x.test)"}),click:async()=>{clicks++;}})} as never;
+  await assert.rejects(ensureJobProject(page,job,file),/asset.*project|project.*asset/i);
+  assert.equal(clicks,0);
+});
+
+test("agent asset references and cached uploaded assets cannot create an empty replacement project", async () => {
+  const file=join(mkdtempSync(join(tmpdir(),"flow-agent-ref-")),"projects.json");writeFileSync(file,"{}");
+  let clicks=0;
+  const page={url:()=>"https://flow.google.com/",getByRole:()=>({first:()=>({getAttribute:async()=>"Google Account: A (a@x.test)"}),click:async()=>{clicks++;}})} as never;
+  for(const fields of [{agent_refs:[{image:"asset:Person",name:"Person"}]},{agent_ref_assets:["fm-previous-product"]}]) {
+    const job={params:{type:"image",agent_scenes:["scene"],studio:{project:"P",sub:"ad"},...fields}} as Job;
+    await assert.rejects(ensureJobProject(page,job,file),/asset.*project|project.*asset/i);
+  }
+  assert.equal(clicks,0);
+});
+
+test("cached agent assets only reuse the verified original account and project", async () => {
+  const file=join(mkdtempSync(join(tmpdir(),"flow-agent-bound-")),"projects.json");writeFileSync(file,"{}");
+  const path="/project/11111111-1111-1111-1111-111111111111";
+  const page={url:()=>"https://flow.google.com/u/0"+path,getByRole:()=>({first:()=>({getAttribute:async()=>"Google Account: A (a@x.test)"})})} as never;
+  const job={flow:{account:accountId("a@x.test"),flowProject:path},params:{type:"image",agent_scenes:["scene"],agent_ref_assets:["cached"],studio:{project:"P",sub:"ad"}}} as Job;
+  await ensureJobProject(page,job,file);
+  job.flow!.account=accountId("other@x.test");
+  await assert.rejects(ensureJobProject(page,job,file),/source project could not be verified/);
+});
 const accts = (): Account[] => [
   { index: 0, email: "a@x.test", credits: 50 },
   { index: 1, email: "b@x.test", credits: 3 },

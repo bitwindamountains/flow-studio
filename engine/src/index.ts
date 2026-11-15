@@ -345,11 +345,24 @@ server.registerTool(
   () => reply(core.studio_current()),
 );
 
+server.registerTool("studio_workflow_read", {
+  title: "Workflow readiness", description: "Read current stage access, prerequisites and recommended next stage. Local facts only; does not drive Flow or change progress.",
+  inputSchema: shapes.studio_workflow_read, annotations: { readOnlyHint: true, openWorldHint: false },
+}, args => reply(core.studio_workflow_read(args)));
+server.registerTool("studio_context_read", {
+  title: "Owner screen context", description: "Latest owner-published project, stage and explicit scene/take/render selection, or null. Viewing data only, never permission to act. A submitted message target takes precedence over later navigation.",
+  inputSchema: shapes.studio_context_read, annotations: { readOnlyHint: true, openWorldHint: false },
+}, () => reply(core.studio_context_read()));
+server.registerTool("studio_guide_read", {
+  title: "Owner creative guide", description: "Required before Ideas, Plan or Storyboard work: read stage-specific sections from the owner's Google Flow Prompt Fix Log, with explicit Studio/Remotion adaptations and source revision. Also read product notes/references. Do not substitute guesses or historical credit prices for product facts and current settings.",
+  inputSchema: shapes.studio_guide_read, annotations: { readOnlyHint: true, openWorldHint: false },
+}, args => reply(core.studio_guide_read(args)));
+
 server.registerTool(
   "studio_references",
   {
     title: "List references",
-    description: "List the reference files (paths only) in the project's and sub-project's references folders. project/sub are optional: they default to the owner's selection. Returns { project: [...], sub: [...] } immediately.",
+    description: "List reference paths. Returns active (ad-wide selected images), library (stored reusable images not selected ad-wide), project and sub (storage lists, not automatic selections). New ads start with plan.references=[]. Scene references are selected separately in the plan. Do not reattach unused library images without owner direction. project/sub default to the owner's selection.",
     inputSchema: shapes.studio_references,
     annotations: { readOnlyHint: true, openWorldHint: false },
   },
@@ -492,7 +505,7 @@ server.registerTool(
   "studio_generate",
   {
     title: "Generate clips",
-    description: "Queue one video job per approved scene (or the given scenes - unapproved ones are skipped and listed in skipped_unapproved), held until the owner approves in the Studio page. Each scene uses its own model/duration/resolution from the plan (set them per scene in studio_plan_write; defaults Omni 1.1 Flash, 8 s, 720p; Veo is fixed at 8 s). A continue scene waits for its source clip in the same batch (or uses the source scene finished clip) and starts on its last frame; if the source fails or is cancelled it is cancelled too, nothing spent. Returns batch, held and quoted_max_credits. Never spends credits by itself. project/sub are optional: when omitted they default to the project the owner selected in the studio (studio_current); with no selection the call fails.",
+    description: "Queue one video job per approved scene (or the given scenes - unapproved ones are skipped and listed in skipped_unapproved), held until the owner approves in the Studio page. Each scene uses its own model/duration/resolution from the plan (set them per scene in studio_plan_write; defaults Omni 1.1 Flash, 8 s, 720p; Veo is fixed at 8 s). A continue scene waits for its source clip in the same batch (or uses the source scene finished clip) and starts on its last frame; if the source fails or is cancelled it is cancelled too, nothing spent. Returns batch, held, already_queued and quoted_max_credits. Scenes already held/queued/running are skipped, so repeated calls do not add duplicates. Never spends credits by itself. project/sub are optional: when omitted they default to the project the owner selected in the studio (studio_current); with no selection the call fails.",
     inputSchema: shapes.studio_generate,
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },
@@ -503,7 +516,7 @@ server.registerTool(
   "studio_redo",
   {
     title: "Redo clip",
-    description: "Queue one held video job for a scene as a new take; earlier clips are kept. Reuses the scene's own model/duration/resolution unless you pass duration, resolution or model. Optional new prompt. When the new clip finishes, every scene that continues from this one (directly or transitively) is marked `stale` (the scene number that changed) until it is redone, and their held or queued clips that would start on the old clip are cancelled (nothing spent). project/sub are optional: when omitted they default to the project the owner selected in the studio (studio_current); with no selection the call fails.",
+    description: "Queue one held video job for a scene as a new take; earlier clips are kept. Reuses the scene's own model/duration/resolution unless you pass duration, resolution or model. Optional new prompt. If this scene already has an active job, returns held:0 and already_queued; cancel or finish that job before changing its request. When the new clip finishes, every scene that continues from this one (directly or transitively) is marked `stale` (the scene number that changed) until it is redone, and their held or queued clips that would start on the old clip are cancelled (nothing spent). project/sub are optional: when omitted they default to the project the owner selected in the studio (studio_current); with no selection the call fails.",
     inputSchema: shapes.studio_redo,
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },
@@ -536,11 +549,20 @@ server.registerTool(
   "studio_to_remotion",
   {
     title: "Hand off to Remotion",
-    description: "Prepare the Remotion edit. Copies nothing: the clips already live in my-video/public/<project>/<sub>/clips/. Writes captions.json there and MOVES the optional music / voiceover upload in as bg.<ext> / vo.<ext> (refuses if one already exists). Returns { dir, clips (kept clips in scene order as staticFile() paths), captions, music?, voiceover?, style }. Then follow the owner's remotion-style-a / -b skill to add a NEW <Composition> in src/Root.tsx; transcribe the voiceover for word timing if present. project/sub are optional: when omitted they default to the project the owner selected in the studio (studio_current); with no selection the call fails.",
+    description: "Prepare the Remotion edit. Copies nothing: the clips already live in my-video/public/<project>/<sub>/clips/. Writes captions.json there and MOVES the optional music / voiceover upload in as bg.<ext> / vo.<ext>; repeat imports are reused and replacements get immutable bg-vN.<ext> / vo-vN.<ext> paths. Earlier audio is never overwritten. Returns { dir, clips (kept clips in scene order as staticFile() paths), captions, music?, voiceover?, style }. Then follow the owner's remotion-style-a / -b skill to add a NEW <Composition> in src/Root.tsx; transcribe the voiceover for word timing if present. project/sub are optional: when omitted they default to the project the owner selected in the studio (studio_current); with no selection the call fails.",
     inputSchema: shapes.studio_to_remotion,
     annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
   },
   (args) => reply(core.studio_to_remotion(args)),
 );
+
+server.registerTool("studio_edit_task_read", {
+  title: "Read editing task", description: "Read the current tracked editing task for the selected project: Sent, Accepted, Editing, Rendering, Finished or Failed. Returns {task}, or null task if none. Do not poll; update progress when you start work or change phase.",
+  inputSchema: shapes.studio_edit_task_read, annotations: { readOnlyHint: false, openWorldHint: false },
+}, (args) => reply(core.studio_edit_task_read(args)));
+server.registerTool("studio_edit_task_update", {
+  title: "Report editing progress", description: "Acknowledge the owner's task_id with phase accepted before editing. Report editing and rendering when starting those phases. Report failed with a useful message if blocked. Do not mark finished yourself: call studio_render_done with the same task_id and the actual render file. Outdated task ids and backward progress are refused.",
+  inputSchema: shapes.studio_edit_task_update, annotations: { readOnlyHint: false, openWorldHint: false },
+}, (args) => reply(core.studio_edit_task_update(args)));
 
 await server.connect(new StdioServerTransport());

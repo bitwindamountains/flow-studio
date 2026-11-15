@@ -13,6 +13,17 @@ test("formatHealth lists only failed checks with their hints", () => {
   assert.equal(formatHealth([{ name: "a", ok: true }]), "");
 });
 
+test("signed-in controls are recognized when the account badge is only inside its panel", async () => {
+  let reads = 0;
+  const page = {
+    url: () => "https://flow.google.com/u/2/",
+    getByRole: () => ({ first: () => ({ getAttribute: async () => null, isVisible: async () => true }) }),
+  } as never;
+  const health = await checkFlow(page, async () => undefined, async () => { reads++; return 50; });
+  assert.equal(health.checks.find(check => check.name === "signed in")?.ok, true);
+  assert.equal(reads, 0, "passive health must not open a panel while generation is busy");
+});
+
 test("busy queue: the credits step never reads the panel", async () => {
   let reads = 0;
   const page = {

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -32,4 +32,20 @@ test("an edit whose source clip Flow Studio did not make is refused before the b
   const job = core.queue.get(r.jobs[0].id)!;
   assert.equal(job.status, "failed");
   assert.match(job.error!, /does not know which Google account holds .*Nothing was generated\./);
+});
+
+test("partial agent retry preserves its cached assets' source before queueing", async () => {
+  const { LocalCore }=await import("./core.js");
+  const file=join(mkdtempSync(join(tmpdir(),"flow-partial-retry-")),"queue.json");
+  const core=new LocalCore({runner:async()=>[],queueOpts:{file,pauseMs:[0,0]}});
+  core.queue.pause("test source binding");
+  core.queue.restore();
+  const original=core.queue.add({prompt:"batch",type:"image",max_credits:0,output_dir:tmpdir(),file_stem:"scene-01",agent_scenes:["one","two"],agent_ref_assets:["product"]});
+  original.status="done";original.failed_scenes=[2];original.flow={account:"verified-account",flowProject:"/project/11111111-1111-1111-1111-111111111111"};
+  await core.retry({job_ids:[original.id]});
+  const retry=core.queue.list().find(j=>j.id!==original.id)!;
+  assert.deepEqual(retry.params.agent_ref_assets,["product"]);
+  assert.deepEqual(retry.flow,original.flow);
+  assert.deepEqual(retry.params.agent_numbers,[2]);
+  assert.deepEqual(JSON.parse(readFileSync(file,"utf8")).find((j:{id:string})=>j.id===retry.id).flow,original.flow,"binding is persisted atomically with the queued retry");
 });

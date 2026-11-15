@@ -1,0 +1,14 @@
+# Adapted from claude/mcp.json and claude/settings.json.
+[mcp_servers.flow_studio]
+command = "node"
+args = ["D:/flow-studio/engine/dist/index.js"]
+disabled_tools = ["flow_generate", "flow_edit", "flow_continue"]
+
+[mcp_servers.flow_studio.env]
+FLOW_MCP_CHROME = "C:/Program Files/BraveSoftware/Brave-Browser/Application/brave.exe"
+FLOW_MCP_HOME = "D:/flow-studio/data"
+FLOW_MCP_OUTPUT = "D:/flow-studio/projects"
+FLOW_MCP_PORT = "8797"
+
+[mcp_servers.flow_studio.tools.flow_cancel]
+approval_mode = "approve"
