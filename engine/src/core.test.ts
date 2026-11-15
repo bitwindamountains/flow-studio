@@ -210,6 +210,69 @@ test("studio_generate skips still scenes and lists them in skipped_stills", asyn
   await assert.rejects(core.studio_redo({ project: "Bud", sub: "stl", scene: 2 } as never), /Scene 2 is a still; redo its image with studio_storyboard/);
 });
 
+// Unapproved scenes: `boards` lists the scenes that get a storyboard file, `approved` the ones the owner approved.
+async function boardFixture(sub: string, budget: number, boards: number[], approved: number[] = []) {
+  const ctx = await stepFixture(sub, budget, 3);
+  const plan = ctx.P.readPlan("Bud", sub);
+  const dir = join(ctx.P.subDir("Bud", sub), "storyboard"); mkdirSync(dir, { recursive: true });
+  for (const s of plan.scenes) {
+    s.approved = approved.includes(s.n);
+    if (boards.includes(s.n)) { s.storyboard = join(dir, `scene-0${s.n}.png`); writeFileSync(s.storyboard, "x"); }
+  }
+  ctx.P.writePlan(plan);
+  ctx.core.queue.pause("fixture");
+  return ctx;
+}
+
+test("funded Assets step: unapproved scenes with storyboards are queued, reserved and run", async () => {
+  const { core, P, assets } = await boardFixture("ub60", 60, [1, 2, 3]);
+  const r = await core.studio_generate({ project: "Bud", sub: "ub60" } as never) as { queued: number; step: string; skipped_unapproved?: number[] };
+  assert.equal(r.queued, 3); assert.equal(r.step, "assets"); assert.equal(r.skipped_unapproved, undefined);
+  const jobs = mine(core, "ub60") as unknown as { id: string; status: string }[];
+  assert.deepEqual(jobs.map((j) => j.status), ["queued", "queued", "queued"]);
+  assert.deepEqual((r as unknown as { job_ids: string[] }).job_ids, jobs.map((j) => j.id));
+  assert.deepEqual(assets().reservations.map((x) => x.job).sort(), jobs.map((j) => j.id).sort());
+  // A plan write that changes scene 3 cancels only scene 3; the funded, unchanged scenes survive it.
+  const plan = P.readPlan("Bud", "ub60"); plan.scenes[2].prompt = "changed";
+  await core.studio_plan_write({ project: "Bud", sub: "ub60", rev: plan.rev ?? 0, plan } as never);
+  assert.deepEqual(jobs.map((j) => j.status), ["queued", "queued", "cancelled"]);
+  core.queue.resume();
+  await settled(() => jobs.every((j) => ["done", "failed", "cancelled"].includes(j.status)));
+  assert.deepEqual(jobs.map((j) => j.status), ["done", "done", "cancelled"]);
+});
+
+test("no working step: unapproved storyboarded scenes are skipped, the approved one is held", async () => {
+  const { core, S } = await boardFixture("ubheld", 60, [1, 2, 3], [1]);
+  S.pauseWorking("Bud", "ubheld");
+  const r = await core.studio_generate({ project: "Bud", sub: "ubheld" } as never) as { held: number; queued?: number; skipped_unapproved: number[] };
+  assert.equal(r.held, 1); assert.equal(r.queued, undefined);
+  assert.deepEqual(r.skipped_unapproved, [2, 3]);
+  assert.deepEqual(mine(core, "ubheld").map((j) => [(j.params as { studio?: { scene: number } }).studio!.scene, (j as unknown as { status: string }).status]), [[1, "held"]]);
+  await assert.rejects(core.studio_redo({ project: "Bud", sub: "ubheld", scene: 2 } as never), /No approved scenes/);
+});
+
+test("funded: an unapproved scene without a storyboard is left out and named; the others queue", async () => {
+  const { core, assets } = await boardFixture("ubmiss", 60, [1, 3]);
+  const r = await core.studio_generate({ project: "Bud", sub: "ubmiss" } as never) as { queued: number; note?: string };
+  assert.equal(r.queued, 2);
+  assert.match(r.note ?? "", /Scene\(s\) 2 have no storyboard/);
+  assert.deepEqual(mine(core, "ubmiss").map((j) => (j.params as { studio?: { scene: number } }).studio!.scene), [1, 3]);
+  assert.equal(assets().reservations.length, 2);
+  await assert.rejects(core.studio_redo({ project: "Bud", sub: "ubmiss", scene: 2 } as never), /no storyboard/);
+  const redo = await core.studio_redo({ project: "Bud", sub: "ubmiss", scene: 3, prompt: "again" } as never) as { already_queued?: number[] };
+  assert.deepEqual(redo.already_queued, [3]);
+});
+
+test("funded batch with unapproved scenes over budget: nothing queued, step blocked, no approved-only fallback", async () => {
+  // Scene 1 alone (approved, 20) would fit 59; the funded batch of three (60) does not and must be refused whole.
+  const { core, assets } = await boardFixture("ub59", 59, [1, 2, 3], [1]);
+  await assert.rejects(core.studio_generate({ project: "Bud", sub: "ub59" } as never), (e: Error) => e.message === "needs 1 more credits");
+  assert.equal(mine(core, "ub59").length, 0);
+  assert.equal(assets().status, "blocked");
+  assert.equal(assets().blockedReason, "needs 1 more credits");
+  assert.deepEqual(assets().reservations, []);
+});
+
 test("studio_plan_write refuses a continue scene whose source is a still; studio_to_remotion returns scenes", async () => {
   const { core, P } = await stepFixture("stl2", 100, 2);
   const plan = P.readPlan("Bud", "stl2");

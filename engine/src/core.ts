@@ -430,6 +430,11 @@ const sceneInput = (plan: ReturnType<typeof readPlan>, scene: ReturnType<typeof 
   "ad-references", plan.references ?? [],
 ]);
 
+// A clip may be generated once the owner approved its scene, or, inside a step budget, once it has a storyboard file
+// (own frame) or continues from another scene (its source is checked by chainSource / prepare).
+const budgetReady = (s: ReturnType<typeof readPlan>["scenes"][number]) => s.approved === true || s.start?.kind === "continue" || (!!s.storyboard && existsSync(s.storyboard));
+const clipAllowed = (s: ReturnType<typeof readPlan>["scenes"][number], step?: StepName) => step ? budgetReady(s) : s.approved === true;
+
 // Launches and stops a step's agent run (Task 6). It never touches step state: LocalCore.gate owns every transition.
 export interface StepStarter { start(project: string, sub: string, step: StepName): void; stop(project: string, sub: string): void }
 export type GateAction = "approve" | "changes" | "reopen" | "budget" | "resume" | "start";
@@ -544,9 +549,14 @@ export class LocalCore implements Core {
 
   // The step whose owner-approved budget may pay for clips without a click: Look or Assets, working and not paused.
   // Returns it when the whole batch fits; otherwise blocks the step and throws before anything is queued.
+  private fundingStep(project: string, sub: string): StepName | undefined {
+    const steps = readSteps(project, sub).steps;
+    return (["look", "assets"] as const).find((n) => steps[n].status === "working" && !steps[n].paused);
+  }
+
   private fundBatch(project: string, sub: string, costs: number[]): StepName | undefined {
     const steps = readSteps(project, sub).steps;
-    const step = (["look", "assets"] as const).find((n) => steps[n].status === "working" && !steps[n].paused);
+    const step = this.fundingStep(project, sub);
     if (!step || !costs.length) return undefined;
     if (costs.some((c) => !Number.isInteger(c) || c < 0)) throw new Error("Inside a step budget max_credits must be a whole number, 0 or more.");
     const short = costs.reduce((a, c) => a + c, 0) - remaining(steps[step]);
@@ -608,7 +618,7 @@ export class LocalCore implements Core {
     if (!st) return;
     const plan = readPlan(st.project, st.sub);
     const scene = plan.scenes.find((s) => s.n === st.scene);
-    if (!scene || !st.input || st.input !== sceneInput(plan, scene, st.kind) || (st.kind === "clip" && !scene.approved))
+    if (!scene || !st.input || st.input !== sceneInput(plan, scene, st.kind) || (st.kind === "clip" && !clipAllowed(scene, st.step)))
       throw new Error(`Scene ${st.scene} changed or is not approved - approve the scene and queue it again. Nothing spent.`);
   }
 
@@ -926,7 +936,7 @@ export class LocalCore implements Core {
       const st = job.params.studio;
       if (st?.project !== safeName(project) || st.sub !== safeName(sub) || !["held", "queued"].includes(job.status)) continue;
       const scene = current.scenes.find((s) => s.n === st.scene);
-      if (!scene || st.input !== sceneInput(current, scene, st.kind) || (st.kind === "clip" && !scene.approved))
+      if (!scene || st.input !== sceneInput(current, scene, st.kind) || (st.kind === "clip" && !clipAllowed(scene, st.step)))
         this.queue.cancel(job.id, `Scene ${st.scene} changed - approve the scene and queue it again. Nothing spent.`);
     }
     return { ok: true, rev: planRev(project, sub) };
@@ -1111,7 +1121,8 @@ export class LocalCore implements Core {
   }
 
   // approvedOnly applies to an explicit list too: unapproved scenes are skipped and reported, never queued.
-  private pickScenes(plan: ReturnType<typeof readPlan>, scenes: number[] | undefined, approvedOnly: boolean) {
+  // funded (a working step budget pays): the budget is the approval, so storyboarded and continue scenes qualify too.
+  private pickScenes(plan: ReturnType<typeof readPlan>, scenes: number[] | undefined, approvedOnly: boolean, funded?: StepName) {
     const all = scenes
       ? [...new Set(scenes)].map((n) => {
         const s = plan.scenes.find((x) => x.n === n);
@@ -1119,9 +1130,9 @@ export class LocalCore implements Core {
         return s;
       })
       : plan.scenes;
-    const picked = all.filter((s) => !approvedOnly || s.approved === true);
+    const picked = all.filter((s) => !approvedOnly || clipAllowed(s, funded));
     const skipped = all.filter((s) => !picked.includes(s)).map((s) => s.n);
-    if (!picked.length) throw new Error(approvedOnly ? "No approved scenes - approve storyboard frames first." : "Plan has no scenes.");
+    if (!picked.length) throw new Error(!approvedOnly ? "Plan has no scenes." : funded ? `Scene(s) ${skipped.join(", ")} have no storyboard yet - draw them with studio_storyboard first.` : "No approved scenes - approve storyboard frames first.");
     return { picked, skipped };
   }
 
@@ -1184,7 +1195,9 @@ export class LocalCore implements Core {
   async studio_generate(a: Args<"studio_generate">) {
     const { project, sub } = this.pick(a); const { scenes, duration, resolution, model, max_credits } = a;
     const plan = readPlan(project, sub);
-    const selection = this.pickScenes(plan, scenes, true);
+    // Funding is decided before selection: a budgeted batch may hold unapproved storyboarded scenes, an unfunded one never.
+    const funded = this.fundingStep(project, sub);
+    const selection = this.pickScenes(plan, scenes, true, funded);
     const skipped = selection.skipped;
     // A still scene's image is its final asset: no video job, no credits reserved.
     const skipped_stills = selection.picked.filter(isStill).map((s) => s.n);
@@ -1194,21 +1207,28 @@ export class LocalCore implements Core {
     picked.sort((x, y) => x.n - y.n);
     const ns = new Set(picked.map((s) => s.n));
     for (const s of picked) if (s.start?.kind === "continue" && !ns.has(s.start.from)) this.chainSource(plan, s.start.from, new Map());
+    // Throws (and blocks the step) when the funded batch does not fit: never a fallback to an approved-only held batch.
     const step = this.fundBatch(project, sub, picked.map((s) => this.clipCost(s, { duration, resolution, model, max_credits })));
+    if (!step && picked.some((s) => s.approved !== true)) throw new Error("Unapproved scenes can only be generated inside a working step budget.");
     const batch = randomUUID().slice(0, 8);
     const inBatch = new Map<number, Job>();
     const jobs = this.addFunded(picked, step, (s) => { const j = this.clipJob(plan, s, { duration, resolution, model, max_credits }, batch, inBatch, step); inBatch.set(s.n, j); return j; });
-    return { batch, ...(step ? { queued: picked.length, step, held: 0 } : { held: picked.length }), already_queued, quoted_max_credits: jobs.reduce((n, j) => n + j.params.max_credits, 0), ...(skipped.length && { skipped_unapproved: skipped }), ...(skipped_stills.length && { skipped_stills }) };
+    return {
+      batch, job_ids: jobs.map((j) => j.id), ...(step ? { queued: picked.length, step, held: 0 } : { held: picked.length }), already_queued, quoted_max_credits: jobs.reduce((n, j) => n + j.params.max_credits, 0),
+      ...(skipped.length && (funded ? { note: `Scene(s) ${skipped.join(", ")} have no storyboard yet, so they were left out - draw them with studio_storyboard first.` } : { skipped_unapproved: skipped })),
+      ...(skipped_stills.length && { skipped_stills }),
+    };
   }
 
   async studio_redo(a: Args<"studio_redo">) {
     const { project, sub } = this.pick(a); const { scene, prompt, duration, resolution, model } = a;
     const plan = readPlan(project, sub);
     if (plan.scenes.some((x) => x.n === scene && isStill(x))) throw new Error(`Scene ${scene} is a still; redo its image with studio_storyboard`);
-    const s = this.pickScenes(plan, [scene], true).picked[0];
+    const s = this.pickScenes(plan, [scene], true, this.fundingStep(project, sub)).picked[0];
     const existing = this.studioJobs(project, sub, "clip", scene).find((j) => ["held", "queued", "running"].includes(j.status));
     if (existing) return { batch: existing.batch, held: 0, already_queued: [scene], job_id: existing.id, quoted_max_credits: 0 };
     const step = this.fundBatch(project, sub, [this.clipCost(s, { duration, resolution, model })]);
+    if (!step && s.approved !== true) throw new Error("Unapproved scenes can only be generated inside a working step budget.");
     const batch = randomUUID().slice(0, 8);
     const [job] = this.addFunded([s], step, (x) => this.clipJob(plan, x, { duration, resolution, model, prompt }, batch, new Map(), step));
     return { batch, ...(step ? { queued: 1, step, held: 0 } : { held: 1 }), job_id: job.id, quoted_max_credits: job.params.max_credits };
