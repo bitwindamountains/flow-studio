@@ -73,7 +73,8 @@ header #chat-toggle:not(:disabled):hover, header #chat-toggle[aria-expanded=true
 #gate { flex: none; }
 #player { position: relative; flex: 1 1 auto; min-height: 240px; overflow: hidden; border-radius: 20px; background: var(--night); border: 1px solid rgba(255,255,255,.7); box-shadow: 0 18px 36px -30px rgba(15,19,38,.4); }
 #player img, #player video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
-.player-empty { position: absolute; inset: 0; display: grid; place-items: center; color: var(--night-dim); font-size: 15px; }
+.player-empty { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--night-dim); font-size: 15px; }
+.player-icon { font-size: 28px; opacity: .6; }
 .player-label { position: absolute; top: 12px; left: 12px; padding: 4px 10px; border-radius: 999px; background: rgba(15,19,38,.72); color: var(--starlight); font-size: 13px; pointer-events: none; }
 #strip-row { flex: none; display: flex; align-items: stretch; gap: 10px; min-width: 0; }
 #strip-bar { flex: none; display: flex; flex-direction: column; justify-content: center; gap: 6px; }
@@ -218,7 +219,7 @@ main.terminal-expanded #term { flex: 1; }
   main { padding: 12px; }
   #strip-row { flex-direction: column; gap: 8px; }
   #strip-bar { flex-direction: row; justify-content: space-between; }
-  #strip-filter button, #details-toggle { min-height: 44px; }
+  #strip-filter button, #details-toggle, #project-panel :is(button, select, input), #project-setup :is(button, select, input) { min-height: 44px; }
   #strip .tile { width: 84px; height: 64px; }
   #strip .group-label { min-height: 44px; }
   #views { padding: 18px; }

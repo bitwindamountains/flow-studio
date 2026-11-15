@@ -300,12 +300,16 @@ addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("project-panel
 $("details-toggle").onclick = () => toggle($("details-toggle"), $("right"));
 $("alerts").onclick = () => { $("alerts").setAttribute("aria-expanded", String($("alerts").getAttribute("aria-expanded") !== "true")); renderAlerts(); };
 // Notices stay out of the way behind the badge; the connection banner shows itself because it disables writes.
+// The badge names the worst alert from this fixed map (never server text), most severe first.
+let flowFailed = []; // names of the failed Flow health checks
+const HEALTH_LABEL = { "signed in": "Flow signed out", flow: "Flow not open" };
 function renderAlerts() {
-  const open = $("alerts").getAttribute("aria-expanded") === "true", health = !!$("health").dataset.active;
-  const count = [health, !OWNER, !dataFresh].filter(Boolean).length;
-  $("alerts").hidden = !count;
-  $("alerts").textContent = "! " + count;
-  $("alerts").setAttribute("aria-label", `Alerts: ${count}`);
+  const open = $("alerts").getAttribute("aria-expanded") === "true", health = flowFailed.length > 0;
+  const flow = HEALTH_LABEL[["signed in", "flow"].find((n) => flowFailed.includes(n))] || "Flow check failed";
+  const labels = [!OWNER && "View-only window", health && flow, !dataFresh && "Offline"].filter(Boolean);
+  $("alerts").hidden = !labels.length;
+  $("alerts").textContent = labels.length > 1 ? `${labels[0]} (${labels.length})` : labels[0] || "";
+  $("alerts").setAttribute("aria-label", `Alerts: ${labels.length}, worst: ${labels[0] || "none"}`);
   $("health").hidden = !(open && health);
   $("reloaded").hidden = !(open && !OWNER);
 }
@@ -317,7 +321,7 @@ function startNewAd() {
   $("new-project-name").value = project;
   $("new-sub-name").value = `ad-${String(number).padStart(2, "0")}`;
   $("new-aspect").value = data.plan?.aspect || "9:16";
-  $("project-setup-copy").textContent = "Start a fresh video at Ideas. Your finished video and its renders stay available in the Video picker.";
+  $("project-setup-copy").textContent = "Start a fresh video at Idea. Your finished video and its renders stay available in the Video picker.";
   $("create-project").textContent = "Create video";
   $("project-setup").hidden = false;
   $("new-project-toggle").setAttribute("aria-expanded", "true");
@@ -382,9 +386,15 @@ $("sub").onchange = projectChanged;
 loadProjects();
 
 // ---- health banner: /api/health/flow lists the Flow checks that failed (textContent only) ----
-fetch("/api/health/flow", { headers: { "x-flow-token": TOKEN } }).then((r) => (r.ok ? r.json() : null)).then((h) => {
-  if (h && h.ok === false && h.message) { $("health").textContent = "Flow check: " + h.message; $("health").dataset.active = "1"; renderAlerts(); }
-}).catch(() => {});
+function checkHealth() {
+  return fetch("/api/health/flow", { headers: { "x-flow-token": TOKEN } }).then((r) => (r.ok ? r.json() : null)).then((h) => {
+    const failed = h && h.ok === false && Array.isArray(h.checks) ? h.checks.filter((c) => c && !c.ok).map((c) => String(c.name)) : [];
+    flowFailed = failed.length || !(h && h.ok === false && h.message) ? failed : ["unknown"];
+    $("health").textContent = flowFailed.length ? "Flow check: " + h.message : "";
+    renderAlerts();
+  }).catch(() => {});
+}
+checkHealth();
 
 // ======== step views ========
 // Plan text is written by Claude: every string goes in through textContent, never innerHTML.
@@ -767,13 +777,17 @@ function renderPlayer(sel) {
     const r = renders.find((x) => sel?.kind === "render" && x.version === sel.version) || renders[renders.length - 1];
     label = `Render v${r.version}`; src = r.path; tag = "video";
   }
-  const el = $("player"), key = label + "\n" + (src || "");
+  const empty = s ? "" : have() ? "Select a scene" : "Choose a project";
+  const el = $("player"), key = label + "\n" + (src || "") + "\n" + empty;
   if (el.dataset.key === key) return; // keep a playing video playing across refreshes
   el.dataset.key = key;
   el.setAttribute("aria-label", label);
-  const shown = !src ? h("p", { class: "player-empty" }, s ? "Not made yet" : have() ? "Select a scene" : "Choose a project")
-    : tag === "img" ? h("img", { src: media(src), alt: label }) : h("video", { src: media(src), controls: true, preload: "metadata", playsinline: true });
-  el.replaceChildren(shown, s || src ? h("span", { class: "player-label", "aria-hidden": "true" }, label) : null);
+  // A scene with no file yet, or one that fails to load, gets a quiet placeholder instead of the broken-media icon.
+  const placeholder = () => h("p", { class: "player-empty" }, s ? h("span", { class: "player-icon", "aria-hidden": "true" }, isStillScene(s) ? "\u25a3" : "\u25b6") : null, s ? label : empty);
+  const fail = () => { if (el.dataset.key === key) el.replaceChildren(placeholder()); };
+  el.replaceChildren(...[!src ? placeholder()
+    : tag === "img" ? h("img", { src: media(src), alt: label, onerror: fail }) : h("video", { src: media(src), controls: true, preload: "metadata", playsinline: true, onerror: fail }),
+    src ? h("span", { class: "player-label", "aria-hidden": "true" }, label) : null].filter(Boolean));
 }
 function renderDesk() {
   $("project-name").textContent = have() ? `${cur().project} · ${cur().sub}` : "Projects";

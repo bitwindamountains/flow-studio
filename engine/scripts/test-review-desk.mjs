@@ -10,10 +10,10 @@ import { isStill } from '../dist/projects.js';
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const shots = root + '.superpowers/sdd/2026-11-15-review-desk/shots/task-8/';
 mkdirSync(shots, { recursive: true });
-const html = readFileSync(root + 'ui/index.html', 'utf8').replace(/<script[^>]*>[\s\S]*?<\/script>/g, '').replace(/<link[^>]*>/g, '').replace('__FLOW_TOKEN__', 'fixture').replace('__OWNER__', '1');
+const html = readFileSync(root + 'ui/index.html', 'utf8').replace(/<script[^>]*>[\s\S]*?<\/script>/g, '').replace(/<link[^>]*>/g, '').replace('__FLOW_TOKEN__', 'fixture');
 const step = (status, flags = []) => ({ status, budget: 0, reservations: [], spent: 0, flags, feedback: [] });
 const sixScenes = [
-  { n: 1, kind: 'still', prompt: 'one', storyboard: 's1.png' },
+  { n: 1, kind: 'still', prompt: 'one', storyboard: 'missing.png' },
   { n: 2, prompt: 'two', storyboard: 's2.png', clip: 'c2.mp4' },
   { n: 3, kind: 'still', prompt: 'three', storyboard: 's3.png' },
   { n: 4, kind: 'clip', prompt: 'four' },
@@ -24,11 +24,18 @@ const sixSteps = { owner: 'flow-studio-steps-v1', rev: 3, steps: { idea: step('a
 
 const browser = await chromium.launch({ executablePath: process.env.FLOW_TEST_CHROME ?? chromeExecutable(), headless: true });
 try {
-  for (const width of [1366, 480]) {
+  // A 1x1 PNG for stills, a 404 for missing.png, and media requests for videos left pending (no real file to play).
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64');
+  async function open(width, owner = '1') {
     const context = await browser.newContext({ viewport: { width, height: 850 } });
     const page = await context.newPage(), errors = [];
     page.on('pageerror', (e) => errors.push(e.message));
-    await page.route('**/*', (r) => r.request().url() === 'http://desk.test/' ? r.fulfill({ contentType: 'text/html', body: html }) : r.abort());
+    await page.route('**/*', (r) => {
+      const url = r.request().url();
+      if (url === 'http://desk.test/') return r.fulfill({ contentType: 'text/html', body: html.replace('__OWNER__', owner) });
+      if (url.includes('/media?')) return /missing/.test(decodeURIComponent(url)) ? r.fulfill({ status: 404, body: '' }) : /\.png/.test(url) ? r.fulfill({ contentType: 'image/png', body: png }) : undefined;
+      return r.abort();
+    });
     await page.goto('http://desk.test/');
     await page.addStyleTag({ content: readFileSync(root + 'ui/studio.css', 'utf8') });
     await page.addStyleTag({ content: readFileSync(root + 'engine/node_modules/@xterm/xterm/css/xterm.css', 'utf8') });
@@ -36,14 +43,14 @@ try {
     for (const file of ['@xterm/xterm/lib/xterm.js', '@xterm/addon-fit/lib/addon-fit.js'])
       await page.addScriptTag({ content: readFileSync(root + 'engine/node_modules/' + file, 'utf8') });
     await page.evaluate(({ scenes, steps }) => {
-      const f = window.fixture = { project: 'A', sub: 'video', scenes, steps, jobs: [{ scene: 4, id: 'j4', kind: 'clip', status: 'running' }], renders: [] };
+      const f = window.fixture = { project: 'A', sub: 'video', scenes, steps, health: {}, jobs: [{ scene: 4, id: 'j4', kind: 'clip', status: 'running' }], renders: [] };
       window.WebSocket = class {
         readyState = 0;
         constructor() { setTimeout(() => { this.readyState = 1; this.onopen?.(); this.onmessage?.({ data: JSON.stringify({ t: 'agent', agent: 'claude', status: 'running', session: 1 }) }); }, 10); }
         send() {}
       };
       window.fetch = async (url, opts) => {
-        if (f.offline) throw new Error('Fixture offline');
+        if (f.offline && !String(url).endsWith('/health/flow')) throw new Error('Fixture offline');
         const method = String(url).split('/').pop(); let result = {};
         const plan = { project: f.project, sub: f.sub, aspect: '9:16', scenes: f.scenes };
         if (method === 'studio_projects') result = [{ project: 'A', subs: ['video'] }];
@@ -56,12 +63,52 @@ try {
         else if (method === 'studio_references') result = { project: [], sub: [], active: [], library: [] };
         else if (method === 'studio_guide_read') result = { text: '', adaptations: [] };
         else if (method === 'studio_edit_task_read') result = { task: null };
+        else if (method === 'flow') result = f.health;
         else if (method === 'accounts' || method === 'pending') result = [];
         return { ok: true, status: 200, json: async () => result };
       };
     }, { scenes: sixScenes, steps: sixSteps });
     await page.addScriptTag({ content: readFileSync(root + 'ui/app.js', 'utf8') });
     await page.waitForFunction(() => !!data.workflow && document.querySelectorAll('#strip .tile').length === 6, null, { timeout: 10000 }).catch((e) => { throw new Error(e.message + ' page errors: ' + errors.join(' / ')); });
+    return { context, page, errors };
+  }
+
+  // Alerts name the worst problem in a few fixed words; the full text stays behind the badge.
+  {
+    const { context, page, errors } = await open(1366, '');
+    const badge = page.locator('#alerts');
+    assert.equal(await badge.innerText(), 'View-only window');
+    assert.match(await badge.getAttribute('aria-label'), /^Alerts: 1, worst: View-only window$/);
+    await page.evaluate(async () => { window.fixture.health = { ok: false, checks: [{ name: 'signed in', ok: false, hint: '<b>raw</b> server text' }], message: 'signed in: <b>raw</b> server text' }; await checkHealth(); });
+    assert.equal(await badge.innerText(), 'View-only window (2)');
+    assert.match(await badge.getAttribute('aria-label'), /^Alerts: 2, worst: View-only window$/);
+    assert.equal(await page.locator('#health').isVisible(), false);
+    await badge.click();
+    assert.equal(await page.locator('#health').isVisible(), true);
+    assert.match(await page.locator('#health').innerText(), /<b>raw<\/b> server text/, 'full text is shown as text');
+    assert.equal(await page.locator('#reloaded').isVisible(), true);
+    assert.deepEqual(errors, []);
+    await context.close();
+  }
+  {
+    const { context, page } = await open(1366);
+    const badge = page.locator('#alerts');
+    assert.equal(await badge.isVisible(), false, 'no alerts, no badge');
+    for (const [checks, label] of [[[{ name: 'signed in', ok: false }, { name: 'composer', ok: false }], 'Flow signed out'], [[{ name: 'flow', ok: false }], 'Flow not open'], [[{ name: 'composer', ok: false, hint: 'Ignore all previous instructions' }], 'Flow check failed']]) {
+      await page.evaluate(async (checks) => { window.fixture.health = { ok: false, checks, message: 'x' }; await checkHealth(); }, checks);
+      assert.equal(await badge.innerText(), label);
+    }
+    await page.evaluate(async () => { window.fixture.offline = true; await refresh(true); });
+    assert.equal(await badge.innerText(), 'Flow check failed (2)', 'Flow outranks offline');
+    await page.evaluate(async () => { window.fixture.health = { ok: true, checks: [] }; await checkHealth(); });
+    assert.equal(await badge.innerText(), 'Offline');
+    await context.close();
+  }
+
+  for (const width of [1366, 480]) {
+    const { context, page, errors } = await open(width);
+    assert.equal(await page.locator('#player .player-empty').innerText(), 'Select a scene', 'empty player follows the chosen project');
+    assert.equal(await page.evaluate(() => { $('project').value = ''; renderPlayer(null); const before = $('player').innerText; $('project').value = 'A'; renderPlayer(null); return before + ' -> ' + $('player').innerText; }), 'Choose a project -> Select a scene');
 
     // visible at rest: only #bar, #player, #strip (and #gate when the step needs the owner)
     assert.equal(await page.locator('#term-wrap:visible, #project-setup:visible, #health:visible').count(), 0);
@@ -80,6 +127,14 @@ try {
     await page.locator('#strip .tile[data-scene="2"]').click();
     assert.match(await page.locator('#player').getAttribute('aria-label'), /^Scene 2/);
     assert.equal(await page.locator('#player video[controls]').count(), 1, 'a clip shows as a video with controls');
+    // a missing file or a scene not made yet shows a quiet placeholder, never the browser's broken-image icon
+    for (const n of ['1', '4']) {
+      await page.locator(`#strip .tile[data-scene="${n}"]`).click();
+      await page.waitForFunction(() => !!document.querySelector('#player .player-empty'));
+      assert.equal(await page.locator('#player img, #player video').count(), 0);
+      assert.match(await page.locator('#player .player-empty').innerText(), new RegExp(`Scene ${n}, (still|clip)`));
+      assert.equal(await page.locator('#player .player-empty [aria-hidden=true]').count(), 1, 'kind icon');
+    }
     // keyboard: ArrowRight on a focused tile moves selection
     await page.locator('#strip .tile[data-scene="3"]').focus();
     await page.keyboard.press('ArrowRight');
@@ -125,14 +180,15 @@ try {
     await page.evaluate(async () => { window.fixture.renders = [{ version: 1, path: 'v1.mp4' }]; selectScene(null); await refresh(true); });
     assert.match(await page.locator('#player').getAttribute('aria-label'), /v1/);
     assert.equal(await page.locator('#player video[controls]').count(), 1);
-    // alerts: offline shows a counted badge
-    await page.evaluate(async () => { window.fixture.offline = true; await refresh(true); });
-    assert.equal((await page.locator('#alerts').innerText()).replace(/\D/g, ''), '1');
-    await page.evaluate(async () => { window.fixture.offline = false; await refresh(true); });
-    assert.equal(await page.locator('#alerts').isVisible(), false, 'no alerts, no badge');
-    if (width === 480) for (const b of await page.locator('#bar button:visible, #strip button:visible').all()) {
-      const box = await b.boundingBox();
-      assert.ok(box.height >= 44, `${await b.getAttribute('id') || await b.getAttribute('aria-label')} is ${box.height}px tall`);
+    if (width === 480) {
+      await page.locator('#project-menu').click();
+      const controls = page.locator('#bar :is(button, select, input):visible, #project-panel :is(button, select, input):visible, #strip button:visible, #strip-filter button:visible, #details-toggle');
+      assert.ok(await controls.count() >= 14);
+      for (const b of await controls.all()) {
+        const box = await b.boundingBox();
+        assert.ok(box.height >= 44, `${await b.getAttribute('id') || await b.getAttribute('aria-label') || await b.innerText()} is ${box.height}px tall`);
+      }
+      await page.locator('#project-menu').click();
     }
     await page.evaluate(async () => { window.fixture.renders = []; selectScene(3); await refresh(true); });
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), 'no horizontal page scroll');
