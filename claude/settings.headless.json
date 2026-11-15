@@ -3,12 +3,21 @@
     "defaultMode": "dontAsk",
     "allow": [
       "mcp__flow-studio__studio_*",
+      "mcp__flow-studio__flow_wait",
       "Read(//d/flow-studio/remotion/**)",
+      "Read(//d/flow-studio/projects/**/*.png)",
+      "Read(//d/flow-studio/projects/**/*.jpg)",
+      "Read(//d/flow-studio/projects/**/*.jpeg)",
+      "Read(//d/flow-studio/projects/**/*.webp)",
       "Edit(//d/flow-studio/remotion/**)",
       "Bash(npx remotion render *)",
       "Bash(npx.cmd remotion render *)",
       "PowerShell(npx remotion render *)",
-      "PowerShell(npx.cmd remotion render *)"
+      "PowerShell(npx.cmd remotion render *)",
+      "Bash(npx remotion still *)",
+      "Bash(npx.cmd remotion still *)",
+      "PowerShell(npx remotion still *)",
+      "PowerShell(npx.cmd remotion still *)"
     ],
     "deny": [
       "mcp__flow-studio__studio_new",
