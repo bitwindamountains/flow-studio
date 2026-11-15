@@ -38,7 +38,7 @@ export function readSteps(p: string, s: string): StepState {
 export function deriveSteps(f: WorkflowFacts): StepState {
   const st = blankState(), scenes = f.plan.scenes, fact = (n: number) => f.scenes.find(x => x.n === n);
   const ok: Record<Exclude<StepName, "edit">, boolean> = {
-    idea: !!f.plan.chosen,
+    idea: !!f.plan.chosen && !!f.plan.options?.some(o => o.id === f.plan.chosen), // same fact as deriveWorkflow
     plan: !!scenes.length && f.scenes.length === scenes.length && f.scenes.every(x => x.validPlan && x.validSource),
     look: !!scenes.length && scenes.every(s => s.approved === true && (!!fact(s.n)?.storyboardExists || s.start?.kind === "continue")),
     assets: !!scenes.length && scenes.every(s => s.kept === true && (isStill(s) ? !!fact(s.n)?.storyboardExists : !!fact(s.n)?.clipExists && s.stale === undefined)),

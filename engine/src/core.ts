@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { z } from "zod";
@@ -492,7 +492,9 @@ export class LocalCore implements Core {
   // Owner route only (/api/step in server.ts), never an MCP tool: every owner gate action and its effects.
   gate(a: { project: string; sub: string; step: StepName; action: GateAction; text?: string; scene?: number; at?: number; credits?: number; budgets?: Partial<Record<"look" | "assets", number>> }): StepState {
     const { project, sub } = this.pick(a), { step } = a;
+    const stepsFile = join(subDir(project, sub), "steps.json"), seeded = !existsSync(stepsFile);
     seedSteps(project, sub, this.stepState(project, sub));
+    try {
     const run = (n: StepName) => { startStep(project, sub, n); this.starter.start(project, sub, n); };
     switch (a.action) {
       case "approve": {
@@ -544,6 +546,11 @@ export class LocalCore implements Core {
         run(step);
         break;
       }
+    }
+    } catch (e) {
+      // A rejected first action leaves no steps.json behind (unless something already changed it).
+      if (seeded && readSteps(project, sub).rev === 0) rmSync(stepsFile, { force: true });
+      throw e;
     }
     return this.stepState(project, sub);
   }

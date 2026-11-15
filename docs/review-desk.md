@@ -1,6 +1,6 @@
 # Review desk
 
-An agent does each production step on its own and the owner approves each step in the Studio window. Design: `docs/superpowers/specs/2026-11-15-review-desk-design.md`. Status: committed locally on `build/flow-studio`, not pushed, merged or released. 260 unit tests passed at HEAD `dc3637f` plus the Task 11 change. No live or paid check has been run for any of this work.
+An agent does each production step on its own and the owner approves each step in the Studio window. Design: `docs/superpowers/specs/2026-11-15-review-desk-design.md`. Status: committed locally on `build/flow-studio`, not pushed, merged or released. 262 unit tests pass (see `git log` on `build/flow-studio` for HEAD). No live or paid check has been run for any of this work.
 
 ## The five gates
 

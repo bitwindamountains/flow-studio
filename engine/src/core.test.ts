@@ -554,7 +554,7 @@ test("an old sub with kept clips and a render can be approved at Edit as the fir
   P.createSub("Gate", "gold", "16:9");
   const dir = join(home, "oldmedia"); mkdirSync(dir, { recursive: true });
   const still = join(dir, "s.png"), clip = join(dir, "c.mp4"); writeFileSync(still, "i"); writeFileSync(clip, "c");
-  const plan = P.readPlan("Gate", "gold"); plan.chosen = "idea"; plan.scenes = [{ n: 1, prompt: "p", storyboard: still, approved: true, clip, kept: true }] as never; P.writePlan(plan);
+  const plan = P.readPlan("Gate", "gold"); plan.options = [{ id: "idea", title: "t", hook: "h", story: "s", scenes: 1 }]; plan.chosen = "idea"; plan.scenes = [{ n: 1, prompt: "p", storyboard: still, approved: true, clip, kept: true }] as never; P.writePlan(plan);
   mkdirSync(H.rendersDir("Gate", "gold"), { recursive: true }); writeFileSync(join(H.rendersDir("Gate", "gold"), "v1.mp4"), "r");
   const file = join(P.subDir("Gate", "gold"), "steps.json"), before = JSON.stringify(P.readPlan("Gate", "gold"));
   assert.equal(existsSync(file), false);
@@ -564,4 +564,19 @@ test("an old sub with kept clips and a render can be approved at Edit as the fir
   assert.deepEqual(S.STEP_ORDER.map((k) => S.readSteps("Gate", "gold").steps[k].status), ["approved", "approved", "approved", "approved", "approved"]);
   assert.equal(JSON.stringify(P.readPlan("Gate", "gold")).replace(/"rev":\d+/, ""), before.replace(/"rev":\d+/, ""));
   assert.deepEqual(starter.calls, []);
+});
+
+test("startup pause creates no steps.json for an old sub-project, and a rejected first gate action leaves none", async () => {
+  const { LocalCore } = await import("./core.js");
+  const P = await import("./projects.js");
+  const core = new LocalCore({ runner: async () => [], queueOpts: { file: join(mkdtempSync(join(tmpdir(), "flow-old-restart-")), "queue.json"), pauseMs: [0, 0] } });
+  P.createSub("Gate", "goldr", "16:9");
+  const file = join(P.subDir("Gate", "goldr"), "steps.json");
+  core.queue.pause("fixture");
+  core.queue.restore(); // runs the startup pause over every sub-project
+  assert.equal(existsSync(file), false);
+  assert.throws(() => core.gate({ project: "Gate", sub: "goldr", step: "plan", action: "approve" }), /not ready/i);
+  assert.equal(existsSync(file), false, "a rejected action seeds nothing");
+  core.gate({ project: "Gate", sub: "goldr", step: "idea", action: "start" });
+  assert.equal(existsSync(file), true);
 });
