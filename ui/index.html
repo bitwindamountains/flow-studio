@@ -26,8 +26,8 @@
     <li data-step="assets" data-status="idle">Assets</li>
     <li data-step="edit" data-status="idle">Edit</li>
   </ol>
-  <button id="alerts" type="button" aria-expanded="false" hidden>0</button>
-  <button id="chat-toggle" type="button" aria-expanded="false" aria-controls="term-wrap">Chat</button>
+  <button id="alerts" type="button" aria-expanded="false" aria-controls="alerts-list" hidden>0</button>
+  <button id="chat-toggle" type="button" aria-expanded="false" aria-controls="chat">Chat</button>
 </header>
 <div id="project-panel" class="glass workspace-bar" hidden>
   <label class="workspace-picker">Project <select id="project" aria-label="Project"></select></label>
@@ -42,16 +42,16 @@
   <div class="row"><input id="new-project-name" aria-label="New project" placeholder="Project"><input id="new-sub-name" aria-label="New video" placeholder="Video"><select id="new-aspect" aria-label="Aspect"><option>9:16</option><option>16:9</option></select><button id="create-project" type="button">Create project</button></div>
 </div>
 <div id="activity-panel" hidden aria-label="Pending generation approvals" style="max-height:35vh;overflow:auto;padding:0 20px"></div>
-<div id="health" hidden></div>
-<div id="connection" role="status"><span id="connection-message">Connecting to Studio…</span> <button id="retry-connection" type="button">Retry connection</button> <button id="reload-studio" type="button">Reload Studio</button></div>
-<div id="reloaded" hidden>This window is not the owner's studio window, so it can't approve credits. Close this window, reopen Flow Studio.cmd, and choose Yes when asked to restart Studio. Wait for any active work to finish first.</div>
+<div id="connection" role="status"><span id="connection-message">Connecting</span> <button id="retry-connection" type="button">Retry connection</button> <button id="reload-studio" type="button">Reload Studio</button></div>
 <div id="toast" role="status" hidden></div>
+<div id="desk">
 <main>
   <p id="gate-live" class="sr-only" aria-live="polite"></p>
   <section id="gate" aria-label="Review" hidden>
     <div class="gate-text">
       <p id="gate-step"><span id="gate-icon" aria-hidden="true"></span> <span id="gate-label"></span></p>
       <p id="gate-summary"></p>
+      <button id="gate-plan" type="button" aria-expanded="false" aria-controls="plan-reader" hidden>Read plan</button>
       <button id="gate-more" type="button" aria-expanded="false" aria-controls="gate-summary" hidden>More</button>
       <p id="gate-counts"></p>
     </div>
@@ -79,39 +79,32 @@
   <div id="strip-row">
   <div id="strip-bar">
     <div id="strip-filter" role="group" aria-label="Show scenes"><button type="button" aria-pressed="true" data-filter="all">All</button><button type="button" aria-pressed="false" data-filter="flag">Flagged</button></div>
-    <button id="details-toggle" type="button" aria-expanded="false" aria-controls="right">Details</button>
+    <button id="details-toggle" type="button" aria-expanded="false" aria-controls="details">Details</button>
   </div>
   <div id="strip" aria-label="Scenes"></div>
   </div>
-  <div id="right" hidden>
-    <nav id="tabs" role="tablist" aria-label="Production workflow">
-      <button role="tab" data-view="ideas" aria-selected="true">1 Ideas</button>
-      <button role="tab" data-view="plan" aria-selected="false">2 Plan</button>
-      <button role="tab" data-view="storyboard" aria-selected="false">3 Storyboard</button>
-      <button role="tab" data-view="generate" aria-selected="false">4 Generate</button>
-      <button role="tab" data-view="edit" aria-selected="false">5 Edit</button>
-    </nav>
-    <h1 id="stage-heading">Ideas</h1>
-    <div id="workflow" role="status" aria-label="Next workflow step"></div>
-    <div id="views">
-      <section id="view-ideas"></section>
-      <section id="view-plan" hidden></section>
-      <section id="view-storyboard" hidden></section>
-      <section id="view-generate" hidden></section>
-      <section id="view-edit" hidden></section>
-    </div>
+</main>
+<aside id="details" class="drawer" role="region" aria-label="Details" hidden>
+  <div class="drawer-head"><h2>Details</h2><button class="drawer-close" type="button" aria-label="Close details">&#215;</button></div>
+  <div class="drawer-body">
+    <section id="details-scene" hidden></section>
+    <section id="details-video"></section>
   </div>
-  <div id="split" role="separator" aria-orientation="horizontal" aria-label="Resize agent panel (arrow keys)" tabindex="0" hidden></div>
-  <div id="term-wrap" aria-label="Agent conversation" hidden>
+</aside>
+<aside id="chat" class="drawer" role="region" aria-label="Chat" hidden>
+  <div class="drawer-head">
+    <div id="chat-tabs" role="tablist" aria-label="Chat mode"><button id="chat-tab-message" role="tab" type="button" aria-selected="true" aria-controls="composer">Message</button><button id="chat-tab-terminal" role="tab" type="button" aria-selected="false" aria-controls="term">Terminal</button></div>
+    <button class="drawer-close" type="button" aria-label="Close chat">&#215;</button>
+  </div>
+  <div id="term-wrap" aria-label="Agent conversation">
     <div id="term-bar">
       <label>Agent <select id="agent" aria-label="Terminal agent"><option value="claude">Claude Code</option><option value="codex">Codex CLI</option></select></label>
       <span id="agent-status" role="status" aria-live="polite">Connecting…</span>
       <div class="term-actions"><button id="switch-agent" type="button">Switch agent</button><button id="restart" type="button">Restart</button><button id="expand-terminal" type="button" aria-pressed="false">Expand terminal</button></div>
+      <details class="why"><summary>Why?</summary><p id="agent-help">One conversation across all steps. Switch or Restart starts a new chat. Use the Terminal tab for sign-in and CLI prompts; Message attaches what you are viewing.</p></details>
     </div>
-    <p id="agent-help">One conversation across all stages. Switch or Restart starts a new chat. Use Terminal for sign-in and CLI prompts.</p>
-    <div id="term"></div>
-    <div id="composer">
-      <div class="row"><button id="mode-terminal" type="button" aria-pressed="true">Terminal</button><button id="mode-message" type="button" aria-pressed="false">Message</button></div>
+    <div id="term" role="tabpanel" aria-labelledby="chat-tab-terminal" hidden></div>
+    <div id="composer" role="tabpanel" aria-labelledby="chat-tab-message">
       <p id="context-target">Viewing: no project selected</p>
       <p id="context-sync" role="status"></p>
       <textarea id="message-input" aria-label="Message to agent" placeholder="Ask for a change to the selected scene…" disabled></textarea>
@@ -120,7 +113,26 @@
       <p id="message-status" role="status">Terminal input has no automatic screen context.</p>
     </div>
   </div>
-</main>
+</aside>
+<aside id="alerts-list" class="drawer" role="region" aria-label="Alerts" hidden>
+  <div class="drawer-head"><h2>Alerts</h2><button class="drawer-close" type="button" aria-label="Close alerts">&#215;</button></div>
+  <div class="drawer-body">
+    <ul class="alert-items">
+      <li id="alert-owner" hidden><details><summary>View-only window</summary><p id="reloaded">This window is not the owner's studio window, so it can't approve credits. Close this window, reopen Flow Studio.cmd, and choose Yes when asked to restart Studio. Wait for any active work to finish first.</p></details></li>
+      <li id="alert-health" hidden><details><summary id="health-label">Flow check failed</summary><p id="health"></p></details></li>
+      <li id="alert-offline" hidden><details><summary>Offline</summary><p id="connection-full"></p></details></li>
+      <li id="alert-stale" hidden><details><summary>Stale kept clips</summary><p id="stale-full"></p></details></li>
+      <li id="alert-held" hidden><details><summary>Jobs await approval</summary><p id="held-full"></p><button id="open-jobs" type="button">Open jobs</button></details></li>
+    </ul>
+    <ul id="lesson-items" class="alert-items"></ul>
+    <p id="alerts-empty" class="dim">No alerts</p>
+  </div>
+</aside>
+<aside id="plan-reader" class="drawer" role="region" aria-label="Production plan" hidden>
+  <div class="drawer-head"><h2>Plan</h2><button class="drawer-close" type="button" aria-label="Close plan">&#215;</button></div>
+  <div id="plan-text" class="drawer-body"></div>
+</aside>
+</div>
 <script src="/vendor/xterm.js"></script>
 <script src="/vendor/addon-fit.js"></script>
 <script src="/vendor/app.js"></script>

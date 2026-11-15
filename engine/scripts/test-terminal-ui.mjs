@@ -33,10 +33,13 @@ try {
   await page.addScriptTag({content:readFileSync(root+'ui/app.js','utf8')});
   await page.waitForFunction(()=>document.querySelector('#agent-status').textContent.includes('running'));
   await page.locator('#chat-toggle').click();
+  await page.locator('#chat-tab-terminal').click();
   const workspaceBox=await page.locator('#player').boundingBox(),terminalBox=await page.locator('#term-wrap').boundingBox();
-  assert.ok(terminalBox.y>=workspaceBox.y+workspaceBox.height-1,'terminal must be below the workspace at every width');
-  if(width>=1024) assert.ok((await page.locator('#player').boundingBox()).height>=260,'the default agent dock must leave a useful working canvas on a laptop');
-  assert.equal(await page.locator('#split').getAttribute('aria-orientation'),'horizontal');
+  // Chat is a drawer beside the desk on wide screens and a bottom sheet on narrow ones.
+  if(width>=1024) assert.ok(terminalBox.x>=workspaceBox.x+workspaceBox.width-1,'terminal must sit beside the workspace on wide screens');
+  else assert.ok(Math.abs(terminalBox.y+terminalBox.height-800)<=2,'terminal must be a bottom sheet on narrow screens');
+  if(width>=1024) assert.ok((await page.locator('#player').boundingBox()).height>=260,'the agent drawer must leave a useful working canvas on a laptop');
+  assert.ok((await page.locator('#term').boundingBox()).height>=200,'the terminal tab has usable height');
   assert.equal(await page.getByRole('button',{name:'Expand terminal',exact:true}).count(),1);
   assert.equal(await page.getByRole('button',{name:'Switch agent',exact:true}).isDisabled(),true);
   await page.getByLabel('Terminal agent',{exact:true}).selectOption('codex');
@@ -45,11 +48,14 @@ try {
   assert.equal(await page.evaluate(()=>document.activeElement.classList.contains('xterm-helper-textarea')),true);
   await page.evaluate(()=>window.fixture.socket.onmessage({data:JSON.stringify({t:'output',data:'{"t":"agent","agent":"claude","status":"exited","session":99}'})}));
   assert.equal(await page.getByLabel('Terminal agent',{exact:true}).inputValue(),'codex','terminal output cannot spoof control messages');
-  await page.evaluate(()=>navigateTo('edit'));
-  await page.waitForFunction(()=>document.querySelector('#view-edit button.big')?.disabled===false);
-  assert.ok(!(await page.locator('#view-edit').innerText()).includes('null'), 'optional Edit elements must not render null text');
+  await page.locator('#chat .drawer-close').click(); // a narrow sheet covers the strip bar
+  await page.locator('#details-toggle').click();
+  await page.waitForFunction(()=>document.querySelector('#details-video button.big')?.disabled===false);
+  assert.ok(!(await page.locator('#details-video').innerText()).includes('null'), 'optional Edit elements must not render null text');
   await page.evaluate(()=>{window.fixture.status='exited';window.fixture.exitCode=1;window.fixture.state()});
-  await page.waitForFunction(()=>document.querySelector('#view-edit button.big')?.disabled===true);
+  await page.waitForFunction(()=>document.querySelector('#details-video button.big')?.disabled===true);
+  await page.locator('#details .drawer-close').click();
+  await page.locator('#chat-toggle').click();
   assert.equal(await page.getByRole('status').filter({hasText:'Codex CLI · exited (1)'}).count(),1);
   await page.getByRole('button',{name:'Restart',exact:true}).click();
   await page.waitForFunction(()=>document.querySelector('#agent-status').textContent==='Codex CLI · running');

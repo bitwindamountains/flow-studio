@@ -45,7 +45,7 @@ try {
     for (const file of ['@xterm/xterm/lib/xterm.js', '@xterm/addon-fit/lib/addon-fit.js'])
       await page.addScriptTag({ content: readFileSync(root + 'engine/node_modules/' + file, 'utf8') });
     await page.evaluate(({ scenes, steps }) => {
-      const f = window.fixture = { project: 'A', sub: 'video', scenes, steps, health: {}, jobs: [{ scene: 4, id: 'j4', kind: 'clip', status: 'running' }], renders: [], posts: [], replies: [] };
+      const f = window.fixture = { project: 'A', sub: 'video', scenes, steps, health: {}, jobs: [{ scene: 4, id: 'j4', kind: 'clip', status: 'running' }], renders: [], posts: [], replies: [], calls: [], lessons: [], planText: '', notes: { studio_notes: { text: '', rev: '1' }, studio_edit_notes: { text: '', rev: '1' } } };
       window.WebSocket = class {
         readyState = 0;
         constructor() { setTimeout(() => { this.readyState = 1; this.onopen?.(); this.onmessage?.({ data: JSON.stringify({ t: 'agent', agent: 'claude', status: 'running', session: 1 }) }); }, 10); }
@@ -54,6 +54,7 @@ try {
       window.fetch = async (url, opts) => {
         if (f.offline && !String(url).endsWith('/health/flow')) throw new Error('Fixture offline');
         const method = String(url).split('/').pop(); let result = {};
+        f.calls.push({ url: String(url).replace(/^.*\/api\//, ''), body: typeof opts?.body === 'string' ? JSON.parse(opts.body) : opts?.body ? '[file]' : undefined });
         if (method === 'step') {
           f.posts.push(JSON.parse(opts.body));
           if (f.hold) await f.hold;
@@ -66,9 +67,16 @@ try {
         else if (method === 'studio_select') { const b = JSON.parse(opts.body); f.project = b.project; f.sub = b.sub; }
         else if (method === 'studio_plan_read') result = structuredClone(plan);
         else if (method === 'studio_workflow_read') result = window.deriveWorkflow({ plan, scenes: f.scenes.map(s => ({ n: s.n, validPlan: true, validSource: true, storyboardExists: !!s.storyboard, clipExists: !!s.clip, hasTakes: false, hasActiveJob: false })), renderVersions: f.renders.map(r => r.version), editTaskPhase: null });
-        else if (method === 'studio_status') (f.statusCalls = (f.statusCalls || 0) + 1), result = { scenes: f.scenes.map(s => ({ ...s, takes: [], jobs: f.jobs.filter(j => j.scene === s.n) })), pending: [], steps: f.steps, production_plan: { text: '', rev: '0' } };
+        else if (method === 'studio_status') (f.statusCalls = (f.statusCalls || 0) + 1), result = { scenes: f.scenes.map(s => ({ ...s, takes: s.takes || [], jobs: f.jobs.filter(j => j.scene === s.n) })), pending: [], steps: f.steps, production_plan: { text: f.planText, rev: '0' } };
         else if (method === 'studio_renders') result = { renders: f.renders };
-        else if (method === 'studio_notes_read' || method === 'studio_edit_notes_read') result = { text: '', rev: '1' };
+        else if (/^studio_(edit_)?notes_read$/.test(method)) result = { ...f.notes[method.replace('_read', '')] };
+        else if (/^studio_(edit_)?notes_write$/.test(method)) {
+          const n = f.notes[method.replace('_write', '')], b = JSON.parse(opts.body);
+          if (b.rev !== n.rev) return { ok: false, status: 400, json: async () => ({ error: 'Notes changed' }) };
+          n.text = b.text; n.rev = String(Number(n.rev) + 1); result = { rev: n.rev };
+        }
+        else if (method === 'lessons') result = { pending: f.lessons };
+        else if (method.startsWith('upload?')) result = { path: 'C:/uploads/' + decodeURIComponent(method.split('name=')[1]) };
         else if (method === 'studio_references') result = { project: [], sub: [], active: [], library: [] };
         else if (method === 'studio_guide_read') result = { text: '', adaptations: [] };
         else if (method === 'studio_edit_task_read') result = { task: null };
@@ -94,8 +102,13 @@ try {
     assert.match(await badge.getAttribute('aria-label'), /^Alerts: 2, worst: View-only window$/);
     assert.equal(await page.locator('#health').isVisible(), false);
     await badge.click();
+    assert.equal(await page.locator('#alerts-list').isVisible(), true);
+    assert.equal(await page.locator('#health').isVisible(), false, 'one short line per alert; the full text expands');
+    assert.deepEqual(await page.locator('#alerts-list summary:visible').allInnerTexts(), ['View-only window', 'Flow signed out']);
+    await page.locator('#alert-health summary').click();
     assert.equal(await page.locator('#health').isVisible(), true);
     assert.match(await page.locator('#health').innerText(), /<b>raw<\/b> server text/, 'full text is shown as text');
+    await page.locator('#alert-owner summary').click();
     assert.equal(await page.locator('#reloaded').isVisible(), true);
     assert.deepEqual(errors, []);
     await context.close();
@@ -553,4 +566,240 @@ try {
     await context.close();
   }
   console.log('Gate bar: review, working, notifications, approve once, 409, changes with pins, Plan budgets, Add credits, resume, start, clamp, offline, video-switch scope guard, first-load and hidden-window notifications, non-owner and 44px targets passed.');
+  // ======== Drawers: Details, Chat, the alerts list and the plan reader ========
+  const shots10 = root + '.superpowers/sdd/2026-11-15-review-desk/shots/task-10/';
+  mkdirSync(shots10, { recursive: true });
+  const calls = (page, re) => page.evaluate((src) => window.fixture.calls.filter(c => new RegExp(src).test(c.url)).map(c => c.body), re.source);
+  const focusIn = (page, id) => page.evaluate((id) => !!document.activeElement?.closest('#' + id), id);
+  const noSideways = (page) => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1);
+  const bufferText = (page) => page.evaluate(() => Array.from({ length: term.buffer.active.length }, (_, i) => term.buffer.active.getLine(i)?.translateToString()).join('\n'));
+  const visibleWords = (page) => page.evaluate(() => {
+    const long = [], walk = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    for (let n; (n = walk.nextNode());) {
+      const el = n.parentElement, text = n.textContent.trim();
+      if (!text || el.closest('#player, #gate, script, style') || !el.checkVisibility() || !el.getClientRects().length) continue;
+      if (text.split(/\s+/).length > 4) long.push(text);
+    }
+    return long;
+  });
+  for (const width of [1366, 480]) {
+    const { context, page, errors } = await open(width, '1', () => {
+      const f = window.fixture;
+      f.scenes = structuredClone(f.scenes);
+      Object.assign(f.scenes[1], { storyboard: 's2.png', takes: [{ clip: 't1.mp4' }, { clip: 'c2.mp4' }], references: ['C:/refs/hat.png'] });
+      f.scenes[5].kept = true; // a kept clip whose source changed: one alert
+      f.lessons = [{ id: 'l1', text: 'Keep the sleeve red', scope: 'project' }];
+    });
+    const dialogs = []; page.on('dialog', (d) => { dialogs.push(d.message()); d.accept('Warmer light'); });
+    // closed by default, toggles say so, nothing wordy at rest
+    for (const id of ['details', 'chat', 'alerts-list', 'plan-reader']) assert.equal(await page.locator('#' + id).isVisible(), false, id + ' closed at rest');
+    for (const id of ['details-toggle', 'chat-toggle', 'alerts']) assert.equal(await page.locator('#' + id).getAttribute('aria-expanded'), 'false', id);
+    assert.deepEqual(await visibleWords(page), []);
+    // the badge counts every active notice: one stale kept clip and one lesson proposal
+    assert.equal(await page.locator('#alerts').innerText(), 'Stale kept clips (2)');
+    assert.match(await page.locator('#alerts').getAttribute('aria-label'), /^Alerts: 2, worst: Stale kept clips$/);
+
+    // Details with no scene: only the Video section
+    await page.locator('#details-toggle').click();
+    assert.equal(await page.locator('#details').isVisible(), true);
+    assert.equal(await page.locator('#details').getAttribute('role'), 'region');
+    assert.equal(await page.locator('#details').getAttribute('aria-label'), 'Details');
+    assert.equal(await page.locator('#details-toggle').getAttribute('aria-expanded'), 'true');
+    assert.ok(await focusIn(page, 'details'), 'focus moves into the drawer');
+    assert.equal(await page.locator('#details-scene').isVisible(), false, 'no scene selected: no scene section');
+    assert.equal(await page.locator('#details-video h2').innerText(), 'Video');
+    await page.waitForFunction(() => !!document.querySelector('#notes') && !document.querySelector('#notes').disabled);
+    assert.ok(await noSideways(page));
+    if (width === 1366) {
+      // beside the desk: the gate's buttons stay uncovered
+      const a = await page.locator('#approve').boundingBox(), d = await page.locator('#details').boundingBox();
+      assert.ok(a.x + a.width <= d.x, 'Details does not cover the gate buttons');
+    }
+    await page.screenshot({ path: shots10 + `details-video-${width}.png` });
+    // Escape closes and returns focus to the toggle
+    await page.keyboard.press('Escape');
+    assert.equal(await page.locator('#details').isVisible(), false);
+    assert.equal(await page.locator('#details-toggle').getAttribute('aria-expanded'), 'false');
+    assert.equal(await page.evaluate(() => document.activeElement.id), 'details-toggle');
+
+    // Details with a scene: prompt, settings, references, the agent's note, then the Video section
+    await page.locator('#strip .tile[data-scene="5"]').click();
+    await page.locator('#details-toggle').click();
+    assert.match(await page.locator('#details-scene').innerText(), /Scene 5[\s\S]*Sleeve colour differs[\s\S]*five/);
+    // wide: Details follows the strip while open; narrow: the sheet covers the strip, so close, pick, reopen
+    if (width === 480) await page.keyboard.press('Escape');
+    await page.locator('#strip .tile[data-scene="2"]').click();
+    if (width === 480) await page.locator('#details-toggle').click();
+    await page.waitForFunction(() => /Scene 2/.test(document.querySelector('#details-scene h2')?.textContent));
+    assert.equal(await page.locator('#details-video').isVisible(), true);
+    assert.match(await page.locator('#details-scene').innerText(), /Clip: two[\s\S]*hat\.png/);
+    assert.doesNotMatch(await page.locator('#details').innerText(), /\bnull\b|undefined/, 'optional parts render nothing');
+    await page.screenshot({ path: shots10 + `details-scene-${width}.png` });
+    if (width === 480) for (const el of await page.locator('#details :is(button, select, summary, label):visible').all()) {
+      const box = await el.boundingBox();
+      assert.ok(box.height >= 44, `${await el.innerText() || await el.getAttribute('aria-label')} is ${box.height}px tall`);
+    }
+
+    // every earlier owner action is inside Details and posts the same request as before
+    const base = { project: 'A', sub: 'video' };
+    await page.locator('#details').getByRole('button', { name: 'Approve scene', exact: true }).click();
+    await page.waitForFunction(() => window.fixture.calls.some(c => c.url === 'scene'));
+    assert.deepEqual(await calls(page, /^scene$/), [{ ...base, n: 2, approved: true }]);
+    await page.locator('#details').getByRole('button', { name: 'Keep', exact: true }).click();
+    await page.waitForFunction(() => window.fixture.calls.filter(c => c.url === 'scene').length === 2);
+    assert.deepEqual((await calls(page, /^scene$/))[1], { ...base, n: 2, kept: true });
+    await page.locator('#details').getByRole('button', { name: 'Redo', exact: true }).click();
+    await page.waitForFunction(() => window.fixture.calls.some(c => c.url === 'studio_redo'));
+    assert.deepEqual(await calls(page, /^studio_redo$/), [{ ...base, scene: 2, prompt: 'Warmer light' }]);
+    assert.match(dialogs[0], /^Redo scene 2/);
+    await page.locator('#details summary', { hasText: 'Takes (2)' }).click();
+    await page.locator('#details').getByRole('button', { name: 'Use this take', exact: true }).click();
+    await page.waitForFunction(() => window.fixture.calls.some(c => c.url === 'take'));
+    assert.deepEqual(await calls(page, /^take$/), [{ ...base, scene: 2, clip: 't1.mp4' }]);
+    // notes: autosave with the revision; a conflict keeps the draft and offers both ways out
+    await page.locator('#notes').fill('Warmer grade');
+    await page.waitForFunction(() => window.fixture.notes.studio_notes.text === 'Warmer grade');
+    assert.deepEqual(await calls(page, /^studio_notes_write$/), [{ ...base, text: 'Warmer grade', rev: '1' }]);
+    await page.evaluate(() => { window.fixture.notes.studio_notes.rev = '9'; });
+    await page.locator('#notes').fill('Cooler grade');
+    await page.waitForFunction(() => /Save failed/.test(document.querySelector('#notes-status')?.textContent));
+    await page.evaluate(async () => { document.activeElement.blur(); await refresh(true); }); // the preserved draft shows once the box loses focus, as before
+    assert.equal(await page.locator('#details textarea[aria-label="Unsaved notes"]').inputValue(), 'Cooler grade');
+    await page.locator('#details').getByRole('button', { name: 'Save preserved draft instead', exact: true }).click();
+    await page.waitForFunction(() => window.fixture.notes.studio_notes.text === 'Cooler grade');
+    assert.deepEqual((await calls(page, /^studio_notes_write$/)).at(-1), { ...base, text: 'Cooler grade', rev: '9' });
+    // edit notes and the audio pick
+    await page.locator('#edit-notes').fill('End on the logo');
+    await page.waitForFunction(() => window.fixture.notes.studio_edit_notes.text === 'End on the logo');
+    assert.deepEqual(await calls(page, /^studio_edit_notes_write$/), [{ ...base, text: 'End on the logo', rev: '1' }]);
+    await page.locator('#details label.pick', { hasText: 'Music' }).locator('input').setInputFiles({ name: 'song.mp3', mimeType: 'audio/mpeg', buffer: Buffer.from('x') });
+    await page.waitForFunction(() => /Music: song\.mp3/.test(document.querySelector('#details-video').textContent));
+    assert.deepEqual(await calls(page, /^upload\?name=song\.mp3$/), ['[file]']);
+
+    // Reopen: one inline confirm step, then action reopen for that step
+    await page.evaluate(() => { window.fixture.posts = []; });
+    const plan = page.locator('#details .step-list li[data-step=plan]');
+    await plan.getByRole('button', { name: 'Reopen', exact: true }).click();
+    assert.match(await plan.innerText(), /Reopen Plan\?/);
+    assert.equal(await page.evaluate(() => document.activeElement.textContent), 'Confirm');
+    assert.deepEqual(await posts(page), [], 'nothing posts before Confirm');
+    await plan.getByRole('button', { name: 'Cancel', exact: true }).click();
+    assert.equal(await plan.getByRole('button', { name: 'Confirm' }).count(), 0);
+    await plan.getByRole('button', { name: 'Reopen', exact: true }).click();
+    await plan.getByRole('button', { name: 'Confirm', exact: true }).click();
+    await page.waitForFunction(() => window.fixture.posts.length === 1);
+    assert.deepEqual(await posts(page), [{ ...base, step: 'plan', action: 'reopen' }]);
+    assert.equal(await page.locator('#details .step-list li[data-step=edit] button').count(), 0, 'only approved steps can be reopened');
+    assert.ok(await noSideways(page));
+
+    // one drawer at a time; Chat keeps the same terminal and session
+    await page.evaluate(() => { term.write('MARKER-SESSION-42'); document.querySelector('#term .xterm').dataset.marker = 'same'; });
+    await page.locator('#chat-toggle').click();
+    assert.equal(await page.locator('#details').isVisible(), false);
+    assert.equal(await page.locator('#details-toggle').getAttribute('aria-expanded'), 'false');
+    assert.equal(await page.locator('#chat').isVisible(), true);
+    assert.equal(await page.locator('#chat').getAttribute('role'), 'region');
+    assert.ok(await focusIn(page, 'chat'));
+    assert.equal(await page.locator('#chat-tab-message').getAttribute('aria-selected'), 'true');
+    assert.equal(await page.locator('#composer').isVisible(), true);
+    if (width === 480) assert.ok((await page.locator('#chat').boundingBox()).width >= 479, 'the Chat sheet spans the screen');
+    await page.screenshot({ path: shots10 + `chat-message-${width}.png` });
+    await page.locator('#chat-tab-terminal').click();
+    assert.equal(await page.locator('#term').isVisible(), true);
+    assert.equal(await page.locator('#composer').isVisible(), false);
+    await page.waitForFunction(() => term.rows > 2);
+    assert.match(await bufferText(page), /MARKER-SESSION-42/);
+    assert.equal(await page.evaluate(() => document.querySelectorAll('#term .xterm').length + ':' + document.querySelector('#term .xterm').dataset.marker), '1:same');
+    assert.ok(await noSideways(page));
+    await page.screenshot({ path: shots10 + `chat-terminal-${width}.png` });
+    // Escape inside the terminal belongs to the CLI
+    await page.evaluate(() => term.focus());
+    await page.keyboard.press('Escape');
+    assert.equal(await page.locator('#chat').isVisible(), true, 'Escape in the terminal does not close Chat');
+    await page.locator('#chat-tab-terminal').focus();
+    await page.keyboard.press('Escape');
+    assert.equal(await page.locator('#chat').isVisible(), false);
+    assert.equal(await page.evaluate(() => document.activeElement.id), 'chat-toggle');
+
+    // alerts list: one short line each, full text on expand; lesson actions unchanged
+    await page.locator('#alerts').click();
+    assert.equal(await page.locator('#alerts').getAttribute('aria-expanded'), 'true');
+    assert.deepEqual(await page.locator('#alerts-list summary:visible').allInnerTexts(), ['Stale kept clips', 'Lesson to review']);
+    assert.equal(await page.locator('#stale-full').isVisible(), false);
+    await page.locator('#alert-stale summary').click();
+    assert.match(await page.locator('#stale-full').innerText(), /Kept scenes 6 need a redo/);
+    await page.locator('#lesson-items summary').click();
+    await page.locator('#lesson-items input').fill('Keep sleeves red');
+    await page.locator('#lesson-items').getByRole('button', { name: 'Save', exact: true }).click();
+    await page.waitForFunction(() => window.fixture.calls.some(c => c.url === 'lessons/resolve'));
+    assert.deepEqual(await calls(page, /^lessons\/resolve$/), [{ id: 'l1', action: 'save', editedText: 'Keep sleeves red' }]);
+    assert.ok(await noSideways(page));
+    await page.screenshot({ path: shots10 + `alerts-${width}.png` });
+    await page.keyboard.press('Escape');
+    assert.equal(await page.evaluate(() => document.activeElement.id), 'alerts');
+
+    // plan reader: from the Plan gate and from Details; markdown as text, never HTML
+    await page.evaluate(() => { window.fixture.planText = '# Production plan\n\nOpening <script>window.pwned = 1</script> line\ncontinues here.\n\n## Scenes\n- Scene one <b>bold</b>\n- Scene two\n\n' + Array(80).fill('A long paragraph line.').join('\n\n'); });
+    await setSteps(page, S({ plan: { ...step('review'), summary: planSummary }, look: step('idle'), assets: step('idle'), edit: step('idle') }));
+    assert.equal(await page.locator('#gate-plan').isVisible(), true, 'the Plan gate offers the plan');
+    await page.locator('#gate-plan').click();
+    assert.equal(await page.locator('#plan-reader').isVisible(), true);
+    assert.equal(await page.locator('#gate-plan').getAttribute('aria-expanded'), 'true');
+    assert.deepEqual(await page.locator('#plan-text h3').allInnerTexts(), ['Production plan', 'Scenes']);
+    assert.match(await page.locator('#plan-text p').first().innerText(), /^Opening <script>window\.pwned = 1<\/script> line continues here\.$/);
+    assert.deepEqual(await page.locator('#plan-text li').allInnerTexts(), ['Scene one <b>bold</b>', 'Scene two']);
+    assert.equal(await page.locator('#plan-text script, #plan-text b').count(), 0);
+    assert.equal(await page.evaluate(() => window.pwned), undefined);
+    assert.ok(await page.locator('#plan-text').evaluate(e => e.scrollHeight > e.clientHeight), 'a long plan scrolls inside the reader');
+    assert.ok(await noSideways(page));
+    await page.screenshot({ path: shots10 + `plan-${width}.png` });
+    await page.keyboard.press('Escape');
+    assert.equal(await page.evaluate(() => document.activeElement.id), 'gate-plan');
+    assert.equal(await page.locator('#gate-plan').getAttribute('aria-expanded'), 'false');
+    await page.locator('#details-toggle').click();
+    await page.locator('#details-video').getByRole('button', { name: 'Read plan', exact: true }).click();
+    assert.equal(await page.locator('#plan-reader').isVisible(), true);
+    assert.equal(await page.locator('#details').isVisible(), false);
+    await page.locator('#plan-reader .drawer-close').click();
+    assert.equal(await page.evaluate(() => document.activeElement.id), 'details-toggle');
+    // with every drawer closed again, still nothing wordy on screen
+    assert.deepEqual(await visibleWords(page), []);
+    assert.deepEqual(errors, []);
+    console.log(`Drawers ${width}px: closed at rest, focus and Escape, Details by scene and video, owner actions unchanged, Reopen confirm, one drawer, same terminal, terminal Escape, alerts list, plan reader passed.`);
+    await context.close();
+  }
+  // non-owner: Reopen disabled; the long owner-window text lives only in the alerts list
+  {
+    const { context, page, errors } = await open(1366, '');
+    const ownerText = () => page.evaluate(() => [...document.querySelectorAll('body *')].filter(e => [...e.childNodes].some(n => n.nodeType === 3 && n.textContent.includes('Flow Studio.cmd'))).map(e => !!e.closest('#alerts-list')));
+    assert.deepEqual(await ownerText(), [true]);
+    assert.doesNotMatch(await page.locator('body').innerText(), /Flow Studio\.cmd/, 'not on screen at rest');
+    await page.locator('#details-toggle').click();
+    const reopen = page.locator('#details .step-list button', { hasText: 'Reopen' });
+    assert.equal(await reopen.count(), 3);
+    for (const b of await reopen.all()) assert.equal(await b.isDisabled(), true);
+    await page.locator('#chat-toggle').click();
+    await page.locator('#chat-tab-terminal').click();
+    assert.doesNotMatch(await bufferText(page), /Flow Studio\.cmd/);
+    assert.deepEqual(await ownerText(), [true]);
+    assert.deepEqual(errors, []);
+    await context.close();
+  }
+  // offline: the drawers' write controls are disabled until the connection is back
+  {
+    const { context, page } = await open(1366);
+    await page.locator('#strip .tile[data-scene="2"]').click();
+    await page.locator('#details-toggle').click();
+    await page.waitForFunction(() => !!document.querySelector('#details .step-list button'));
+    await page.evaluate(async () => { window.fixture.offline = true; await refresh(true); });
+    assert.equal(await page.locator('#connection-message').innerText(), 'Offline');
+    for (const b of await page.locator('#details [data-write]').all()) assert.equal(await b.isDisabled(), true);
+    await page.locator('#alerts').click();
+    await page.locator('#alert-offline summary').click();
+    assert.match(await page.locator('#connection-full').innerText(), /Could not refresh Studio/);
+    await page.evaluate(async () => { window.fixture.offline = false; await refresh(true); });
+    assert.equal(await page.locator('#connection').isVisible(), false);
+    await context.close();
+  }
+  console.log('Drawers: non-owner Reopen and owner-window text, offline write controls passed.');
 } finally { await browser.close(); }

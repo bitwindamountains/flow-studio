@@ -35,33 +35,17 @@ test("Start new ad proposes a fresh cut without resetting the finished ad", () =
   assert.equal(finished.scenes[0].clip,"kept.mp4");
 });
 
-test("guided navigation refuses future stages and keeps the conversation untouched", () => {
-  const start = source.indexOf("function navigateTo(");
-  assert.ok(start >= 0, "guided navigation must exist");
-  let active = "plan", displayed = "plan", announced = "", refreshed = 0;
-  const navigate = runInNewContext(source.slice(start, source.indexOf("function restoreStage(", start)) + "\nnavigateTo", {
-    get view() { return active; }, set view(v: string) { active = v; },
-    data: { workflow: { stages: { edit: { access: "locked", reason: "Keep a clip first" }, ideas: { access: "open" } } } },
-    toast: (s: string) => announced = s, dataFresh: true, have: () => true, cur: () => ({ project: "P", sub: "ad" }),
-    localStorage: { setItem() {} }, stageMemory: new Map(), selection: null, publishContextSoon() {}, renderNavigation() { displayed = active; },
-    $: () => ({ replaceChildren() {} }), h: () => ({}), refresh() { assert.equal(displayed,active,"visible screen updates before async refresh"); refreshed++; },
+test("switching videos restores the message draft from memory when browser storage is blocked", () => {
+  const start = source.indexOf("function restoreScope(");
+  const box = { value: "", checked: true };
+  const ui = runInNewContext(source.slice(start, source.indexOf("function getUiContext(", start)) + "\n({restoreScope,read:()=>selection})", {
+    restoredScope: "Other/ad", selection: { kind: "scene", scene: 2 }, messageDrafts: new Map([["P/ad", "kept draft"]]),
+    localStorage: { getItem() { throw new Error("blocked"); } }, $: () => box, updateComposer() {}, publishContextSoon() {},
   });
-  assert.equal(navigate("edit"), false);
-  assert.equal(active, "plan");
-  assert.equal(announced, "Keep a clip first");
-  assert.equal(navigate("ideas"), true);
-  assert.equal(active, "ideas");
-  assert.equal(refreshed, 1);
-});
-
-test("stage restoration has an in-memory fallback when browser storage is blocked", () => {
-  const start = source.indexOf("function restoreStage(");
-  const ui = runInNewContext(source.slice(start, source.indexOf("function getUiContext(", start)) + "\n({restoreStage,read:()=>view})", {
-    restoredScope:"Other/ad", selection:null, view:"edit", stageMemory:new Map([["P/ad","ideas"]]), messageDrafts:new Map(),
-    localStorage:{getItem(){throw new Error("blocked");}}, $:()=>({value:"",checked:false}),updateComposer(){},publishContextSoon(){},
-  });
-  ui.restoreStage("P/ad",{stages:{ideas:{access:"open"},edit:{access:"open"}},recommendedStage:"edit"});
-  assert.equal(ui.read(),"ideas");
+  ui.restoreScope("P/ad");
+  assert.equal(box.value, "kept draft");
+  assert.equal(box.checked, false, "a new video never inherits the ready confirmation");
+  assert.equal(ui.read(), null);
 });
 
 test("saving a recovered conflicting draft writes the draft rather than silently deleting it", async () => {
@@ -88,7 +72,7 @@ test("saving a recovered conflicting draft writes the draft rather than silently
 });
 
 function terminalHarness() {
-  const elements: Record<string, any> = Object.fromEntries(["term", "agent", "agent-status", "switch-agent", "restart", "expand-terminal", "mode-terminal", "mode-message", "message-input", "message-ready", "send-message", "message-status", "chat-toggle", "term-wrap", "split"].map((id) => [id, { value: "claude", checked: false, setAttribute() {} }]));
+  const elements: Record<string, any> = Object.fromEntries(["term", "agent", "agent-status", "switch-agent", "restart", "expand-terminal", "mode-terminal", "mode-message", "message-input", "message-ready", "send-message", "message-status", "chat-toggle", "term-wrap", "chat-tab-terminal", "chat-tab-message", "composer"].map((id) => [id, { value: "claude", checked: false, setAttribute() {} }]));
   const sent: any[] = [];
   const timers: (() => void)[] = [];
   let socket: any;
@@ -99,7 +83,7 @@ function terminalHarness() {
     constructor() { socket = this; }
     send(raw: string) { sent.push(JSON.parse(raw)); }
   }
-  const terminal = runInNewContext(source.slice(source.indexOf("// ---- terminal ----"), source.indexOf("// ---- resizable split")) + "\n({typeToAgent, termUp})", {
+  const terminal = runInNewContext(source.slice(source.indexOf("// ---- terminal ----"), source.indexOf("// ---- screen context")) + "\n({typeToAgent, termUp})", {
     Terminal: class { cols = 80; rows = 20; loadAddon() {} open() {} reset() {} write() {} onData() {} onResize() {} focus() {} },
     FitAddon: { FitAddon: class { fit() {} } }, WebSocket: FakeSocket, OWNER: true,
     $: (id: string) => elements[id], location: { host: "fixture" },
@@ -165,9 +149,10 @@ function editHarness(revise = false) {
     btn: (label: string, click: () => unknown) => ({ label, click, dataset: {} }),
     picker: (label: string, pick: (f: string) => unknown) => ({ label, pick }),
     upload: async (f: string) => f, media: (f: string) => f, setTimeout: () => 0,
+    view: "edit", why: (_key: string, text: string) => ({ args: [text] }),
   };
-  const render = runInNewContext(source.slice(source.indexOf("const editFiles ="), source.lastIndexOf("refresh(true);")) + "\nrenderEdit", context);
-  const show = (name: string) => { project = name; render({ replaceChildren: (...args: any[]) => { nodes = args; } }); };
+  const render = runInNewContext(source.slice(source.indexOf("const editFiles ="), source.lastIndexOf("refresh(true);")) + "\neditSection", context);
+  const show = (name: string) => { project = name; nodes = render(); };
   const find = (label: string): any => {
     const visit = (x: any): any => x?.label === label ? x : (Array.isArray(x) ? x : x?.args ?? []).map(visit).find(Boolean);
     return visit(nodes);

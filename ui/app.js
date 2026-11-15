@@ -6,12 +6,15 @@ const OWNER = document.body.dataset.owner === "1";
 // Reload is harmless now (the cookie is resent); only warn when typed notes are not saved yet.
 addEventListener("beforeunload", (e) => { if (notes.dirty() || editNotes.dirty() || $("message-input")?.value) { e.preventDefault(); e.returnValue = ""; } });
 const $ = (id) => document.getElementById(id);
-let dataFresh = false;
+let dataFresh = false, connectionMessage = "";
+// Write controls inside the drawers; offline or expired windows disable them all.
+const WRITES = "#details [data-write], #details input, #details textarea, #details select, #alerts-list [data-write], #alerts-list input";
 function connectionState(ok, message = "") {
-  dataFresh = ok;
+  dataFresh = ok; connectionMessage = message;
   $("connection").hidden = ok;
-  $("connection-message").textContent = message;
-  if (!ok) for (const el of document.querySelectorAll('#views [data-write], #views input, #views textarea, #views select')) el.disabled = true;
+  // The banner keeps its two recovery buttons; the full sentence is in the alert list.
+  $("connection-message").textContent = /^Loading/.test(message) ? "Loading" : /Reload/.test(message) ? "Reconnect needed" : "Offline";
+  if (!ok) for (const el of document.querySelectorAll(WRITES)) el.disabled = true;
   if ($("message-input")) updateComposer();
   gateControls();
   renderAlerts();
@@ -133,13 +136,23 @@ function updateComposer() {
   $("message-input").disabled = !running || inputMode !== "message" || !!pendingMessage;
   $("message-ready").disabled = !running || inputMode !== "message" || !!pendingMessage;
   $("send-message").disabled = !running || !dataFresh || inputMode !== "message" || !$("message-ready").checked || !!pendingMessage;
-  $("mode-terminal").setAttribute("aria-pressed", String(inputMode === "terminal"));
-  $("mode-message").setAttribute("aria-pressed", String(inputMode === "message"));
-  $("mode-terminal").disabled = $("mode-message").disabled = !running || !!pendingMessage;
 }
-for (const mode of ["terminal", "message"]) if ($("mode-" + mode)) $("mode-" + mode).onclick = () => {
+// Chat tabs: Message shows the composer, Terminal the xterm. Picking a tab also asks for that input mode, as the old mode buttons did.
+let chatPane = "message";
+function showChatPane(mode) {
+  chatPane = mode;
+  for (const m of ["message", "terminal"]) $("chat-tab-" + m).setAttribute("aria-selected", String(m === mode));
+  $("term").hidden = mode !== "terminal"; $("composer").hidden = mode !== "message";
+  if (mode === "terminal") fit.fit(); // xterm cannot measure itself while hidden
+}
+for (const mode of ["terminal", "message"]) $("chat-tab-" + mode).onclick = () => {
+  showChatPane(mode);
   if (termUp() && !pendingMessage) send({ t: "input-mode", mode, session: agentSession });
 };
+function focusChat() {
+  if (chatPane === "terminal") return term.focus();
+  ($("message-input").disabled ? $("chat-tab-message") : $("message-input")).focus();
+}
 if ($("message-ready")) $("message-ready").onchange = () => updateComposer();
 if ($("message-input")) $("message-input").oninput = () => {
   if (have()) messageDrafts.set(notesKey(), $("message-input").value);
@@ -171,77 +184,28 @@ $("switch-agent").onclick = () => {
 };
 terminalControls();
 $("expand-terminal").onclick = () => {
-  const expanded = document.querySelector("main").classList.toggle("terminal-expanded");
+  const expanded = document.body.classList.toggle("terminal-expanded");
+  if (expanded) showChatPane("terminal");
   $("expand-terminal").textContent = expanded ? "Restore layout" : "Expand terminal";
   $("expand-terminal").setAttribute("aria-pressed", String(expanded));
   fit.fit(); term.focus();
 };
-// The terminal stays mounted while hidden, so the session and its scrollback survive closing Chat.
-$("chat-toggle").onclick = () => {
-  const open = $("term-wrap").hidden;
-  if (!open && document.querySelector("main.terminal-expanded")) $("expand-terminal").click();
-  $("term-wrap").hidden = $("split").hidden = !open;
-  $("chat-toggle").setAttribute("aria-expanded", String(open));
-  if (open) { fit.fit(); term.focus(); }
-};
+// The terminal stays mounted while Chat is closed, so the session and its scrollback survive (drawers below).
 addEventListener("resize", () => fit.fit());
 fit.fit();
 if (OWNER) connect();
-else term.write("This window is not the owner's studio window. Close this window, reopen Flow Studio.cmd, and choose Yes when asked to restart Studio. Wait for any active work to finish first.\r\n");
+else term.write("View-only window. Open Alerts for how to fix it.\r\n");
 
-// ---- resizable split: terminal at the bottom, height remembered (storage may be blocked, so every access is guarded) ----
-const TERM_H = "flow-studio-term-height";
-function setTermHeight(px, save) {
-  const size = Math.round(Math.max(180, Math.min(px, Math.max(180, innerHeight - 260))));
-  $("term-wrap").style.setProperty("height", size + "px", "important");
-  $("split").setAttribute("aria-orientation", "horizontal");
-  fit.fit();
-  if (save) try { localStorage.setItem(TERM_H + ":height", String(size)); } catch { /* not remembered */ }
-}
-function restorePanelSize() {
-  let size = Math.min(280, innerHeight * .35);
-  try { const saved = Number(localStorage.getItem(TERM_H + ":height")); if (saved > 0) size = saved; } catch { /* default height */ }
-  setTermHeight(size, false);
-}
-restorePanelSize();
-// A smaller window must not leave the terminal covering the tabs (or the tabs covering it).
-addEventListener("resize", restorePanelSize);
-$("split").onpointerdown = (e) => {
-  $("split").setPointerCapture(e.pointerId);
-  $("split").onpointermove = (m) => setTermHeight(innerHeight - m.clientY, false);
-  $("split").onpointerup = () => { $("split").onpointermove = null; setTermHeight($("term-wrap").offsetHeight, true); };
-};
-$("split").onkeydown = (e) => {
-  const step = e.key === "ArrowUp" ? 24 : e.key === "ArrowDown" ? -24 : 0;
-  if (step) { e.preventDefault(); setTermHeight($("term-wrap").offsetHeight + step, true); }
-};
-
-// ---- tabs ----
+// ---- screen context: the stage follows the step the video is at; drafts are kept per video ----
 let selection = null, restoredScope = "";
 const messageDrafts = new Map();
-const stageMemory = new Map();
 const expandedGuides = new Set();
 const stageNames = { ideas: "Ideas", plan: "Plan", storyboard: "Storyboard", generate: "Generate", edit: "Edit" };
-for (const b of document.querySelectorAll("#tabs button")) {
-  b.onclick = () => navigateTo(b.dataset.view);
-}
-function navigateTo(stage) {
-  if (!dataFresh) { toast("Reconnect to Studio before changing stages."); return false; }
-  const state = data.workflow?.stages?.[stage];
-  if (!state || state.access === "locked") { toast(state?.reason || "Select a project and wait for workflow readiness."); return false; }
-  view = stage; selection = null;
-  stageMemory.set(cur().project + "/" + cur().sub, stage);
-  try { localStorage.setItem(`flow-studio-view:${cur().project}/${cur().sub}`, stage); } catch { /* optional memory */ }
-  renderNavigation();
-  $("view-" + stage).replaceChildren(h("p", { class: "dim", role: "status" }, "Loading this step…"));
-  publishContextSoon(); refresh(true); return true;
-}
-function restoreStage(scope, workflow) {
+// The agent's context schema still speaks in the five old stages; each step maps onto one.
+const STAGE_OF = { idea: "ideas", plan: "plan", look: "storyboard", assets: "generate", edit: "edit" };
+function restoreScope(scope) {
   if (restoredScope === scope) return;
   restoredScope = scope; selection = null;
-  let saved = stageMemory.get(scope);
-  try { saved = localStorage.getItem("flow-studio-view:" + scope) || saved; } catch { /* in-memory stage retained */ }
-  view = workflow.stages[saved]?.access !== "locked" && workflow.stages[saved] ? saved : workflow.recommendedStage;
   let draft = messageDrafts.get(scope) || "";
   try { draft = localStorage.getItem("flow-studio-message:" + scope) || draft; } catch { /* in-memory draft */ }
   $("message-input").value = draft;
@@ -253,14 +217,6 @@ function getUiContext() {
 }
 function selectContextItem(item) {
   selection = item; publishContextSoon(); refresh(true);
-}
-function sceneSelector(scenes) {
-  return h("div", { class: "scene-selector", "aria-label": "Select scene" },
-    btn("All scenes", () => selectContextItem(null)),
-    ...scenes.map(s => {
-      const b = btn(`Scene ${s.n}`, () => selectContextItem({ kind: "scene", scene: s.n }));
-      b.setAttribute("aria-pressed", String(selection?.scene === s.n)); return b;
-    }));
 }
 let contextTimer, contextSequence = 0, contextChain = Promise.resolve();
 const contextWindow = globalThis.crypto?.randomUUID?.() || String(Date.now()) + Math.random();
@@ -298,21 +254,37 @@ function toggle(button, panel, open = panel.hidden) {
 }
 $("project-menu").onclick = () => toggle($("project-menu"), $("project-panel"));
 addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("project-panel").hidden) { toggle($("project-menu"), $("project-panel"), false); $("project-menu").focus(); } });
-$("details-toggle").onclick = () => toggle($("details-toggle"), $("right"));
-$("alerts").onclick = () => { $("alerts").setAttribute("aria-expanded", String($("alerts").getAttribute("aria-expanded") !== "true")); renderAlerts(); };
 // Notices stay out of the way behind the badge; the connection banner shows itself because it disables writes.
-// The badge names the worst alert from this fixed map (never server text), most severe first.
+// The badge names the worst alert from this fixed map (never server text), most severe first; the list holds one entry per notice.
 let flowFailed = []; // names of the failed Flow health checks
 const HEALTH_LABEL = { "signed in": "Flow signed out", flow: "Flow not open" };
+let lessonSig = "";
 function renderAlerts() {
-  const open = $("alerts").getAttribute("aria-expanded") === "true", health = flowFailed.length > 0;
+  const health = flowFailed.length > 0, lessons = data.lessons || [];
   const flow = HEALTH_LABEL[["signed in", "flow"].find((n) => flowFailed.includes(n))] || "Flow check failed";
-  const labels = [!OWNER && "View-only window", health && flow, !dataFresh && "Offline"].filter(Boolean);
+  const stale = (data.plan?.scenes || []).filter((s) => s.kept && s.clip && s.stale !== undefined).map((s) => s.n);
+  const held = [...(data.pending || []), ...(data.other || [])].reduce((n, g) => n + g.jobs.length, 0);
+  const labels = [!OWNER && "View-only window", health && flow, !dataFresh && "Offline", stale.length && "Stale kept clips", held && "Jobs await approval", ...lessons.map(() => "Lesson to review")].filter(Boolean);
   $("alerts").hidden = !labels.length;
   $("alerts").textContent = labels.length > 1 ? `${labels[0]} (${labels.length})` : labels[0] || "";
   $("alerts").setAttribute("aria-label", `Alerts: ${labels.length}, worst: ${labels[0] || "none"}`);
-  $("health").hidden = !(open && health);
-  $("reloaded").hidden = !(open && !OWNER);
+  $("alert-owner").hidden = OWNER;
+  $("alert-health").hidden = !health; $("health-label").textContent = flow;
+  $("alert-offline").hidden = dataFresh; $("connection-full").textContent = connectionMessage || "Studio is not connected.";
+  $("alert-stale").hidden = !stale.length; $("stale-full").textContent = `Kept scenes ${stale.join(", ")} need a redo because their source changed. Redo them in Details before editing.`;
+  $("alert-held").hidden = !held; $("held-full").textContent = `${held} job${held === 1 ? "" : "s"} wait for your credit approval. Nothing is spent until you approve.`;
+  $("alerts-empty").hidden = labels.length > 0;
+  // Lesson proposals: the Save/Discard actions moved here unchanged; rebuilt only when they change, so typing survives polls.
+  const sig = JSON.stringify([lessons.map((l) => [l.id, l.text, l.scope]), dataFresh]);
+  if (sig === lessonSig) return;
+  lessonSig = sig;
+  $("lesson-items").replaceChildren(...lessons.map((l) => {
+    const txt = h("input", { value: lessonText[l.id] ?? l.text, "aria-label": "Lesson text" });
+    txt.oninput = () => (lessonText[l.id] = txt.value);
+    return h("li", {}, h("details", {}, h("summary", {}, "Lesson to review"), h("div", { class: "lesson" }, h("b", {}, "Learned: "), txt, h("small", {}, ` [${l.scope}] `),
+      btn("Save", () => owner("/api/lessons/resolve", { id: l.id, action: "save", editedText: txt.value }), true),
+      btn("Discard", () => owner("/api/lessons/resolve", { id: l.id, action: "discard" }), true))));
+  }));
 }
 function startNewAd() {
   const project = cur().project;
@@ -334,7 +306,6 @@ async function createProject() {
     const project = slug($("new-project-name").value), sub = slug($("new-sub-name").value);
     await apiOk("studio_new", { project, sub, aspect: $("new-aspect").value });
     await apiOk("studio_select", { project, sub });
-    stageMemory.set(project + "/" + sub, "ideas");
     await loadProjects(); $("project").value = project; fillSubs(); $("sub").value = sub;
     projectChanged(); $("project-setup").hidden = true; $("new-project-toggle").setAttribute("aria-expanded", "false");
   } catch (e) { toast(e.message); }
@@ -400,7 +371,6 @@ checkHealth();
 
 // ======== step views ========
 // Plan text is written by Claude: every string goes in through textContent, never innerHTML.
-renderAlerts();
 function h(tag, props, ...kids) {
   const e = document.createElement(tag);
   for (const [k, v] of Object.entries(props || {})) {
@@ -588,37 +558,37 @@ async function fetchData() {
   const groups = Array.isArray(pendingAll) ? pendingAll : [];
   if (!have()) { data = { plan: null, pending: [], other: groups, status: null, lessons: [], notes: null }; return; }
   const scope = cur(), scopeKey = scope.project + "/" + scope.sub;
-  const [plan, workflow] = await Promise.all([api("studio_plan_read", scope), apiOk("studio_workflow_read", scope)]);
+  // The desk needs every step's status, each scene's jobs and the latest render, whether or not Details is open.
+  const [plan, workflow, st, r] = await Promise.all([api("studio_plan_read", scope), apiOk("studio_workflow_read", scope), api("studio_status", scope), api("studio_renders", scope)]);
   if (cur().project + "/" + cur().sub !== scopeKey) { again = true; return false; }
   data.plan = plan.error ? null : plan;
   if (!workflow?.stages) throw new Error("Workflow readiness unavailable");
   data.workflow = workflow;
-  restoreStage(scopeKey, workflow);
-  const requestedStage = view;
-  data.guide = ["ideas", "plan", "storyboard"].includes(requestedStage) ? await apiOk("studio_guide_read", { stage: requestedStage }) : null;
+  data.status = st.error ? null : st; data.statusScope = scopeKey;
+  data.renders = r && r.renders ? r.renders : [];
+  restoreScope(scopeKey);
+  view = data.status?.steps ? STAGE_OF[currentStep() ?? "edit"] : workflow.recommendedStage;
+  const requestedStage = view, details = !$("details").hidden;
+  data.guide = details && ["ideas", "plan", "storyboard"].includes(requestedStage) ? await apiOk("studio_guide_read", { stage: requestedStage }) : null;
   if (selection?.scene && !plan.scenes?.some(s => s.n === selection.scene)) { selection = null; publishContextSoon(); }
   const mine = (g) => g.jobs.some((j) => j.params.studio && j.params.studio.project === plan.project && j.params.studio.sub === plan.sub);
   data.pending = groups.filter(mine);
   data.other = groups.filter((g) => !mine(g)); // non-studio jobs and other sub-projects: still approvable/cancellable here
-  if (view === "plan" && data.plan) {
+  if (details && data.plan) {
     data.notes = await notes.load();
     const refs = await api("studio_references", scope);
     data.activeRefs = refs.active ?? [];
     data.libraryRefs = refs.library ?? [];
   }
-  if (view === "edit") {
+  if (details) {
     data.editNotes = await editNotes.load();
     const task = await api("studio_edit_task_read", scope); data.editTask = task.task || null;
   }
-  // The desk needs every step's status, each scene's jobs and the latest render, whichever stage view is open.
-  const [st, r] = await Promise.all([api("studio_status", scope), api("studio_renders", scope)]);
-  data.status = st.error ? null : st; data.statusScope = scopeKey;
-  data.renders = r && r.renders ? r.renders : [];
-  if (view === "generate" || view === "storyboard") data.lessons = (await get("/api/lessons")).pending || [];
+  data.lessons = (await get("/api/lessons")).pending || []; // lesson proposals are alerts
   if (notesKey() !== scopeKey || view !== requestedStage) { again = true; return false; }
   return true;
 }
-const editing = () => { const a = document.activeElement; return !!a && $("views").contains(a) && /INPUT|TEXTAREA|SELECT/.test(a.tagName) && a.type !== "file"; };
+const editing = () => { const a = document.activeElement; return !!a && !!a.closest("#details, #alerts-list") && /INPUT|TEXTAREA|SELECT/.test(a.tagName) && a.type !== "file"; };
 let busy = false, again = false;
 async function refresh(force) {
   if (busy) { if (force) again = true; return; }
@@ -643,23 +613,6 @@ document.addEventListener("visibilitychange", () => document.visibilityState ===
 // A hidden window polls only while a step of this video is working, and slower, so the title and notification still arrive.
 function hiddenPoll() { if (document.visibilityState !== "visible" && have() && STEPS.some((n) => stepState()[n]?.status === "working")) refresh(true); }
 setInterval(hiddenPoll, 15000);
-
-function renderNavigation() {
-  for (const b of document.querySelectorAll("#tabs button")) {
-    const stage = b.dataset.view, state = data.workflow?.stages?.[stage];
-    b.setAttribute("aria-selected", String(view === stage));
-    b.setAttribute("aria-current", view === stage ? "step" : "false");
-    b.setAttribute("aria-disabled", String(!state || state.access === "locked"));
-    b.setAttribute("aria-label", `${["ideas", "plan", "storyboard", "generate", "edit"].indexOf(stage) + 1} ${stageNames[stage]}`);
-    b.title = state?.reason || "Select a project first";
-    b.dataset.state = state?.status || "locked";
-    b.replaceChildren(h("span", { class: "stage-index", "aria-hidden": "true" }, String(["ideas", "plan", "storyboard", "generate", "edit"].indexOf(stage) + 1).padStart(2, "0")),
-      h("span", { class: "stage-copy" }, h("span", { class: "stage-label" }, stageNames[stage]), h("span", { class: "stage-state" }, view === stage ? "Current step" : state?.status === "needs_attention" ? "Needs attention" : state?.status === "complete" ? "Complete" : state?.status === "ready" ? "Ready" : state?.status || "Locked")));
-  }
-  for (const s of document.querySelectorAll("#views > section")) s.hidden = s.id !== "view-" + view;
-  $("stage-heading").textContent = stageNames[view];
-  updateContextLabel();
-}
 
 // ======== review desk: steps row, player and scene strip ========
 // Scene and plan text from the agent only ever reaches the DOM through h() (text nodes and attributes).
@@ -867,6 +820,7 @@ function renderGate(steps) {
   $("approve").hidden = $("ask-changes").hidden = !review;
   $("approve").textContent = plan ? "Approve and set budgets" : "Approve";
   $("budget-form").hidden = !plan;
+  $("gate-plan").hidden = !plan; // the whole plan document, at the gate that approves it
   $("resume").hidden = !(status === "paused" || (status === "blocked" && !more));
   $("add-credits").hidden = $("credits-label").hidden = !more;
   if (!review) gateForm(false);
@@ -953,78 +907,181 @@ function render() {
   $("activity-toggle").textContent = `Jobs (${pending.reduce((n, g) => n + g.jobs.length, 0)})`;
   renderDesk();
   if (!$("activity-panel").hidden) $("activity-panel").replaceChildren(...(pending.length ? pending.map(heldCard) : [h("p", {}, "No jobs waiting for credit approval.")]));
-  renderNavigation();
-  renderReadiness();
-  const el = $("view-" + view);
-  const previousGuide = el.querySelector("details.creative-guide");
-  if (previousGuide) {
-    if (previousGuide.open) expandedGuides.add(view); else expandedGuides.delete(view);
-  }
-  if (!have()) return el.replaceChildren(h("p", {}, "Choose a project above or use New project to begin."));
-  if (view === "edit") return renderEdit(el);
-  ({ ideas: renderIdeas, plan: renderPlan, storyboard: renderBoard, generate: renderGen })[view](el);
-  if (data.guide?.text) {
-    const stage = view;
-    el.prepend(h("details", { class: "creative-guide", open: expandedGuides.has(stage), ontoggle: e => { if (!e.target.isConnected) return; if (e.target.open) expandedGuides.add(stage); else expandedGuides.delete(stage); } },
-    h("summary", {}, "Creative basis: your Google Flow prompt guide"),
-    h("p", { class: "dim" }, `${data.guide.source} · revision ${data.guide.revision}`),
-    h("h3", {}, "How it applies in Studio"),
-    h("ul", {}, data.guide.adaptations.map(text => h("li", {}, text))),
-    h("h3", {}, "Your original guidance for this stage"),
-    h("pre", { style: "white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;line-height:1.6" }, data.guide.text)));
-  }
-  if (data.workflow?.stages[view]?.access !== "open") el.prepend(h("p", { class: "blocked-stage" }, data.workflow?.stages[view]?.reason || "Workflow unavailable"));
+  updateContextLabel();
+  renderDetails();
+  if (!$("plan-reader").hidden) renderPlanReader();
 }
 
-function renderReadiness() {
-  const p = data.plan, target = $("workflow"), kept = p?.scenes.filter((s) => s.kept && s.clip) || [];
-  if (data.workflow) {
-    const next = data.workflow.recommendedStage, state = data.workflow.stages[view];
-    const button = h("button", { type: "button" }, next === view ? "Discuss this step" : `Go to ${stageNames[next]}`);
-    button.onclick = () => next === view ? $("message-input").focus() : navigateTo(next);
-    target.replaceChildren(h("span", {}, state.reason), button); return;
+// ======== drawers: Details, Chat, Alerts and the plan reader; one open at a time ========
+const DRAWERS = ["details", "chat", "alerts-list", "plan-reader"];
+const DRAWER_TOGGLE = { details: "details-toggle", chat: "chat-toggle", "alerts-list": "alerts" };
+let drawerOpener = null;
+const openDrawer = () => DRAWERS.find((id) => !$(id).hidden) || null;
+function setDrawer(id, opener = null) {
+  if (openDrawer() === "chat" && id !== "chat" && document.body.classList.contains("terminal-expanded")) $("expand-terminal").click();
+  for (const d of DRAWERS) $(d).hidden = d !== id;
+  for (const [d, t] of Object.entries(DRAWER_TOGGLE)) $(t).setAttribute("aria-expanded", String(d === id));
+  for (const b of document.querySelectorAll('[aria-controls="plan-reader"]')) b.setAttribute("aria-expanded", String(id === "plan-reader"));
+  drawerOpener = id ? opener : null;
+  if (!id) return;
+  if (id === "chat") { fit.fit(); return focusChat(); }
+  if (id === "details") { renderDetails(); refresh(true); } // notes, references and the edit task load only while Details is open
+  if (id === "plan-reader") renderPlanReader();
+  $(id).querySelector(".drawer-close").focus();
+}
+const toggleDrawer = (id, opener) => setDrawer(openDrawer() === id ? null : id, opener);
+function closeDrawer() {
+  const back = drawerOpener;
+  setDrawer(null);
+  (back?.checkVisibility?.() ? back : $("details-toggle")).focus();
+}
+for (const b of document.querySelectorAll(".drawer-close")) b.onclick = closeDrawer;
+$("details-toggle").onclick = () => toggleDrawer("details", $("details-toggle"));
+$("chat-toggle").onclick = () => toggleDrawer("chat", $("chat-toggle"));
+$("alerts").onclick = () => toggleDrawer("alerts-list", $("alerts"));
+$("gate-plan").onclick = () => toggleDrawer("plan-reader", $("gate-plan"));
+$("open-jobs").onclick = () => {
+  setDrawer(null); toggle($("project-menu"), $("project-panel"), true);
+  if ($("activity-panel").hidden) $("activity-toggle").click();
+  $("activity-toggle").focus();
+};
+// Escape closes the open drawer, except inside the terminal, where it belongs to the CLI.
+addEventListener("keydown", (e) => {
+  if (e.key !== "Escape" || !$("project-panel").hidden || !openDrawer() || e.target.closest?.("#term")) return;
+  e.preventDefault(); closeDrawer();
+});
+// Optional explanations sit behind a "Why?" next to the control they explain; open ones stay open across redraws.
+const openWhys = new Set();
+const why = (key, text) => h("details", { class: "why", open: openWhys.has(key), ontoggle: (e) => { if (e.target.isConnected) { if (e.target.open) openWhys.add(key); else openWhys.delete(key); } } }, h("summary", {}, "Why?"), h("p", {}, text));
+
+// ---- plan reader: the production plan's markdown as plain text blocks (textContent only, never parsed as HTML) ----
+let planShown = null;
+function renderPlanReader() {
+  const text = data.status?.production_plan?.text || "";
+  if (text === planShown) return; // keep the reader's scroll position across polls
+  planShown = text;
+  const blocks = []; let list = null, para = [];
+  const flush = () => { if (para.length) blocks.push(h("p", {}, para.join(" "))); para = []; };
+  for (const line of text.split(/\r?\n/)) {
+    const head = /^(#{1,6})\s+(.*)$/.exec(line), item = /^\s*(?:[-*+]|\d+[.)])\s+(.*)$/.exec(line);
+    if (item) { flush(); if (!list) blocks.push(list = h("ul", {})); list.append(h("li", {}, item[1])); continue; }
+    list = null;
+    if (head) { flush(); blocks.push(h(head[1].length < 3 ? "h3" : "h4", {}, head[2])); }
+    else if (!line.trim()) flush();
+    else para.push(line.trim());
   }
-  let message, tab, action;
-  if (!have()) { target.replaceChildren(h("span", {}, "Select a project above, or create one to begin.")); return; }
-  else if (!p?.scenes.length) {
-    message = p?.options?.length && !p.chosen ? "Choose an option in chat so the agent can write its scenes." : p?.chosen ? "Ask the agent to write the scenes for your chosen option." : "Tell the agent about the product to begin the next step.";
-    action = "Go to chat";
-  } else {
-    const missing = p.scenes.filter((s) => !isCont(s) && !s.storyboard).length;
-    const approvals = p.scenes.filter((s) => !s.approved).length;
-    const stale = kept.filter((s) => s.stale !== undefined).length;
-    const clips = p.scenes.filter((s) => !s.clip).length;
-    if (stale) { message = `${stale} kept scene(s) need a redo because their source changed.`; tab = "generate"; action = "Review stale scenes"; }
-    else if (missing) { message = `${missing} scene(s) need a storyboard still.`; tab = "storyboard"; action = "Make missing stills"; }
-    else if (approvals) { message = `${approvals} scene(s) await your approval.`; tab = "storyboard"; action = "Review scenes"; }
-    else if (clips) { message = `${clips} scene(s) need clips. Generations wait for your credit approval.`; tab = "generate"; action = "Review generation queue"; }
-    else if (!kept.length) { message = "Review the clips and Keep the takes you want in your video."; tab = "generate"; action = "Choose clips"; }
-    else { message = `${kept.length} kept clip(s) are ready for editing. You can exclude other scenes by leaving them unkept.`; tab = "edit"; action = "Edit or review video"; }
-  }
-  const button = h("button", { type: "button" }, action);
-  button.onclick = () => {
-    if (tab) { document.querySelector(`#tabs button[data-view="${tab}"]`).click(); }
-    else { term.focus(); }
-  };
-  target.replaceChildren(h("span", {}, message), " ", button);
+  flush();
+  $("plan-text").replaceChildren(...(blocks.length ? blocks : [h("p", { class: "dim" }, "No plan yet")]));
 }
 
-// ---- Ideas: Claude writes the options, the owner picks one in chat; read-only here ----
-function renderIdeas(el) {
-  const p = data.plan;
-  const opts = (p && p.options) || [];
-  if (!opts.length) return el.replaceChildren(h("p", { class: "empty" }, "Tell the agent about the product and ask for scenario options with hooks."));
-  el.replaceChildren(
-    h("p", { class: "dim" }, p.chosen ? "Chosen in chat. To change it, tell Claude which option to go with." : "Tell the agent in chat which option to go with (e.g. \"go with option 2\")."),
-    h("div", { class: "grid" }, opts.map((o, i) => h("div", { class: "card" + (o.id === p.chosen ? " chosen" : "") },
-      h("b", {}, `${i + 1}. ${o.title}`), o.id === p.chosen ? h("span", { class: "tag" }, " chosen") : null,
-      h("p", {}, h("i", {}, o.hook)), h("p", {}, o.story), h("small", { class: "dim" }, `${o.scenes} scene${o.scenes === 1 ? "" : "s"}`)))));
+// ---- Details: the selected scene, then the video ----
+function renderDetails() {
+  if ($("details").hidden) return;
+  const s = selection?.scene ? data.plan?.scenes?.find((x) => x.n === selection.scene) : null;
+  $("details-scene").hidden = !s;
+  if (s) renderSceneDetails($("details-scene"), s);
+  renderVideoDetails($("details-video"));
 }
 const isCont = (s) => s.start && s.start.kind === "continue";
 // stale holds the scene whose clip changed (it may sit further up the chain than start.from).
 const staleNote = (s) => (s.stale && isCont(s) ? h("p", { class: "stale" }, `Scene ${typeof s.stale === "number" ? s.stale : s.start.from} changed - redo this scene`) : null);
+const fact = (label, value) => value || value === 0 ? [h("dt", {}, label), h("dd", {}, value)] : [];
+function renderSceneDetails(el, s) {
+  const p = data.plan, c = cur();
+  const x = data.status?.scenes?.find((q) => q.n === s.n) || { jobs: [] }, jobs = x.jobs || [];
+  const flag = (stepState()[currentStep()]?.flags || []).find((f) => f.scene === s.n);
+  // Approve and still: moved from the Storyboard view.
+  const latestStoryboard = jobs.filter((job) => job.kind === "storyboard").at(-1);
+  const active = jobs.some((j) => j.kind === "storyboard" && ["queued", "running", "held"].includes(j.status));
+  const approve = btn(s.approved ? "Approved (undo)" : "Approve scene", () => owner("/api/scene", { ...c, n: s.n, approved: !s.approved }), true, s.approved ? "ok" : "");
+  if (!s.approved && ((!isCont(s) && !s.storyboard) || active)) { approve.disabled = true; approve.title = "Generate and review the still first."; }
+  const reroll = btn(s.storyboard ? "Reroll still (clears approval)" : "Make still", () => apiOk("studio_storyboard", { ...c, scenes: [s.n] }));
+  if (active || data.workflow?.stages.storyboard.access !== "open") reroll.disabled = true;
+  if (data.workflow?.stages.storyboard.access !== "open" && !s.approved) approve.disabled = true;
+  // Keep, Cancel, Redo and takes: moved from the Generate view.
+  const last = jobs.filter((j) => j.kind === "clip").slice(-1)[0];
+  const redoDur = h("select", { "aria-label": `Scene ${s.n} redo duration` }, h("option", { value: "" }, "same as scene"), ...[4, 6, 8, 10].map((d) => h("option", { value: d }, d + " s")));
+  const refs = s.references || [];
+  el.replaceChildren(...[
+    h("h2", {}, `Scene ${s.n}`, " ", h("span", { class: "tag" }, isStillScene(s) ? "still" : "clip")),
+    flag ? h("p", { class: "flag" }, h("span", { "aria-hidden": "true" }, "⚑ "), h("span", { class: "sr-only" }, "Flag: "), flag.note) : null,
+    staleNote(s),
+    h("h3", {}, "Prompt"),
+    isCont(s) ? h("p", { class: "dim" }, `Continues from scene ${s.start.from}`) : s.frame_prompt ? h("p", {}, h("span", { class: "dim" }, "Still: "), s.frame_prompt) : null,
+    h("p", {}, h("span", { class: "dim" }, "Clip: "), s.prompt),
+    h("h3", {}, "Settings"),
+    h("dl", { class: "facts" }, fact("Duration", durationPick(s)), fact("Model", isVeo(s) ? s.model : `${s.model || "Omni 1.1 Flash"} · ${s.resolution || "720p"}`), fact("Camera", s.camera), fact("Caption", s.caption), fact("Voiceover", s.voiceover)),
+    h("h3", {}, "References"),
+    h("p", { class: "dim" }, "Video: ", (p.references || []).length ? p.references.map((r) => r.split(/[\\/]/).pop()).join(", ") : "none"),
+    ...refs.map((path) => h("div", { class: "row" },
+      h("span", {}, path.split(/[\\/]/).pop()),
+      btn(`Remove scene ${s.n} reference ${path.split(/[\\/]/).pop()}`, () => savePlan((pl) => {
+        pl.scenes.find((y) => y.n === s.n).references = (pl.scenes.find((y) => y.n === s.n).references || []).filter((r) => r !== path);
+      }, c)))),
+    picker("Add reference", async (f) => {
+      const r = await apiOk("studio_add_reference", { ...c, path: await upload(f) });
+      await savePlan((pl) => { const sc = pl.scenes.find((y) => y.n === s.n); sc.references = [...new Set([...(sc.references || []), r.path])]; }, c);
+    }),
+    h("h3", {}, "Status"),
+    h("p", {}, h("span", { class: "tag" }, last ? last.status : s.clip ? "has clip" : s.approved ? "approved" : "not approved"), last && last.credits != null ? h("small", {}, ` ${last.credits} credits`) : null),
+    active ? h("p", { role: "status" }, "Making still…") : null,
+    latestStoryboard?.error ? h("p", { class: "err", role: "alert" }, latestStoryboard.error) : null,
+    last && last.note ? h("p", { class: "dim" }, last.note) : null, last && last.error ? h("p", { class: "err" }, last.error) : null,
+    h("div", { class: "row" }, isCont(s) ? null : reroll, approve,
+      isCont(s) ? why("approve-cont", `A continuing scene starts on the last frame of scene ${s.start.from}, so it has no still; approving it approves its clip prompt.`)
+        : approve.disabled && !s.approved ? why("approve-still", "Approve needs a still. Make the still and review it first.") : null),
+    h("div", { class: "row" },
+      s.clip ? btn(s.kept ? "Kept (undo)" : "Keep", () => owner("/api/scene", { ...c, n: s.n, kept: !s.kept }), true, s.kept ? "ok" : "") : null,
+      last && (last.status === "held" || last.status === "queued") ? btn("Cancel", () => cancelJob(last.id), true) : null,
+      redoDur,
+      btn("Redo", async () => {
+        const change = prompt(`Redo scene ${s.n}: what should change? (optional)`);
+        if (change === null) return;
+        const result = await apiOk("studio_redo", { ...c, scene: s.n, ...(change.trim() ? { prompt: change.trim() } : {}), ...(redoDur.value ? { duration: Number(redoDur.value) } : {}) });
+        if (result.already_queued?.length) toast("This scene already has an active job. Finish or cancel it before changing the redo request.");
+      })),
+    x.takes?.length ? h("details", { class: "takes" }, h("summary", {}, `Takes (${x.takes.length})`),
+      why("takes", "Using an earlier take clears Keep on this scene and marks scenes that continue from it stale; they need a redo."),
+      ...x.takes.map((take, index) => {
+        const use = btn(take.clip === s.clip ? "Current take" : "Use this take", async () => {
+          await owner("/api/take", { ...c, scene: s.n, clip: take.clip });
+          toast("Take restored. Review and Keep it again; continuing scenes may need a redo.");
+        }, true);
+        if (take.clip === s.clip || x.jobs.some((j) => ["held", "queued", "running"].includes(j.status))) use.disabled = true;
+        return h("div", { class: "take" }, h("p", {}, `Take ${index + 1}${take.createdAt ? " - " + new Date(take.createdAt).toLocaleString() : ""}`),
+          h("video", { src: media(take.clip), controls: true, preload: "none" }), h("div", { class: "row" }, btn(`Show take ${index + 1}`, () => selectContextItem({ kind: "take", scene: s.n, takeIndex: index + 1 })), use));
+      })) : null].filter((k) => k != null));
+}
 
-// ---- Plan ----
+// ---- Video section: steps (with the owner's Reopen), plan, notes, references, scenes, edit ----
+// Reopen asks once inline; the confirm is bound to the video and step it was drawn for.
+let reopenAsk = "", reopenPending = false, reopenError = "";
+function stepList() {
+  const scope = currentScope(), mine = data.statusScope === scope, off = !OWNER || !dataFresh || reopenPending;
+  const button = (label, onclick, attrs = {}) => { const b = h("button", { type: "button", ...attrs }, label); b.onclick = onclick; return b; };
+  const items = STEPS.map((n) => {
+    const x = mine ? stepState()[n] : null, status = x?.status || "idle", asking = reopenAsk === scope + "/" + n;
+    const actions = status !== "approved" ? [] : asking
+      ? [h("span", { class: "ask" }, `Reopen ${stepLabel(n)}?`), button("Confirm", () => reopenStep(n, scope), { "data-write": "1", "data-confirm": n, disabled: off }), button("Cancel", () => { reopenAsk = ""; renderDetails(); $("details").querySelector(`[data-reopen="${n}"]`)?.focus(); })]
+      : [button("Reopen", () => { reopenAsk = scope + "/" + n; reopenError = ""; renderDetails(); $("details").querySelector(`[data-confirm="${n}"]`)?.focus(); }, { "data-write": "1", "data-reopen": n, disabled: off })];
+    return h("li", { "data-step": n, "data-status": status }, h("div", { class: "row" }, h("b", {}, stepLabel(n)), h("span", { class: "dim" }, STEP_WORD[status] || status), ...actions),
+      status === "blocked" && x.blockedReason ? h("p", { class: "dim" }, x.blockedReason) : null,
+      x?.summary ? h("p", { class: "dim step-summary" }, x.summary) : null);
+  });
+  return [h("ol", { class: "step-list" }, items), approvedAny() ? why("reopen", "Reopening a step cancels this video's waiting jobs and sends it and every later step back to not started. Nothing on disk is removed.") : null,
+    reopenError ? h("p", { class: "err", role: "alert" }, reopenError) : null];
+}
+const approvedAny = () => STEPS.some((n) => stepState()[n]?.status === "approved");
+async function reopenStep(step, scope) {
+  if (reopenPending || reopenAsk !== scope + "/" + step) return;
+  reopenAsk = "";
+  if (currentScope() !== scope || data.statusScope !== scope || stepState()[step]?.status !== "approved") { reopenError = "Video changed. Review again."; renderDetails(); return; }
+  const [project, sub] = [cur().project, cur().sub];
+  reopenPending = true; reopenError = ""; renderDetails();
+  try { await owner("/api/step", { project, sub, step, action: "reopen" }); }
+  catch (e) { if (currentScope() === scope) reopenError = String(e.message || e); }
+  finally { reopenPending = false; refresh(true); }
+}
 const lessonText = {};
 async function setAdReference(path, selected, scope = cur()) {
   const target = { ...scope };
@@ -1040,73 +1097,68 @@ function referenceFigure(path, scope, selected) {
   const action = btn(selected ? `Remove ${name} from this video` : `Use ${name} for this video`, () => setAdReference(path, !selected, scope));
   return h("figure", {}, h("img", { src: media(path), alt: name }), h("figcaption", {}, name), action);
 }
-function renderPlan(el) {
+function renderVideoDetails(el) {
   const p = data.plan, c = cur();
-  const kids = [];
+  const read = h("button", { type: "button", "aria-controls": "plan-reader", "aria-expanded": "false" }, "Read plan");
+  read.onclick = () => setDrawer("plan-reader", read);
+  const kids = [h("h2", {}, "Video"), h("h3", {}, "Steps"), ...stepList(), h("div", { class: "row" }, read)];
+  if (!have()) return el.replaceChildren(...kids.filter((k) => k != null));
+  if (data.guide?.text) {
+    const stage = view;
+    kids.push(h("details", { class: "creative-guide", open: expandedGuides.has(stage), ontoggle: e => { if (!e.target.isConnected) return; if (e.target.open) expandedGuides.add(stage); else expandedGuides.delete(stage); } },
+      h("summary", {}, "Creative basis: your Google Flow prompt guide"),
+      h("p", { class: "dim" }, `${data.guide.source} · revision ${data.guide.revision}`),
+      h("h3", {}, "How it applies in Studio"),
+      h("ul", {}, data.guide.adaptations.map(text => h("li", {}, text))),
+      h("h3", {}, "Your original guidance for this stage"),
+      h("pre", { style: "white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;line-height:1.6" }, data.guide.text)));
+  }
   if (p) {
+    // Ideas: Claude writes the options, the owner picks one in chat; read-only here.
+    const opts = p.options || [];
+    if (opts.length) kids.push(h("details", { class: "ideas" }, h("summary", {}, `Ideas (${opts.length})`),
+      why("ideas", p.chosen ? "Chosen in chat. To change it, tell the agent which option to go with." : "Tell the agent in chat which option to go with (e.g. \"go with option 2\")."),
+      h("div", { class: "grid" }, opts.map((o, i) => h("div", { class: "card" + (o.id === p.chosen ? " chosen" : "") },
+        h("b", {}, `${i + 1}. ${o.title}`), o.id === p.chosen ? h("span", { class: "tag" }, " chosen") : null,
+        h("p", {}, h("i", {}, o.hook)), h("p", {}, o.story), h("small", { class: "dim" }, `${o.scenes} scene${o.scenes === 1 ? "" : "s"}`))))));
+    // Plan settings, notes and video references: moved from the Plan view.
     const asp = h("select", { "aria-label": "Plan aspect" }, ...["9:16", "16:9"].map((v) => h("option", { value: v, selected: v === p.aspect }, v)));
     asp.onchange = () => savePlan((pl) => (pl.aspect = asp.value), c).then(() => refresh(true), (e) => toast(e.message));
     const sty = h("select", { "aria-label": "Style" }, ...[["", "none"], ["A", "A"], ["B", "B"]].map(([v, t]) => h("option", { value: v, selected: v === (p.style || "") }, "Style " + t)));
     sty.onchange = () => savePlan((pl) => { if (sty.value) pl.style = sty.value; else delete pl.style; }, c).then(() => refresh(true), (e) => toast(e.message));
-    const rows = p.scenes.filter(s => !selection?.scene || selection.scene === s.n).map((s) => h("tr", {},
-      h("td", {}, String(s.n)), h("td", {}, isCont(s) ? h("span", { class: "dim" }, "(last frame of scene " + s.start.from + ")") : s.frame_prompt || h("span", { class: "dim" }, "not set")),
-      h("td", {}, s.prompt, staleNote(s)), h("td", {}, isCont(s) ? `continues from scene ${s.start.from}` : "own frame"), h("td", {}, s.camera || ""), h("td", {}, durationPick(s)), h("td", {}, isVeo(s) ? s.model : `${s.model || "Omni 1.1 Flash"} · ${s.resolution || "720p"}`), h("td", {}, s.caption || ""), h("td", {}, s.voiceover || ""),
-      h("td", {}, picker("+ ref", async (f) => {
-        const r = await apiOk("studio_add_reference", { ...c, path: await upload(f) });
-        await savePlan((pl) => { const sc = pl.scenes.find((x) => x.n === s.n); sc.references = [...new Set([...(sc.references || []), r.path])]; }, c);
-      }), ...(s.references || []).map(path => h("div", {},
-        h("span", {}, path.split(/[\\/]/).pop()),
-        btn(`Remove scene ${s.n} reference ${path.split(/[\\/]/).pop()}`, () => savePlan(pl => {
-          pl.scenes.find(x => x.n === s.n).references = (pl.scenes.find(x => x.n === s.n).references || []).filter(r => r !== path);
-        }, c)))))));
     const [notesBox, lostBox] = notes.box(c, "6", "Notes for this sub-project (saved automatically)");
-    kids.push(h("div", { class: "row" }, asp, sty), sceneSelector(p.scenes),
-      p.scenes.length ? h("div", { class: "table-scroll" }, h("table", {}, h("thead", {}, h("tr", {}, ...["#", "Frame prompt", "Clip prompt", "Start", "Camera", "Duration", "Model · res", "Caption", "Voiceover", "References"].map((t) => h("th", {}, t)))), h("tbody", {}, rows))) : h("p", {}, "No scenes yet. Ask the agent to write the plan."),
+    kids.push(h("div", { class: "row" }, asp, sty),
       h("h3", {}, "Notes"), notesBox, lostBox,
-      h("h3", {}, "References for this video"),
-      h("p", { class: "dim" }, "These apply to every scene. Removing a reference clears scene approval and keeps earlier media and library files."),
+      h("h3", {}, "References"),
+      why("refs", "Video references apply to every scene. Removing one clears scene approval and keeps earlier media and library files."),
       picker("Add video reference", async (f) => { const r = await apiOk("studio_add_reference", { ...c, path: await upload(f) }); await setAdReference(r.path, true, c); }),
-      (data.activeRefs || []).length ? h("div", { class: "refs" }, data.activeRefs.map(path => referenceFigure(path, c, true))) : h("p", { class: "dim" }, "No video references selected. New videos start with an empty selection."),
+      (data.activeRefs || []).length ? h("div", { class: "refs" }, data.activeRefs.map(path => referenceFigure(path, c, true))) : h("p", { class: "dim" }, "None"),
       h("details", {}, h("summary", {}, `Reference library (${(data.libraryRefs || []).length} unused for this video)`),
-        h("p", { class: "dim" }, "Stored images are available to reuse. They are not automatically included in this video."),
+        why("library", "Stored images are available to reuse. They are not automatically included in this video."),
         h("div", { class: "refs" }, (data.libraryRefs || []).map(path => referenceFigure(path, c, false)))));
     if (p.lessons && p.lessons.length) kids.push(h("details", {}, h("summary", {}, `Lessons (${p.lessons.length})`), h("ul", {}, p.lessons.map((l) => h("li", {}, `[${l.scope}] ${l.text}`)))));
+    // Stills and clips for every scene: moved from the Storyboard and Generate views.
+    const missing = p.scenes.filter((s) => !isCont(s) && !s.storyboard).map((s) => s.n);
+    const make = btn("Make missing stills (free)", () => apiOk("studio_storyboard", { ...c, scenes: missing }));
+    if (!missing.length || data.workflow?.stages.storyboard.access !== "open") make.disabled = true;
+    const dur = h("select", { "aria-label": "Duration" }, h("option", { value: "" }, "Per scene"), ...[4, 6, 8, 10].map((d) => h("option", { value: d }, d + " s")));
+    const res = h("select", { "aria-label": "Resolution" }, h("option", { value: "" }, "Per scene"), h("option", { value: "360p" }, "360p"), h("option", { value: "720p" }, "720p"));
+    kids.push(h("h3", {}, "Scenes"), h("div", { class: "row" }, make), h("div", { class: "row" }, dur, res, btn("Queue approved scenes (held)", async () => {
+      if (data.workflow?.stages.generate.access !== "open") throw new Error(data.workflow?.stages.generate.reason || "Review and approve scenes first.");
+      const result = await apiOk("studio_generate", { ...c, ...(dur.value ? { duration: Number(dur.value) } : {}), ...(res.value ? { resolution: res.value } : {}) });
+      toast(`${result.held} clip(s) queued for approval.` + (result.already_queued?.length ? ` Already queued: scenes ${result.already_queued.join(", ")}.` : ""));
+    }), why("queue", "Queued clips are held: nothing is spent until you approve their credits under Jobs.")));
+    // Approved batches still waiting their turn: one button stops what has not started (a running clip finishes).
+    const queued = {};
+    for (const x of data.status?.scenes || []) for (const j of x.jobs || []) if (j.status === "queued") (queued[j.batch || j.id] ||= []).push(j.id);
+    for (const ids of Object.values(queued))
+      kids.push(h("div", { class: "row" }, btn(`Stop remaining (${ids.length} queued)`, async () => { for (const id of ids) await cancelJob(id); }, true)));
   }
-  el.replaceChildren(...kids);
+  kids.push(...editSection());
+  el.replaceChildren(...kids.filter((k) => k != null));
 }
 
-// ---- Storyboard ----
-function renderBoard(el) {
-  const p = data.plan, c = cur();
-  if (!p) return el.replaceChildren(h("p", {}, "No plan yet."));
-  const cards = p.scenes.map((s) => {
-    const refs = [...new Set([...(p.references || []), ...(s.references || [])])];
-    const jobs = data.status?.scenes.find((x) => x.n === s.n)?.jobs || [];
-    const latestStoryboard=jobs.filter(job=>job.kind==="storyboard").at(-1);
-    const active = jobs.some((j) => j.kind === "storyboard" && ["queued", "running", "held"].includes(j.status));
-    const approve = btn(s.approved ? "Approved (undo)" : "Approve scene", () => owner("/api/scene", { ...c, n: s.n, approved: !s.approved }), true, s.approved ? "ok" : "");
-    if (!s.approved && ((!isCont(s) && !s.storyboard) || active)) { approve.disabled = true; approve.title = "Generate and review the still first."; }
-    const reroll = btn(s.storyboard ? "Reroll still (clears approval)" : "Make still", () => apiOk("studio_storyboard", { ...c, scenes: [s.n] }));
-    if (active || data.workflow?.stages.storyboard.access !== "open") reroll.disabled = true;
-    if (data.workflow?.stages.storyboard.access !== "open" && !s.approved) approve.disabled = true;
-    return h("div", { class: "card", "data-selected": selection?.scene === s.n }, btn(`Select scene ${s.n}`, () => selectContextItem({ kind: "scene", scene: s.n })), h("b", {}, `Scene ${s.n}`),
-      isCont(s) ? h("p", {}, `Continues from scene ${s.start.from}; approve the clip prompt below.`)
-        : s.storyboard ? h("img", { src: media(s.storyboard), alt: "Storyboard still, scene " + s.n }) : h("p", {}, "No still yet ? make the storyboard before approving."),
-      active ? h("p", { role: "status" }, "Storyboard generation in progress?") : null,
-      latestStoryboard?.error ? h("p",{class:"err",role:"alert"},latestStoryboard.error) : null,
-      !isCont(s) && s.frame_prompt ? h("p", { class: "dim" }, "Still: ", s.frame_prompt) : null,
-      h("p", {}, "Clip: ", s.prompt),
-      h("p", {class:"dim"}, "Selected references: ", refs.length ? refs.map(path=>path.split(/[\\/]/).pop()).join(", ") : "none"),
-      btn(`Edit scene ${s.n} references`,()=>{if(navigateTo("plan"))selectContextItem({kind:"scene",scene:s.n});}),
-      h("div", { class: "row" }, isCont(s) ? null : reroll, approve));
-  });
-  const missing = p.scenes.filter((s) => !isCont(s) && !s.storyboard).map((s) => s.n);
-  const make = btn("Make missing stills (free)", () => apiOk("studio_storyboard", { ...c, scenes: missing }));
-  if (!missing.length || data.workflow?.stages.storyboard.access !== "open") make.disabled = true;
-  el.replaceChildren(h("div", { class: "row" }, make), h("div", { class: "grid" }, cards));
-}
-
-// ---- Generate ----
+// ---- Generate helpers (held jobs live under Jobs in the project menu) ----
 const credits = (g) => (g.cost_unknown ? "credits unknown" : `up to ${g.max_credits} credits`);
 const cancelJob = (id) => owner("/api/cancel-job", { id });
 // One approval card: what will be made (scene, prompt, first frame) before the owner pays for it. Prompts are
@@ -1141,72 +1193,12 @@ function heldCard(g) {
     " ", btn("Cancel", async () => { for (const j of g.jobs) await cancelJob(j.id); }, true),
     h("div", { class: "grid" }, items));
 }
-function renderGen(el) {
-  const p = data.plan, c = cur();
-  const other = data.other.length ? [h("h3", {}, "Other held jobs"), ...data.other.map(heldCard)] : [];
-  if (!p) return el.replaceChildren(h("p", {}, "No plan yet."), ...other);
-  const dur = h("select", { "aria-label": "Duration" }, h("option", { value: "" }, "Per scene"), ...[4, 6, 8, 10].map((d) => h("option", { value: d }, d + " s")));
-  const res = h("select", { "aria-label": "Resolution" }, h("option", { value: "" }, "Per scene"), h("option", { value: "360p" }, "360p"), h("option", { value: "720p" }, "720p"));
-  const kids = [h("div", { class: "row" }, dur, res, btn("Queue approved scenes (held)", async () => {
-    if (data.workflow?.stages.generate.access !== "open") throw new Error(data.workflow?.stages.generate.reason || "Review and approve scenes first.");
-    const result = await apiOk("studio_generate", { ...c, ...(dur.value ? { duration: Number(dur.value) } : {}), ...(res.value ? { resolution: res.value } : {}) });
-    toast(`${result.held} clip(s) queued for approval.` + (result.already_queued?.length ? ` Already queued: scenes ${result.already_queued.join(", ")}.` : ""));
-  }))];
-  for (const l of data.lessons) {
-    const txt = h("input", { value: lessonText[l.id] ?? l.text, "aria-label": "Lesson text" });
-    txt.oninput = () => (lessonText[l.id] = txt.value);
-    kids.push(h("div", { class: "lesson" }, h("b", {}, "Learned: "), txt, h("small", {}, ` [${l.scope}] `),
-      btn("Save", () => owner("/api/lessons/resolve", { id: l.id, action: "save", editedText: txt.value }), true),
-      btn("Discard", () => owner("/api/lessons/resolve", { id: l.id, action: "discard" }), true)));
-  }
-  for (const g of data.pending) kids.push(heldCard(g));
-  const st = data.status ? data.status.scenes : [];
-  // Approved batches still waiting their turn: one button stops what has not started (a running clip finishes).
-  const queued = {};
-  for (const x of st) for (const j of x.jobs) if (j.status === "queued") (queued[j.batch || j.id] ||= []).push(j.id);
-  for (const ids of Object.values(queued))
-    kids.push(h("div", { class: "row" }, btn(`Stop remaining (${ids.length} queued)`, async () => { for (const id of ids) await cancelJob(id); }, true)));
-  kids.push(...other);
-  kids.push(h("div", { class: "grid" }, p.scenes.map((s) => {
-    const x = st.find((q) => q.n === s.n) || { jobs: [] };
-    const last = x.jobs.filter((j) => j.kind === "clip").slice(-1)[0];
-    const redoDur = h("select", { "aria-label": `Scene ${s.n} redo duration` }, h("option", { value: "" }, "same as scene"), ...[4, 6, 8, 10].map((d) => h("option", { value: d }, d + " s")));
-    return h("div", { class: "card" },
-      btn(`Select scene ${s.n}`, () => selectContextItem({ kind: "scene", scene: s.n })), h("b", {}, `Scene ${s.n}`), " ", h("span", { class: "tag" }, last ? last.status : s.clip ? "has clip" : s.approved ? "approved" : "not approved"),
-      last && last.credits != null ? h("small", {}, ` ${last.credits} credits`) : null,
-      staleNote(s), isCont(s) ? h("p", { class: "dim" }, `Continues from scene ${s.start.from}`) : null,
-      last && last.note ? h("p", { class: "dim" }, last.note) : null, last && last.error ? h("p", { class: "err" }, last.error) : null,
-      s.clip ? h("video", { src: media(s.clip), controls: true, preload: "metadata" }) : null,
-      x.takes?.length ? h("details", {}, h("summary", {}, `Take history (${x.takes.length}): compare or restore`),
-        ...x.takes.map((take, index) => {
-          const use = btn(take.clip === s.clip ? "Current take" : "Use this take", async () => {
-            await owner("/api/take", { ...c, scene: s.n, clip: take.clip });
-            toast("Take restored. Review and Keep it again; continuing scenes may need a redo.");
-          }, true);
-          if (take.clip === s.clip || x.jobs.some((j) => ["held", "queued", "running"].includes(j.status))) use.disabled = true;
-          return h("div", {}, h("p", {}, `Take ${index + 1}${take.createdAt ? " - " + new Date(take.createdAt).toLocaleString() : ""}`),
-            h("video", { src: media(take.clip), controls: true, preload: "none" }), btn(`Discuss take ${index + 1} of scene ${s.n}`, () => selectContextItem({ kind: "take", scene: s.n, takeIndex: index + 1 })), use);
-        })) : null,
-      h("div", { class: "row" },
-        s.clip ? btn(s.kept ? "Kept (undo)" : "Keep", () => owner("/api/scene", { ...c, n: s.n, kept: !s.kept }), true, s.kept ? "ok" : "") : null,
-        last && (last.status === "held" || last.status === "queued") ? btn("Cancel", () => cancelJob(last.id), true) : null,
-        redoDur,
-        btn("Redo", async () => {
-          const change = prompt(`Redo scene ${s.n}: what should change? (optional)`);
-          if (change === null) return;
-          const result = await apiOk("studio_redo", { ...c, scene: s.n, ...(change.trim() ? { prompt: change.trim() } : {}), ...(redoDur.value ? { duration: Number(redoDur.value) } : {}) });
-          if (result.already_queued?.length) toast("This scene already has an active job. Finish or cancel it before changing the redo request.");
-        })));
-  })));
-  el.replaceChildren(...kids);
-}
 
-// ---- Edit: Claude edits the whole video in Remotion; this view collects the extras and shows the renders ----
+// ---- Edit: Claude edits the whole video in Remotion; this section collects the extras and lists the renders ----
 const editFiles = new Map();
 const taskActive = (task) => !!task && !["finished", "failed"].includes(task.phase);
 let renderSel = null; // { count, v }: the owner's pick, forgotten when a new render arrives
-function renderEdit(el) {
-  if (!have()) return el.replaceChildren(h("p", {}, "Pick or create a project first (Plan tab)."));
+function editSection() {
   const p = data.plan, c = cur(), renders = data.renders || [];
   const kept = (p ? p.scenes : []).filter((s) => s.kept && s.clip);
   const label = `${c.project}/${c.sub}`, task = data.editTask;
@@ -1239,31 +1231,29 @@ function renderEdit(el) {
     }
 
   }, true, "big");
-  if (!termUp() || !kept.length || stale.length || taskActive(task) || data.workflow?.stages.edit.access !== undefined && data.workflow.stages.edit.access !== "open") { go.disabled = true; go.title = taskActive(task) ? "An edit task is already active" : data.workflow?.stages.edit.reason || (stale.length ? "Redo stale kept scenes before editing" : !termUp() ? "Start or reconnect the agent in the terminal below" : "Keep at least one clip first"); }
+  if (!termUp() || !kept.length || stale.length || taskActive(task) || data.workflow?.stages.edit.access !== undefined && data.workflow.stages.edit.access !== "open") { go.disabled = true; go.title = taskActive(task) ? "An edit task is already active" : data.workflow?.stages.edit.reason || (stale.length ? "Redo stale kept scenes before editing" : !termUp() ? "Start or reconnect the agent in Chat" : "Keep at least one clip first"); }
   const sel = renderSel && renderSel.key === label && renderSel.count === renders.length ? renderSel.v : renders.length ? renders[renders.length - 1].version : null;
   const shown = renders.find((r) => r.version === sel);
-  if (shown && (!selection || selection.kind === "render" && selection.version !== shown.version)) {
+  if (view === "edit" && shown && (!selection || selection.kind === "render" && selection.version !== shown.version)) {
     selection = { kind: "render", version: shown.version }; publishContextSoon();
   }
-  el.replaceChildren(h("div", { class: "edit-layout" }, h("div", { class: "edit-brief" },
+  return [h("h3", {}, "Edit"),
     task ? h("section", { class: "edit-task", "aria-label": "Editing task status" }, h("b", {}, `Edit task: ${task.phase}`),
       h("p", { role: "status" }, task.message),
-      task.phase === "sent" ? h("p", {}, "Waiting for acknowledgement. Complete sign-in or trust prompts in the terminal if needed.") : null,
+      task.phase === "sent" ? why("task-sent", "Waiting for the agent to acknowledge. Complete sign-in or trust prompts in the terminal if needed.") : null,
       taskActive(task) ? btn("Mark task stopped (does not stop agent)", () => owner("/api/edit-task/stop", { ...c, task_id: task.id }), true) : null) : null,
     stale.length ? h("p", { class: "err" }, `Redo stale kept scenes ${stale.map((s) => s.n).join(", ")} before editing.`) : null,
-    h("h3", {}, "Edit notes"), box, lostBox,
-    h("div", { class: "row" }, go, renders.length ? btn("Start new video", startNewAd) : null),
+    h("h4", {}, "Edit notes"), box, lostBox,
+    h("div", { class: "row" }, go, go.disabled && go.title ? why("edit-go", go.title) : null, renders.length ? btn("Start new video", startNewAd) : null),
     h("div", { class: "edit-audio" }, picker("Music", async (f) => (files.music = await upload(f)), "audio/*"), picker("Voiceover", async (f) => (files.voiceover = await upload(f)), "audio/*")),
     files.music ? h("p", { class: "dim" }, "Music: " + files.music.split(/[\\/]/).pop()) : null,
-    files.voiceover ? h("p", { class: "dim" }, "Voiceover: " + files.voiceover.split(/[\\/]/).pop()) : null),
-    h("div", { class: "edit-preview" }, shown ? h("div", {},
-      h("h3", {}, `Viewing render v${shown.version}`),
-      h("div", { class: "row" }, renders.map((r) => btn(`v${r.version}`, () => { renderSel = { key: label, count: renders.length, v: r.version }; selectContextItem({ kind: "render", version: r.version }); }, false, r.version === sel ? "ok" : ""))),
-      h("video", { src: media(shown.path), controls: true, preload: "metadata", class: "render" })) : h("div", { class: "preview-empty" },
-        h("span", { class: "preview-frame", "aria-hidden": "true" }, "\u25b7"), h("p", {}, "Your render will appear here"), h("small", {}, "Add your edit notes, then start the edit when the agent is ready.")),
+    files.voiceover ? h("p", { class: "dim" }, "Voiceover: " + files.voiceover.split(/[\\/]/).pop()) : null,
+    h("h4", {}, "Renders"),
+    renders.length ? h("div", { class: "row renders" }, renders.map((r) => btn(`v${r.version}`, () => { renderSel = { key: label, count: renders.length, v: r.version }; selectContextItem({ kind: "render", version: r.version }); }, false, r.version === sel ? "ok" : "")))
+      : h("p", { class: "dim" }, "None"),
     h("details", { class: "edit-clips" }, h("summary", {}, `Kept clips (${kept.length})`),
       kept.length ? h("div", { class: "thumbs" }, kept.map((s) => h("figure", {}, h("video", { src: media(s.clip), muted: true, preload: "metadata" }), h("figcaption", {}, `Scene ${s.n}`))))
-        : h("p", { class: "dim" }, "No kept clips yet. Keep clips in the Generate tab.")))));
+        : h("p", { class: "dim" }, "None"))];
 }
 
 refresh(true);
