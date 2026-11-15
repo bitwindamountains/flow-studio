@@ -323,3 +323,28 @@ test("RemoteCore.cancel (flow_cancel from a client process) reaches the owner wi
   srv.lastServer!.closeAllConnections();
   await new Promise((r) => srv.lastServer!.close(r));
 });
+
+test("server: /api/scene refuses kept on a still without its storyboard file", async () => {
+  const { LocalCore } = await import("./core.js");
+  const srv = await import("./server.js");
+  const { createSub, readPlan, writePlan } = await import("./projects.js");
+  process.env.STUDIO_PROJECTS = join(home, "projects");
+  createSub("P", "stk", "9:16");
+  const plan = readPlan("P", "stk");
+  plan.scenes = [{ n: 1, prompt: "x", kind: "still" }];
+  writePlan(plan);
+  assert.equal(await srv.startServer(new LocalCore(), undefined, STUDIO), "owner");
+  const base = `http://127.0.0.1:${port}`;
+  await page();
+  const h = { cookie: "fs_ui=" + /fs_ui=([0-9a-f]+)/.exec(lastSet)![1], origin: base };
+  const post = (body: object) => fetch(base + "/api/scene", { method: "POST", headers: h, body: JSON.stringify(body) });
+  const bad = await post({ project: "P", sub: "stk", n: 1, kept: true });
+  assert.equal(bad.status, 400);
+  assert.match(((await bad.json()) as { error: string }).error, /Scene 1/);
+  const img = join(home, "stk.png"); writeFileSync(img, "i");
+  const withImg = readPlan("P", "stk"); withImg.scenes[0].storyboard = img; writePlan(withImg);
+  assert.equal((await post({ project: "P", sub: "stk", n: 1, kept: true })).status, 200);
+  assert.equal(readPlan("P", "stk").scenes[0].kept, true);
+  srv.lastServer!.closeAllConnections();
+  await new Promise((r) => srv.lastServer!.close(r));
+});

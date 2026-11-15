@@ -27,6 +27,10 @@ export const SceneSchema = z.object({
   resolution: z.enum(["360p", "720p"]).optional(),
   clip: z.string().optional(),
   kept: z.boolean().optional(),
+  // Absent means "clip". A still scene's final asset is its storyboard image; no video job is ever made for it.
+  kind: z.enum(["still", "clip"]).optional(),
+  // Chapter name for the review desk.
+  section: z.string().max(60).optional(),
   // Engine-owned: where the storyboard still / clip sits in Flow (hashed account id + Flow project path).
   storyboard_flow: z.object({ account: z.string(), flowProject: z.string() }).optional(),
   clip_flow: z.object({ account: z.string(), flowProject: z.string() }).optional(),
@@ -50,6 +54,7 @@ export const PlanSchema = z.object({
   scenes: z.array(SceneSchema).refine((s) => new Set(s.map((x) => x.n)).size === s.length, "scene numbers (n) must be unique"),
 });
 export type Scene = z.infer<typeof SceneSchema>;
+export const isStill = (s: Scene) => s.kind === "still";
 export type Plan = z.infer<typeof PlanSchema>;
 
 export const VIDEO_DEFAULTS = { model: "Omni 1.1 Flash", duration: 8 as 4 | 6 | 8 | 10, resolution: "720p" as "360p" | "720p" };

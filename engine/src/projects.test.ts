@@ -96,3 +96,10 @@ test("writeNotes with a stale base rev is rejected", () => {
   P.writeNotes("Nt", "ss", "second", next);
   assert.equal(P.readNotes("Nt", "ss"), "second");
 });
+
+test("a plan without kind parses and every scene is a clip", () => {
+  const plan = P.PlanSchema.parse({ project: "K", sub: "s", aspect: "9:16", scenes: [{ n: 1, prompt: "a" }, { n: 2, prompt: "b", kind: "still", section: "Intro" }] });
+  assert.equal("kind" in plan.scenes[0], false);
+  assert.deepEqual(plan.scenes.map(P.isStill), [false, true]);
+  assert.throws(() => P.PlanSchema.parse({ project: "K", sub: "s", aspect: "9:16", scenes: [{ n: 1, prompt: "a", section: "x".repeat(61) }] }));
+});

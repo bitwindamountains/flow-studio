@@ -106,3 +106,42 @@ test("audio: only audio extensions, never the same file twice, both moves or nei
   writeFileSync(join(subPublicDir("Aud2", "s"), "captions.json"), '{"owner":true}');
   assert.throws(() => handoff(p, {}), /not written by the studio/);
 });
+
+const stillPlan = (project: string): Plan => {
+  const dir = join(tmp, "src-" + project); mkdirSync(dir, { recursive: true });
+  const img = (n: string, body: string) => { const p = join(dir, n); writeFileSync(p, body); return p; };
+  mkdirSync(clipsDir(project, "s"), { recursive: true });
+  const clip = join(clipsDir(project, "s"), "scene-02.mp4"); writeFileSync(clip, "clip");
+  return { project, sub: "s", aspect: "16:9", scenes: [
+    { n: 1, prompt: "a", kind: "still", kept: true, storyboard: img("one.png", "ONE") },
+    { n: 2, prompt: "b", kept: true, clip },
+    { n: 3, prompt: "c", kind: "still", kept: true, storyboard: img("three.jpg", "THREE") },
+    { n: 4, prompt: "d", kind: "still", kept: false, storyboard: img("four.png", "FOUR") },
+  ] };
+};
+
+test("handoff copies each kept still to stills/scene-NNN.<ext>, never overwrites a different existing file, and returns scenes in plan order mixing kinds", () => {
+  const plan = stillPlan("Stills");
+  const r = handoff(plan, {});
+  assert.deepEqual(r.scenes.map((s) => [s.n, s.kind, s.file]), [
+    [1, "still", "Stills/s/stills/scene-001.png"], [2, "clip", "Stills/s/clips/scene-02.mp4"], [3, "still", "Stills/s/stills/scene-003.jpg"]]);
+  assert.deepEqual(r.clips, ["Stills/s/clips/scene-02.mp4"]);
+  const dir = join(subPublicDir("Stills", "s"), "stills");
+  assert.equal(readFileSync(join(dir, "scene-001.png"), "utf8"), "ONE");
+  assert.equal(existsSync(join(dir, "scene-004.png")), false);
+  handoff(plan, {}); // same bytes: reused, no -v2
+  assert.equal(existsSync(join(dir, "scene-001-v2.png")), false);
+  writeFileSync(plan.scenes[0].storyboard!, "ONE-CHANGED");
+  assert.equal(handoff(plan, {}).scenes[0].file, "Stills/s/stills/scene-001-v2.png");
+  assert.equal(readFileSync(join(dir, "scene-001.png"), "utf8"), "ONE");
+  writeFileSync(plan.scenes[0].storyboard!, "ONE-AGAIN");
+  assert.equal(handoff(plan, {}).scenes[0].file, "Stills/s/stills/scene-001-v3.png");
+});
+
+test("handoff still refuses a kept clip scene with no clip", () => {
+  const plan = stillPlan("Stills2");
+  delete plan.scenes[1].clip;
+  assert.throws(() => handoff(plan, {}), /scene 2 is kept but has no clip/);
+  const missing = stillPlan("Stills3"); unlinkSync(missing.scenes[0].storyboard!);
+  assert.throws(() => handoff(missing, {}), /Scene 1.*image/);
+});

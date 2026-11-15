@@ -12,7 +12,7 @@ import { JobQueue, type Job, type JobRunner, type SceneParams } from "./queue.js
 import { HOME_DIR, getFlowPage } from "./chrome.js";
 import { ACCOUNTS_FILE, currentLocation, discoverAccounts, ensureAffordable, ensureJobProject, findSource, goToSource } from "./switcher.js";
 import { BIN, COMPUTER, IS_MAC, IS_WIN, moveToBin } from "./platform.js";
-import { PlanSchema, sceneSettings, projDir, subDir, safeName, addReference, createSub, listProjects, notesRev, planRev, readNotes, readPlan, uploadsDir, within, writeNotes, writePlan } from "./projects.js";
+import { PlanSchema, isStill, sceneSettings, projDir, subDir, safeName, addReference, createSub, listProjects, notesRev, planRev, readNotes, readPlan, uploadsDir, within, writeNotes, writePlan } from "./projects.js";
 import { readJson, writeJsonAtomic } from "./persist.js";
 import { blockStep, pauseWorking, readSteps, remaining, reserve, settle, type StepName } from "./steps.js";
 import { clipsDir, handoff, listRenders, renderDone } from "./handoff.js";
@@ -829,7 +829,9 @@ export class LocalCore implements Core {
       if (s.start?.kind !== "continue") continue;
       const from = s.start.from;
       if (from >= s.n) throw new Error(`Scene ${s.n}: start.from must be an earlier scene (got ${from}).`);
-      if (!plan.scenes.some((x) => x.n === from)) throw new Error(`Scene ${s.n}: start.from ${from} is not a scene in this plan.`);
+      const source = plan.scenes.find((x) => x.n === from);
+      if (!source) throw new Error(`Scene ${s.n}: start.from ${from} is not a scene in this plan.`);
+      if (isStill(source)) throw new Error(`Scene ${s.n} continues from a still (scene ${from}); a continuation needs a clip as its source.`);
     }
     if (plan.chosen !== undefined && !(plan.options ?? []).some((o) => o.id === plan.chosen)) throw new Error(`chosen "${plan.chosen}" is not one of the options' ids.`);
     const same = (a: unknown, b: unknown) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
@@ -1084,8 +1086,10 @@ export class LocalCore implements Core {
     const plan = readPlan(project, sub);
     const selection = this.pickScenes(plan, scenes, true);
     const skipped = selection.skipped;
-    const already_queued = selection.picked.filter((s) => this.studioJobs(project, sub, "clip", s.n).some((j) => ["held", "queued", "running"].includes(j.status))).map((s) => s.n);
-    const picked = selection.picked.filter((s) => !already_queued.includes(s.n));
+    // A still scene's image is its final asset: no video job, no credits reserved.
+    const skipped_stills = selection.picked.filter(isStill).map((s) => s.n);
+    const already_queued = selection.picked.filter((s) => !isStill(s)).filter((s) => this.studioJobs(project, sub, "clip", s.n).some((j) => ["held", "queued", "running"].includes(j.status))).map((s) => s.n);
+    const picked = selection.picked.filter((s) => !isStill(s) && !already_queued.includes(s.n));
     // Sources first (start.from is always an earlier n), and every continue checked before anything is queued.
     picked.sort((x, y) => x.n - y.n);
     const ns = new Set(picked.map((s) => s.n));
@@ -1094,12 +1098,13 @@ export class LocalCore implements Core {
     const batch = randomUUID().slice(0, 8);
     const inBatch = new Map<number, Job>();
     const jobs = this.addFunded(picked, step, (s) => { const j = this.clipJob(plan, s, { duration, resolution, model, max_credits }, batch, inBatch, step); inBatch.set(s.n, j); return j; });
-    return { batch, held: picked.length, already_queued, quoted_max_credits: jobs.reduce((n, j) => n + j.params.max_credits, 0), ...(skipped.length && { skipped_unapproved: skipped }) };
+    return { batch, held: picked.length, already_queued, quoted_max_credits: jobs.reduce((n, j) => n + j.params.max_credits, 0), ...(skipped.length && { skipped_unapproved: skipped }), ...(skipped_stills.length && { skipped_stills }) };
   }
 
   async studio_redo(a: Args<"studio_redo">) {
     const { project, sub } = this.pick(a); const { scene, prompt, duration, resolution, model } = a;
     const plan = readPlan(project, sub);
+    if (plan.scenes.some((x) => x.n === scene && isStill(x))) throw new Error(`Scene ${scene} is a still; redo its image with studio_storyboard`);
     const s = this.pickScenes(plan, [scene], true).picked[0];
     const existing = this.studioJobs(project, sub, "clip", scene).find((j) => ["held", "queued", "running"].includes(j.status));
     if (existing) return { batch: existing.batch, held: 0, already_queued: [scene], job_id: existing.id, quoted_max_credits: 0 };
@@ -1129,7 +1134,7 @@ export class LocalCore implements Core {
     for (const [what, p] of [["music", music], ["voiceover", voiceover]] as const)
       if (p && !within(p, [uploadsDir()])) throw new Error(`${what} must be a file uploaded through the studio page (inside the uploads folder).`);
     const clips = clipsDir(project, sub);
-    for (const s of plan.scenes) if (s.kept && s.clip && !within(s.clip, [clips])) throw new Error(`Scene ${s.n}: kept clip must be inside ${clips}.`);
+    for (const s of plan.scenes) if (s.kept && !isStill(s) && s.clip && !within(s.clip, [clips])) throw new Error(`Scene ${s.n}: kept clip must be inside ${clips}.`);
     return { ...handoff(plan, { music, voiceover }), style: plan.style };
   }
 

@@ -1,6 +1,6 @@
-import { existsSync, linkSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { constants, copyFileSync, existsSync, linkSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, extname, join, relative } from "node:path";
-import { safeName, within, type Plan } from "./projects.js";
+import { isStill, safeName, within, type Plan } from "./projects.js";
 import { readJson, writeJsonAtomic } from "./persist.js";
 import { z } from "zod";
 
@@ -10,6 +10,7 @@ export const remotionRoot = () => process.env.STUDIO_REMOTION ?? String.raw`D:\f
 // One copy of every media file: clips live in Remotion's public/, finished videos in its out/.
 export const subPublicDir = (project: string, sub: string) => join(remotionRoot(), "public", safeName(project), safeName(sub));
 export const clipsDir = (project: string, sub: string) => join(subPublicDir(project, sub), "clips");
+export const stillsDir = (project: string, sub: string) => join(subPublicDir(project, sub), "stills");
 export const rendersDir = (project: string, sub: string) => join(remotionRoot(), "out", safeName(project), safeName(sub));
 
 // Windows paths compare case-insensitively.
@@ -32,11 +33,12 @@ const AudioManifest = z.object({ owner: z.literal("flow-studio-audio-v1"),
 // The studio's own captions.json: an array of { scene: number, ... }. Anything else in that place is not ours.
 const ours = (f: string) => { try { const c = JSON.parse(readFileSync(f, "utf8")); return Array.isArray(c) && c.every((x) => typeof x?.scene === "number"); } catch { return false; } };
 
-export function handoff(plan: Plan, opts: { music?: string; voiceover?: string }): { dir: string; clips: string[]; captions: string; music?: string; voiceover?: string } {
+export function handoff(plan: Plan, opts: { music?: string; voiceover?: string }): { dir: string; clips: string[]; scenes: { n: number; kind: "still" | "clip"; file: string }[]; captions: string; music?: string; voiceover?: string } {
   const kept = plan.scenes.filter((s) => s.kept === true);
   if (!kept.length) throw new Error("no kept scenes to hand off");
   for (const s of kept) {
     if (s.stale !== undefined) throw new Error(`Scene ${s.n} is stale after scene ${s.stale} changed - redo it before editing.`);
+    if (isStill(s)) { if (!s.storyboard || !existsSync(s.storyboard)) throw new Error(`Scene ${s.n} is a kept still but its image file is missing: ${s.storyboard ?? "none"}`); continue; }
     if (!s.clip) throw new Error(`scene ${s.n} is kept but has no clip`);
     if (!existsSync(s.clip)) throw new Error(`scene ${s.n} clip file is missing: ${s.clip}`);
   }
@@ -73,6 +75,19 @@ export function handoff(plan: Plan, opts: { music?: string; voiceover?: string }
       throw new Error("Registered audio is missing or invalid; upload the audio again.");
   }
   mkdirSync(dir, { recursive: true });
+  // Stills are copied (never moved) into public/ so Remotion can serve them: identical bytes reuse the file, different bytes get the next free -vK.
+  const placed = new Map<number, string>();
+  for (const s of kept.filter(isStill)) {
+    const ext = extname(s.storyboard!).toLowerCase(), src = readFileSync(s.storyboard!), folder = stillsDir(plan.project, plan.sub);
+    mkdirSync(folder, { recursive: true });
+    const stem = `scene-${String(s.n).padStart(3, "0")}`;
+    for (let v = 1; ; v++) {
+      const dest = join(folder, v === 1 ? stem + ext : `${stem}-v${v}${ext}`);
+      if (existsSync(dest) && readFileSync(dest).equals(src)) { placed.set(s.n, dest); break; }
+      if (existsSync(dest)) continue;
+      try { copyFileSync(s.storyboard!, dest, constants.COPYFILE_EXCL); placed.set(s.n, dest); break; } catch (e) { if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e; v--; }
+    }
+  }
   // Both audio moves or neither: a failed second move puts the first one back.
   const done: { p: string; dest: string }[] = [];
   try { for (const a of audio) { moveExcl(a.p, a.dest); done.push(a); } } catch (e) {
@@ -83,7 +98,7 @@ export function handoff(plan: Plan, opts: { music?: string; voiceover?: string }
   try { if (manifest.imports.length) writeJsonAtomic(manifestFile, { ...manifest, current: selected }); }
   catch (error) { for (const a of done) moveExcl(a.dest, a.p); throw error; }
   writeFileSync(captions, JSON.stringify(plan.scenes.map((s) => ({ scene: s.n, caption: s.caption, voiceover: s.voiceover })), null, 2));
-  return { dir, clips: kept.map((s) => staticPath(s.clip!)), captions: staticPath(captions), ...Object.fromEntries(Object.entries(selected).map(([what, file]) => [what, staticPath(join(dir, file))])) };
+  return { dir, clips: kept.filter((s) => !isStill(s)).map((s) => staticPath(s.clip!)), scenes: kept.map((s) => ({ n: s.n, kind: isStill(s) ? "still" as const : "clip" as const, file: staticPath(isStill(s) ? placed.get(s.n)! : s.clip!) })), captions: staticPath(captions), ...Object.fromEntries(Object.entries(selected).map(([what, file]) => [what, staticPath(join(dir, file))])) };
 }
 
 const RENDER = /^v(\d+)\.(mp4|webm|mov)$/i;

@@ -195,3 +195,31 @@ test("startup with a working step marks it paused and leaves ledger numbers unch
   assert.deepEqual(jobs.map((j) => j.status), ["queued", "queued"]);
   assert.equal(unfunded.status, "held");
 });
+
+test("studio_generate skips still scenes and lists them in skipped_stills", async () => {
+  const { core, P, S } = await stepFixture("stl", 100, 3);
+  const plan = P.readPlan("Bud", "stl");
+  plan.scenes[1].kind = "still";
+  P.writePlan(plan);
+  core.queue.pause("fixture");
+  const r = await core.studio_generate({ project: "Bud", sub: "stl" } as never) as { held: number; skipped_stills: number[] };
+  assert.deepEqual(r.skipped_stills, [2]);
+  assert.equal(r.held, 2);
+  assert.deepEqual(mine(core, "stl").map((j) => (j.params as { studio?: { scene: number } }).studio!.scene).sort(), [1, 3]);
+  assert.equal(S.readSteps("Bud", "stl").steps.assets.reservations.length, 2);
+  await assert.rejects(core.studio_redo({ project: "Bud", sub: "stl", scene: 2 } as never), /Scene 2 is a still; redo its image with studio_storyboard/);
+});
+
+test("studio_plan_write refuses a continue scene whose source is a still; studio_to_remotion returns scenes", async () => {
+  const { core, P } = await stepFixture("stl2", 100, 2);
+  const plan = P.readPlan("Bud", "stl2");
+  plan.scenes[0].kind = "still"; plan.scenes[1].start = { kind: "continue", from: 1 };
+  await assert.rejects(core.studio_plan_write({ project: "Bud", sub: "stl2", rev: plan.rev ?? 0, plan } as never), /Scene 2 continues from a still/);
+  plan.scenes[1].start = undefined;
+  await core.studio_plan_write({ project: "Bud", sub: "stl2", rev: plan.rev ?? 0, plan } as never);
+  assert.equal(P.readPlan("Bud", "stl2").scenes[0].kind, "still");
+  const img = join(home, "stl2.png"); writeFileSync(img, "i");
+  const cur = P.readPlan("Bud", "stl2"); cur.scenes[0].storyboard = img; cur.scenes[0].kept = true; P.writePlan(cur);
+  const r = await core.studio_to_remotion({ project: "Bud", sub: "stl2" } as never) as { scenes: { n: number; kind: string }[] };
+  assert.deepEqual(r.scenes.map((s) => [s.n, s.kind]), [[1, "still"]]);
+});

@@ -199,6 +199,8 @@ export async function startServer(core: Core, spawner = startAgent, opts: { stud
         if (!scene) return json(res, 400, { error: "Unknown scene." });
         if (b.approved === true && scene.start?.kind !== "continue" && (!scene.storyboard || !existsSync(scene.storyboard)))
           return json(res, 400, { error: `Scene ${scene.n}: generate and review its storyboard still before approving.` });
+        if (b.kept === true && scene.kind === "still" && (!scene.storyboard || !existsSync(scene.storyboard)))
+          return json(res, 400, { error: `Scene ${scene.n} is a still: generate its image before keeping it.` });
         if (typeof b.approved === "boolean") scene.approved = b.approved;
         if (typeof b.kept === "boolean") scene.kept = b.kept;
         writePlan(plan);

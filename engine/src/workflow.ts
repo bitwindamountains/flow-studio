@@ -1,4 +1,4 @@
-import type { Plan } from "./projects.js";
+import { isStill, type Plan } from "./projects.js";
 
 export type Stage = "ideas" | "plan" | "storyboard" | "generate" | "edit";
 export type NextAction = { kind: "navigate"; stage: Stage } | { kind: "compose"; instruction: string } | { kind: "review_jobs" };
@@ -21,7 +21,9 @@ export function deriveWorkflow(f: WorkflowFacts): WorkflowState {
   const approved = scenes.filter(s => s.approved && valid(s.n) && (s.start?.kind === "continue" || facts.get(s.n)?.storyboardExists));
   const kept = scenes.filter(s => s.kept);
   const staleKept = kept.some(s => s.stale !== undefined);
-  const editable = kept.length > 0 && kept.every(s => s.stale === undefined && facts.get(s.n)?.clipExists);
+  // A still's final asset is its storyboard image, a clip scene's is its clip.
+  const made = (s: Plan["scenes"][number]) => isStill(s) ? facts.get(s.n)?.storyboardExists : facts.get(s.n)?.clipExists;
+  const editable = kept.length > 0 && kept.every(s => s.stale === undefined && made(s));
   const monitoring = f.scenes.some(s => s.clipExists || s.hasTakes || s.hasActiveJob);
   const stills = f.scenes.some(s => s.storyboardExists) || scenes.some(s => s.approved);
   const state = (open: boolean, review: boolean, complete: boolean, reason: string): StageState => ({
@@ -32,11 +34,11 @@ export function deriveWorkflow(f: WorkflowFacts): WorkflowState {
     ideas: state(true, false, chosen, chosen ? "Scenario selected. You can revisit the idea." : "Choose a scenario in chat to unlock Plan."),
     plan: state(chosen || scenes.length > 0, false, validAll, validAll ? "Scene plan ready for review." : chosen || scenes.length ? "Write or revise the scene prompts." : "Choose a scenario in Ideas first."),
     storyboard: state(validAny, stills, validAll && approved.length === scenes.length, validAny ? "Review each scene and approve its still or continuation prompt." : "Add a valid scene plan first."),
-    generate: state(approved.length > 0, monitoring, scenes.length > 0 && scenes.every(s => facts.get(s.n)?.clipExists && s.stale === undefined), approved.length ? "Generate approved scenes, then Keep your chosen takes." : monitoring ? "Review existing takes and active jobs. Approve scenes before generating." : "Approve at least one storyboard scene first."),
+    generate: state(approved.length > 0, monitoring, scenes.length > 0 && scenes.every(s => made(s) && s.stale === undefined), approved.length ? "Generate approved scenes, then Keep your chosen takes." : monitoring ? "Review existing takes and active jobs. Approve scenes before generating." : "Approve at least one storyboard scene first."),
     edit: state(editable, f.renderVersions.length > 0 || f.editTaskPhase !== null, editable && f.renderVersions.length > 0, editable ? "Your kept clips are ready. Edit or review the finished video." : staleKept ? "Redo stale kept clips before editing. Earlier renders remain available." : "Keep at least one usable clip; all kept clips must exist and be current."),
   };
   let recommendedStage: Stage = "ideas";
-  if (staleKept || kept.some(s => !facts.get(s.n)?.clipExists)) recommendedStage = "generate";
+  if (staleKept || kept.some(s => !made(s))) recommendedStage = "generate";
   else if (editable || f.renderVersions.length) recommendedStage = "edit";
   else if (!chosen && !scenes.length) recommendedStage = "ideas";
   else if (!validAll) recommendedStage = "plan";
