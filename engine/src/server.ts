@@ -13,6 +13,7 @@ import { PtyHub, startAgent } from "./pty.js";
 import { flowHealth, formatHealth } from "./health.js";
 import { projectsRoot, readPlan, writePlan } from "./projects.js";
 import { remotionRoot } from "./handoff.js";
+import { STEP_ORDER } from "./steps.js";
 
 export const PORT = Number(process.env.FLOW_MCP_PORT ?? 8787);
 export const TOKEN_FILE = join(HOME_DIR, "token");
@@ -183,6 +184,19 @@ export async function startServer(core: Core, spawner = startAgent, opts: { stud
         }
         if (url.pathname.endsWith("/start")) return json(res, 200, { task: core.startEditTask(scope) });
         return json(res, 200, { task: core.stopEditTask({ ...scope, task_id: z.string().min(1).parse(raw.task_id) }) });
+      }
+      if (req.method === "POST" && url.pathname === "/api/step") {
+        if (!ownerOk(req)) return json(res, 403, { error: "Only the studio page can do this." });
+        if (!(core instanceof LocalCore)) return json(res, 404, { error: "Not found." });
+        const credits = z.number().int().min(0);
+        const b = z.object({
+          project: z.string().min(1), sub: z.string().min(1), step: z.enum(STEP_ORDER), action: z.enum(["approve", "changes", "reopen", "budget", "resume", "start"]),
+          text: z.string().max(2000).optional(), scene: z.number().int().min(1).optional(), at: z.number().min(0).optional(), credits: credits.optional(),
+          budgets: z.object({ look: credits.optional(), assets: credits.optional() }).strict().optional(),
+        }).parse(JSON.parse((await readBody(req, 64 * 1024)).toString() || "{}"));
+        if (b.action === "changes" && !b.text?.trim()) return json(res, 400, { error: "Say what to change." });
+        if (b.action === "budget" && b.credits === undefined) return json(res, 400, { error: "credits is required." });
+        try { return json(res, 200, { steps: core.gate(b) }); } catch (e) { return json(res, 409, { error: (e as Error).message }); }
       }
       if (req.method === "POST" && ["/api/scene", "/api/cancel-job"].includes(url.pathname)) {
         if (!ownerOk(req)) return json(res, 403, { error: "Only the studio page can do this." });

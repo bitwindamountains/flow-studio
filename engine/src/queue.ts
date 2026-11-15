@@ -208,6 +208,8 @@ export class JobQueue {
   retry(id: string): Job | undefined {
     const job = this.jobs.get(id);
     if (job && (job.status === "failed" || job.status === "cancelled")) {
+      // Its reservation settled when it finished: a retry is unbudgeted, so it waits for the owner like any paid job.
+      if (job.params.studio?.step) delete job.params.studio.step;
       job.status = needsOk(job.params) ? "held" : "queued";
       job.error = undefined;
       job.finishedAt = undefined;

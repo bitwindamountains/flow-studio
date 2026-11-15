@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { get } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -347,4 +347,59 @@ test("server: /api/scene refuses kept on a still without its storyboard file", a
   assert.equal(readPlan("P", "stk").scenes[0].kept, true);
   srv.lastServer!.closeAllConnections();
   await new Promise((r) => srv.lastServer!.close(r));
+});
+
+test("POST /api/step without the owner cookie is 403 and changes nothing", async () => {
+  process.env.STUDIO_PROJECTS = join(home, "step-projects");
+  const { LocalCore } = await import("./core.js"), srv = await import("./server.js");
+  const { createSub, subDir } = await import("./projects.js"); const S = await import("./steps.js");
+  createSub("Gate", "web");
+  const calls: string[] = [];
+  const core = new LocalCore({ starter: { start: (_p, _s, n) => void calls.push(n), stop: () => void calls.push("stop") } });
+  assert.equal(await srv.startServer(core, undefined, STUDIO), "owner");
+  try {
+    const html = await page(), token = /data-token="(\w+)"/.exec(html)![1], cookie = "fs_ui=" + /fs_ui=([0-9a-f]+)/.exec(lastSet)![1];
+    const base = `http://127.0.0.1:${port}`, scope = { project: "Gate", sub: "web" };
+    const post = (path: string, body: object, h: Record<string, string>) => fetch(base + path, { method: "POST", headers: h, body: JSON.stringify(body) });
+    const start = { ...scope, step: "idea", action: "start" }, budget = { ...scope, step: "look", action: "budget", credits: 50 };
+    for (const body of [start, budget]) {
+      assert.equal((await post("/api/step", body, {})).status, 403);
+      assert.equal((await post("/api/step", body, { "x-flow-token": token })).status, 403, "the agent's token is not the owner");
+      assert.equal((await post("/api/step", body, { cookie, origin: "http://evil.example" })).status, 403);
+    }
+    assert.equal((await post("/api/gate", start, { "x-flow-token": token })).status, 404, "gate is not a generic API method");
+    assert.equal(existsSync(join(subDir("Gate", "web"), "steps.json")), false);
+    assert.deepEqual(calls, []);
+    const h = { cookie, origin: base };
+    const ok = await post("/api/step", start, h); assert.equal(ok.status, 200);
+    assert.equal(((await ok.json()) as { steps: { steps: { idea: { status: string } } } }).steps.steps.idea.status, "working");
+    assert.equal((await post("/api/step", start, h)).status, 409, "store refusal");
+    assert.equal((await post("/api/step", budget, h)).status, 200);
+    assert.equal(S.readSteps("Gate", "web").steps.look.budget, 50);
+    for (const bad of [{ ...start, action: "nuke" }, { ...start, step: "polish" }, { ...budget, credits: -1 }, { ...budget, credits: 1.5 }, { ...scope, step: "idea", action: "budget" },
+      { ...scope, step: "plan", action: "approve", budgets: { look: -5 } }, { ...scope, step: "plan", action: "approve", budgets: { edit: 5 } },
+      { ...scope, step: "idea", action: "changes", text: "x".repeat(2001) }, { ...scope, step: "idea", action: "changes", text: "x", scene: 0 }, { ...scope, step: "idea", action: "changes", text: "x", at: -1 }])
+      assert.equal((await post("/api/step", bad, h)).status, 400, JSON.stringify(bad).slice(0, 120));
+    assert.deepEqual(calls, ["idea"]);
+  } finally { srv.lastServer!.closeAllConnections(); await new Promise<void>(r => srv.lastServer!.close(() => r())); }
+});
+
+test("changes with empty text is 400", async () => {
+  process.env.STUDIO_PROJECTS = join(home, "step-projects");
+  const { LocalCore } = await import("./core.js"), srv = await import("./server.js");
+  const { createSub } = await import("./projects.js"); const S = await import("./steps.js");
+  createSub("Gate", "chg"); S.startStep("Gate", "chg", "idea"); S.submitStep("Gate", "chg", "idea", { summary: "ok", flags: [] });
+  const calls: string[] = [];
+  assert.equal(await srv.startServer(new LocalCore({ starter: { start: (_p, _s, n) => void calls.push(n), stop: () => {} } }), undefined, STUDIO), "owner");
+  try {
+    await page();
+    const base = `http://127.0.0.1:${port}`, h = { cookie: "fs_ui=" + /fs_ui=([0-9a-f]+)/.exec(lastSet)![1], origin: base };
+    const post = (body: object) => fetch(base + "/api/step", { method: "POST", headers: h, body: JSON.stringify({ project: "Gate", sub: "chg", step: "idea", action: "changes", ...body }) });
+    for (const text of [undefined, "", "   \n"]) assert.equal((await post({ text })).status, 400);
+    assert.equal(S.readSteps("Gate", "chg").steps.idea.status, "review");
+    assert.equal((await post({ text: "warmer", scene: 2, at: 1.5 })).status, 200);
+    const idea = S.readSteps("Gate", "chg").steps.idea;
+    assert.deepEqual([idea.status, idea.feedback.map((f) => [f.text, f.scene, f.at])], ["working", [["warmer", 2, 1.5]]]);
+    assert.deepEqual(calls, ["idea"]);
+  } finally { srv.lastServer!.closeAllConnections(); await new Promise<void>(r => srv.lastServer!.close(() => r())); }
 });

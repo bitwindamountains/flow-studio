@@ -14,7 +14,7 @@ import { ACCOUNTS_FILE, currentLocation, discoverAccounts, ensureAffordable, ens
 import { BIN, COMPUTER, IS_MAC, IS_WIN, moveToBin } from "./platform.js";
 import { PlanSchema, isStill, sceneSettings, projDir, subDir, safeName, addReference, createSub, listProjects, notesRev, planRev, readNotes, readPlan, uploadsDir, within, writeNotes, writePlan } from "./projects.js";
 import { readJson, writeJsonAtomic } from "./persist.js";
-import { STEP_ORDER, blockStep, pauseWorking, readSteps, remaining, reserve, settle, submitStep, type StepName } from "./steps.js";
+import { STEP_ORDER, approveStep, blockStep, pauseWorking, readSteps, remaining, reopenStep, requestChanges, reserve, resumeStep, setBudget, settle, startStep, submitStep, type StepName, type StepState } from "./steps.js";
 import { clipsDir, handoff, listRenders, renderDone } from "./handoff.js";
 import { proposeLesson, readLessons } from "./lessons.js";
 import { TECHNIQUES, techniqueById } from "./techniques.js";
@@ -430,6 +430,10 @@ const sceneInput = (plan: ReturnType<typeof readPlan>, scene: ReturnType<typeof 
   "ad-references", plan.references ?? [],
 ]);
 
+// Launches and stops a step's agent run (Task 6). It never touches step state: LocalCore.gate owns every transition.
+export interface StepStarter { start(project: string, sub: string, step: StepName): void; stop(project: string, sub: string): void }
+export type GateAction = "approve" | "changes" | "reopen" | "budget" | "resume" | "start";
+
 export class LocalCore implements Core {
   private uiContext = new UiContextStore();
   private editSession = randomUUID();
@@ -437,7 +441,9 @@ export class LocalCore implements Core {
   readonly queue: JobQueue;
   private selection: { project: string; sub: string } | null;
   private lastFrame: (video: string) => Promise<string>;
-  constructor(init: { runner?: JobRunner; queueOpts?: { file?: string; pauseMs?: [number, number] }; lastFrame?: (video: string) => Promise<string> } = {}) {
+  starter: StepStarter;
+  constructor(init: { runner?: JobRunner; queueOpts?: { file?: string; pauseMs?: [number, number] }; lastFrame?: (video: string) => Promise<string>; starter?: StepStarter } = {}) {
+    this.starter = init.starter ?? { start() {}, stop() {} };
     try { this.selection = readJson(SELECTION_FILE, null); } catch { this.selection = null; }
     this.lastFrame = init.lastFrame ?? extractLastFrame;
     const run = init.runner ?? this.defaultRunner;
@@ -476,6 +482,59 @@ export class LocalCore implements Core {
     const ids = this.queue.list().filter((j) => j.status === "held" && reserved.has(j.id) && j.params.studio?.project === project && j.params.studio.sub === sub && j.params.studio.step === name).map((j) => j.id);
     for (const id of ids) this.queue.approve({ job_id: id });
     return ids;
+  }
+
+  // Owner route only (/api/step in server.ts), never an MCP tool: every owner gate action and its effects.
+  gate(a: { project: string; sub: string; step: StepName; action: GateAction; text?: string; scene?: number; at?: number; credits?: number; budgets?: Partial<Record<"look" | "assets", number>> }): StepState {
+    const { project, sub } = this.pick(a), { step } = a;
+    const run = (n: StepName) => { startStep(project, sub, n); this.starter.start(project, sub, n); };
+    switch (a.action) {
+      case "approve": {
+        if (readSteps(project, sub).steps[step].status !== "review") throw new Error(`${step[0].toUpperCase() + step.slice(1)} is not ready for review.`);
+        const plan = readPlan(project, sub), file = (f?: string) => !!f && existsSync(f);
+        if (step === "idea" && !plan.chosen) throw new Error("Choose an idea before approving Idea.");
+        if (step === "edit" && !listRenders(project, sub).length) throw new Error("Render the video before approving Edit.");
+        if (step === "plan") for (const [n, c] of Object.entries(a.budgets ?? {})) setBudget(project, sub, n as StepName, c);
+        if (step === "look") {
+          for (const s of plan.scenes) if (file(s.storyboard) || s.start?.kind === "continue") s.approved = true;
+          writePlan(plan);
+        }
+        if (step === "assets") {
+          // restoreTake clears Keep and marks dependents stale, so every pick goes in before anything is kept.
+          for (const p of readSteps(project, sub).steps.assets.picks ?? [])
+            if (plan.scenes.find((s) => s.n === p.scene)?.clip !== p.clip) this.restoreTake({ project, sub, scene: p.scene, clip: p.clip });
+          const now = readPlan(project, sub);
+          for (const s of now.scenes) if (isStill(s) ? file(s.storyboard) : file(s.clip) && s.stale === undefined) s.kept = true;
+          writePlan(now);
+        }
+        approveStep(project, sub, step);
+        const next = STEP_ORDER[STEP_ORDER.indexOf(step) + 1];
+        if (next) run(next);
+        break;
+      }
+      case "changes": requestChanges(project, sub, step, { text: a.text ?? "", scene: a.scene, at: a.at }); run(step); break;
+      case "reopen": {
+        this.starter.stop(project, sub);
+        // A running job is left to finish and settle; only waiting jobs are cancelled. Nothing on disk is removed.
+        const plan = readPlan(project, sub);
+        for (const j of this.queue.list())
+          if (j.params.studio?.project === plan.project && j.params.studio.sub === plan.sub && (j.status === "held" || j.status === "queued")) this.queue.cancel(j.id, "Step reopened by the owner. Nothing spent.");
+        reopenStep(project, sub, step);
+        break;
+      }
+      case "budget": setBudget(project, sub, step, a.credits ?? NaN); break;
+      case "resume": {
+        if (readSteps(project, sub).steps[step].status !== "working") throw new Error(`${step[0].toUpperCase() + step.slice(1)} is not working.`);
+        resumeStep(project, sub, step); this.resumeStepJobs(project, sub, step); this.starter.start(project, sub, step);
+        break;
+      }
+      case "start": {
+        if (step !== "idea" || Object.values(readSteps(project, sub).steps).some((x) => x.status !== "idle")) throw new Error("Only Idea can start, and only when every step is idle.");
+        run("idea");
+        break;
+      }
+    }
+    return readSteps(project, sub);
   }
 
   // The step whose owner-approved budget may pay for clips without a click: Look or Assets, working and not paused.
@@ -1161,6 +1220,8 @@ export class LocalCore implements Core {
         jobs: mine.filter((j) => j.params.studio!.scene === s.n).map((j) => ({ id: j.id, kind: j.params.studio!.kind, status: j.status, batch: j.batch, credits: j.credits, note: j.note, error: j.error })),
       })),
       pending: this.queue.pendingApproval().filter((g) => g.jobs.some((j) => j.params.studio?.project === plan.project && j.params.studio.sub === plan.sub)),
+      steps: readSteps(project, sub),
+      production_plan: await this.studio_production_plan_read({ project, sub }),
     };
   }
 

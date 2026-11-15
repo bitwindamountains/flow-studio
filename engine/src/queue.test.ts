@@ -217,3 +217,13 @@ test("onFinish sees every finished job: done, failed, cancelled, dropped depende
   new JobQueue(async () => [], { file, onFinish: (j) => restored.push(`${j.id}:${j.status}`) }).restore();
   assert.deepEqual(restored, ["run:failed"]);
 });
+
+test("a manually retried step job drops its step: it holds no reservation, so the owner approves it", async () => {
+  const q = new JobQueue(async () => { throw new Error("boom"); }, { pauseMs: [0, 0] });
+  const j = q.add(params("video", { studio: { project: "P", sub: "s", scene: 1, kind: "clip", step: "assets" } }), { preapproved: true });
+  await tick();
+  assert.equal(j.status, "failed");
+  assert.equal(q.retry(j.id)?.status, "held");
+  assert.equal(j.params.studio?.step, undefined);
+  assert.equal(j.params.studio?.scene, 1);
+});

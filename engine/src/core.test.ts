@@ -53,7 +53,7 @@ test("partial agent retry preserves its cached assets' source before queueing", 
 
 type FixtureJob = { id: string; credits?: number; params: { output_dir: string; file_stem: string; studio?: { scene: number } } };
 // Budgeted steps: a sub whose Idea, Plan and Look are approved and whose Assets step is working with `budget` credits.
-async function stepFixture(sub: string, budget: number, scenes = 3, runner?: (job: FixtureJob) => string[], file?: string) {
+async function stepFixture(sub: string, budget: number, scenes = 3, runner?: (job: FixtureJob) => string[], file?: string, starter?: { start(p: string, s: string, n: string): void; stop(p: string, s: string): void }) {
   const { LocalCore } = await import("./core.js");
   const P = await import("./projects.js");
   const S = await import("./steps.js");
@@ -61,7 +61,7 @@ async function stepFixture(sub: string, budget: number, scenes = 3, runner?: (jo
     mkdirSync(job.params.output_dir, { recursive: true });
     const f = join(job.params.output_dir, job.params.file_stem + ".mp4"); writeFileSync(f, "x"); return [f];
   };
-  const core = new LocalCore({ runner: (async (job: FixtureJob) => (runner ?? write)(job)) as never, queueOpts: { pauseMs: [0, 0], ...(file && { file }) } });
+  const core = new LocalCore({ runner: (async (job: FixtureJob) => (runner ?? write)(job)) as never, queueOpts: { pauseMs: [0, 0], ...(file && { file }) }, starter });
   P.createSub("Bud", sub, "16:9");
   const plan = P.readPlan("Bud", sub);
   plan.scenes = Array.from({ length: scenes }, (_, i) => ({ n: i + 1, prompt: `s${i + 1}`, approved: true, model: "Omni 1.1 Flash" }));
@@ -266,4 +266,147 @@ test("funded studio_generate and studio_redo report queued and step with held 0"
   for (const j of mine(core, "fq")) core.queue.cancel((j as unknown as { id: string }).id);
   const y = await core.studio_redo({ project: "Bud", sub: "fq", scene: 1 } as never) as unknown as { queued: number; step: string; held: number };
   assert.deepEqual([y.queued, y.step, y.held], [1, "assets", 0]);
+});
+
+// Owner gates: a sub whose steps before `at` are approved and whose `at` step is in review (packet as given).
+const starterSpy = () => { const calls: unknown[][] = []; return { calls, start: (_p: string, s: string, n: string) => void calls.push(["start", s, n]), stop: (_p: string, s: string) => void calls.push(["stop", s]) }; };
+async function gateFixture(sub: string, at: "idea" | "plan" | "look" | "assets" | "edit", scenes: Record<string, unknown>[], picks?: { scene: number; clip: string }[]) {
+  const { LocalCore } = await import("./core.js");
+  const P = await import("./projects.js"), S = await import("./steps.js"), H = await import("./handoff.js");
+  const starter = starterSpy();
+  const core = new LocalCore({ runner: async () => [], queueOpts: { pauseMs: [0, 0] }, starter });
+  P.createSub("Gate", sub, "16:9");
+  const plan = P.readPlan("Gate", sub); plan.chosen = "idea one"; plan.scenes = scenes as never; P.writePlan(plan);
+  for (const n of S.STEP_ORDER.slice(0, S.STEP_ORDER.indexOf(at) + 1)) {
+    S.startStep("Gate", sub, n); S.submitStep("Gate", sub, n, { summary: "ok", flags: [], picks: n === at ? picks : undefined });
+    if (n !== at) S.approveStep("Gate", sub, n);
+  }
+  return { core, starter, P, S, H, steps: () => S.readSteps("Gate", sub).steps, scope: { project: "Gate", sub } };
+}
+
+test("approve plan with budgets {look:40, assets:400} stores both and starts look", async () => {
+  const idea = await gateFixture("gidea", "idea", []);
+  const noChoice = idea.P.readPlan("Gate", "gidea"); delete noChoice.chosen; idea.P.writePlan(noChoice);
+  assert.throws(() => idea.core.gate({ ...idea.scope, step: "idea", action: "approve" }), /idea/i);
+  assert.equal(idea.steps().idea.status, "review");
+  const { core, starter, steps, scope } = await gateFixture("gplan", "plan", []);
+  const r = core.gate({ ...scope, step: "plan", action: "approve", budgets: { look: 40, assets: 400 } });
+  assert.equal(r.steps.plan.status, "approved");
+  assert.deepEqual([steps().look.budget, steps().assets.budget], [40, 400]);
+  assert.equal(steps().look.status, "working");
+  assert.deepEqual(starter.calls, [["start", "gplan", "look"]]);
+});
+
+test("approve look marks storyboarded scenes approved; scenes without a still stay unapproved", async () => {
+  const still = join(home, "glook-1.png"); writeFileSync(still, "img");
+  const { core, starter, steps, scope, P } = await gateFixture("glook", "look", [
+    { n: 1, prompt: "a", storyboard: still }, { n: 2, prompt: "b" }, { n: 3, prompt: "c", start: { kind: "continue", from: 1 } }, { n: 4, prompt: "d", storyboard: join(home, "missing.png") }]);
+  core.gate({ ...scope, step: "look", action: "approve" });
+  assert.deepEqual(P.readPlan("Gate", "glook").scenes.map((s) => !!s.approved), [true, false, true, false]);
+  assert.equal(steps().assets.status, "working");
+  assert.deepEqual(starter.calls, [["start", "glook", "assets"]]);
+});
+
+test("approve assets keeps stills and clips, applies a pick via restoreTake, skips scenes with no asset", async () => {
+  const { clipsDir } = await import("./handoff.js");
+  const dir = clipsDir("Gate", "gassets"); mkdirSync(dir, { recursive: true });
+  const f = (n: string) => { const p = join(dir, n); writeFileSync(p, "x"); return p; };
+  const still = f("scene-01.png"), c2 = f("scene-02.mp4"), c2b = f("scene-02-take-2.mp4"), c4 = f("scene-04.mp4"), c5 = f("scene-05.mp4");
+  const { core, starter, steps, scope, P } = await gateFixture("gassets", "assets", [
+    { n: 1, prompt: "a", kind: "still", storyboard: still },
+    { n: 2, prompt: "b", clip: c2, takes: [{ clip: c2 }, { clip: c2b }] },
+    { n: 3, prompt: "c" },
+    { n: 4, prompt: "d", clip: c4, start: { kind: "continue", from: 2 } },
+    { n: 5, prompt: "e", clip: c5 }], [{ scene: 2, clip: c2b }, { scene: 5, clip: c5 }]);
+  core.gate({ ...scope, step: "assets", action: "approve" });
+  const s = P.readPlan("Gate", "gassets").scenes;
+  assert.equal(s[1].clip, c2b);
+  assert.deepEqual(s.map((x) => !!x.kept), [true, true, false, false, true]); // scene 4 went stale when scene 2 changed
+  assert.equal(s[3].stale, 2);
+  assert.equal(steps().edit.status, "working");
+  assert.deepEqual(starter.calls, [["start", "gassets", "edit"]]);
+});
+
+test("approve edit with no render is refused", async () => {
+  const { core, starter, steps, scope, H } = await gateFixture("gedit", "edit", []);
+  assert.throws(() => core.gate({ ...scope, step: "edit", action: "approve" }), /render/i);
+  assert.equal(steps().edit.status, "review");
+  mkdirSync(H.rendersDir("Gate", "gedit"), { recursive: true }); writeFileSync(join(H.rendersDir("Gate", "gedit"), "v1.mp4"), "r");
+  core.gate({ ...scope, step: "edit", action: "approve" });
+  assert.equal(steps().edit.status, "approved");
+  assert.deepEqual(starter.calls, [], "nothing follows Edit");
+});
+
+test("reopen plan while assets is working: runner stopped, held and queued jobs cancelled, look/assets/edit idle, clips still on disk", async () => {
+  const starter = starterSpy();
+  const { core, S, P, assets } = await stepFixture("greopen", 100, 2, undefined, undefined, starter);
+  core.queue.pause("fixture");
+  await core.studio_generate({ project: "Bud", sub: "greopen", scenes: [1] } as never); // funded: queued
+  const held = core.queue.add({ prompt: "p", type: "video", max_credits: 5, output_dir: "o", file_stem: "h", studio: { project: "Bud", sub: "greopen", scene: 2, kind: "clip" } } as never);
+  const other = core.queue.add({ prompt: "p", type: "video", max_credits: 5, output_dir: "o", file_stem: "o", studio: { project: "Bud", sub: "elsewhere", scene: 1, kind: "clip" } } as never);
+  const clip = join(P.subDir("Bud", "greopen"), "keep.mp4"); writeFileSync(clip, "clip");
+  core.gate({ project: "Bud", sub: "greopen", step: "plan", action: "reopen" });
+  assert.deepEqual(starter.calls, [["stop", "greopen"]]);
+  assert.deepEqual(mine(core, "greopen").map((j) => (j as unknown as { status: string }).status), ["cancelled", "cancelled"]);
+  assert.equal(held.status, "cancelled"); assert.equal(other.status, "held");
+  const st = S.readSteps("Bud", "greopen").steps;
+  assert.deepEqual(S.STEP_ORDER.map((n) => st[n].status), ["approved", "idle", "idle", "idle", "idle"]);
+  assert.deepEqual(assets().reservations, []); // cancelled before running: settled at 0
+  assert.equal(existsSync(clip), true);
+});
+
+test("a running job survives reopen and settles afterwards", async () => {
+  let release!: () => void; const hold = new Promise<void>((r) => (release = r));
+  const ctx = await stepFixture("grun", 100, 1, ((job: FixtureJob) => hold.then(() => { job.credits = 3; return ctx.write(job); })) as never, undefined, starterSpy());
+  const { core, assets } = ctx;
+  await core.studio_generate({ project: "Bud", sub: "grun" } as never);
+  const job = mine(core, "grun")[0] as unknown as { status: string };
+  await settled(() => job.status === "running");
+  core.gate({ project: "Bud", sub: "grun", step: "assets", action: "reopen" });
+  assert.equal(job.status, "running");
+  assert.equal(assets().status, "idle");
+  release();
+  await settled(() => job.status === "done");
+  assert.deepEqual([assets().reservations, assets().spent], [[], 3]);
+});
+
+test("resume releases only that sub's held step jobs and never restarts the step", async () => {
+  const starter = starterSpy();
+  const a = await stepFixture("gresA", 100, 1, undefined, undefined, starter);
+  await stepFixture("gresB", 100, 1);
+  a.core.queue.pause("fixture");
+  for (const sub of ["gresA", "gresB"]) await a.core.studio_generate({ project: "Bud", sub } as never);
+  const [ja, jb] = ["gresA", "gresB"].map((s) => mine(a.core, s)[0] as unknown as { status: string });
+  ja.status = jb.status = "held"; // as after a restart
+  for (const sub of ["gresA", "gresB"]) a.S.pauseWorking("Bud", sub);
+  const session = a.assets().session;
+  a.core.gate({ project: "Bud", sub: "gresA", step: "assets", action: "resume" });
+  assert.deepEqual([ja.status, jb.status], ["queued", "held"]);
+  assert.deepEqual([a.assets().status, a.assets().paused, a.assets().session], ["working", undefined, session]); // startStep would refuse from working
+  assert.equal(a.S.readSteps("Bud", "gresB").steps.assets.paused, true);
+  assert.deepEqual(starter.calls, [["start", "gresA", "assets"]]);
+});
+
+test("start begins Idea only when every step is idle; budget sets any step", async () => {
+  const P = await import("./projects.js"), S = await import("./steps.js"); const { LocalCore } = await import("./core.js");
+  P.createSub("Gate", "gstart", "16:9");
+  const starter = starterSpy(); const core = new LocalCore({ runner: async () => [], starter });
+  const scope = { project: "Gate", sub: "gstart" };
+  assert.throws(() => core.gate({ ...scope, step: "plan", action: "start" }), /idea/i);
+  core.gate({ ...scope, step: "idea", action: "start" });
+  assert.equal(S.readSteps("Gate", "gstart").steps.idea.status, "working");
+  assert.throws(() => core.gate({ ...scope, step: "idea", action: "start" }));
+  assert.deepEqual(starter.calls, [["start", "gstart", "idea"]]);
+  core.gate({ ...scope, step: "edit", action: "budget", credits: 25 });
+  assert.equal(S.readSteps("Gate", "gstart").steps.edit.budget, 25);
+});
+
+test("studio_status carries steps and the production plan without writing steps.json", async () => {
+  const P = await import("./projects.js"); const { LocalCore } = await import("./core.js");
+  P.createSub("Gate", "gstatus", "16:9");
+  const st = await new LocalCore().studio_status({ project: "Gate", sub: "gstatus" } as never) as unknown as { steps: { steps: { idea: { status: string } } }; production_plan: { text: string; rev: string } };
+  assert.equal(st.steps.steps.idea.status, "idle");
+  assert.equal(st.production_plan.text, "");
+  assert.equal(typeof st.production_plan.rev, "string");
+  assert.equal(existsSync(join(P.subDir("Gate", "gstatus"), "steps.json")), false);
 });
