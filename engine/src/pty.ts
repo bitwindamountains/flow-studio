@@ -3,8 +3,8 @@ import type { WebSocket } from "ws";
 import { UiContextSchema, formatMessageContext, type UiContext } from "./ui-context.js";
 
 // Remotion root, so the owner's style skills in remotion/.claude/skills load.
-const CWD = "D:/flow-studio/remotion";
-const STUDIO = "D:/flow-studio";
+export const CWD = "D:/flow-studio/remotion";
+export const STUDIO = "D:/flow-studio";
 export type StudioAgent = "claude" | "codex";
 export const CODEX_ARGS = [
   "--cd", CWD,
@@ -34,6 +34,9 @@ export function startAgent(agent: StudioAgent = "claude", launch: typeof spawn =
 export const startClaude = () => startAgent("claude");
 
 const SCROLLBACK = 200_000;
+// The agent the owner last picked in the terminal; headless step runs (step-runner.ts) use the same one.
+let chosen: StudioAgent = "claude";
+export const selectedAgent = (): StudioAgent => chosen;
 
 // One selected agent process per studio session. Only owner-authorized sockets reach this hub.
 export class PtyHub {
@@ -157,7 +160,7 @@ export class PtyHub {
         else if (m.t === "restart" || (m.t === "agent" && (m.agent === "claude" || m.agent === "codex"))) {
           if (m.t === "agent" && m.agent === this.agent) return;
           this.kill();
-          if (m.t === "agent") this.agent = m.agent as StudioAgent;
+          if (m.t === "agent") chosen = this.agent = m.agent as StudioAgent;
           this.ensure();
         }
       } catch { /* bad frame or dead pty: ignore, never crash the queue owner */ }

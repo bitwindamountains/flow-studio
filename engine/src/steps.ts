@@ -13,11 +13,12 @@ const Step = z.object({
   summary: z.string().optional(), flags: z.array(Flag), picks: z.array(Pick).optional(),
   feedback: z.array(z.object({ text: z.string(), scene: z.number().optional(), at: z.number().optional(), createdAt: z.string() })),
   blockedReason: z.string().optional(), session: z.string().optional() });
-const State = z.object({ owner: z.literal("flow-studio-steps-v1"), rev: z.number(), steps: z.object(Object.fromEntries(STEP_ORDER.map(n => [n, Step])) as Record<StepName, typeof Step>) });
+const Sessions = z.object({ claude: z.string().optional(), codex: z.string().optional() });
+const State = z.object({ owner: z.literal("flow-studio-steps-v1"), rev: z.number(), sessions: Sessions.optional(), steps: z.object(Object.fromEntries(STEP_ORDER.map(n => [n, Step])) as Record<StepName, typeof Step>) });
 export type Flag = z.infer<typeof Flag>;
 export type Step = z.infer<typeof Step>;
 export type StepStatus = Step["status"];
-export type StepState = { owner: "flow-studio-steps-v1"; rev: number; steps: Record<StepName, Step> };
+export type StepState = { owner: "flow-studio-steps-v1"; rev: number; sessions?: z.infer<typeof Sessions>; steps: Record<StepName, Step> };
 export class BudgetError extends Error { constructor(public short: number) { super(`Over budget by ${short} credits.`); } }
 
 const file = (p: string, s: string) => join(subDir(p, s), "steps.json");
@@ -80,3 +81,6 @@ export const settle = (p: string, s: string, job: string, spent: number | undefi
     for (const n of STEP_ORDER) { const x = st.steps[n], i = x.reservations.findIndex(r => r.job === job); if (i >= 0) { x.spent += spent ?? x.reservations[i].credits; x.reservations.splice(i, 1); return; } }
   });
 };
+// One agent session per agent kind for the whole sub-project, so a later step's headless run resumes it (step-runner.ts).
+export const readSession = (p: string, s: string, agent: "claude" | "codex") => readSteps(p, s).sessions?.[agent];
+export const setSession = (p: string, s: string, agent: "claude" | "codex", id: string | undefined) => change(p, s, st => { st.sessions = { ...st.sessions, [agent]: id }; });

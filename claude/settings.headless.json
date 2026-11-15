@@ -1,0 +1,31 @@
+{
+  "permissions": {
+    "defaultMode": "dontAsk",
+    "allow": [
+      "mcp__flow-studio__*",
+      "Read(//d/flow-studio/remotion/**)",
+      "Edit(//d/flow-studio/remotion/**)",
+      "Bash(npx remotion render *)",
+      "Bash(npx.cmd remotion render *)",
+      "PowerShell(npx remotion render *)",
+      "PowerShell(npx.cmd remotion render *)"
+    ],
+    "deny": [
+      "mcp__flow-studio__flow_generate",
+      "mcp__flow-studio__flow_edit",
+      "mcp__flow-studio__flow_continue",
+      "WebFetch",
+      "WebSearch",
+      "Bash(*8797*)",
+      "Bash(*9333*)",
+      "PowerShell(*8797*)",
+      "PowerShell(*9333*)",
+      "Read(//d/flow-studio/data/**)",
+      "Edit(//d/flow-studio/data/**)",
+      "Edit(//d/flow-studio/projects/**)",
+      "Edit(//d/flow-studio/engine/**)",
+      "Edit(//d/flow-studio/ui/**)",
+      "Edit(//d/flow-studio/claude/**)"
+    ]
+  }
+}

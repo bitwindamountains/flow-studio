@@ -6,7 +6,7 @@ import { test } from "node:test";
 
 process.env.STUDIO_PROJECTS = mkdtempSync(join(tmpdir(), "studio-steps-"));
 const { createSub } = await import("./projects.js");
-const { STEP_ORDER, BudgetError, readSteps, remaining, startStep, submitStep, approveStep, requestChanges, reopenStep, setBudget, reserve, settle, pauseWorking, resumeStep, blockStep } = await import("./steps.js");
+const { STEP_ORDER, BudgetError, readSteps, remaining, startStep, submitStep, approveStep, requestChanges, reopenStep, setBudget, reserve, settle, pauseWorking, resumeStep, blockStep, readSession, setSession } = await import("./steps.js");
 let n = 0;
 const fresh = () => { const v = `v${n++}`; createSub("P", v); return v; };
 
@@ -120,4 +120,15 @@ test("startStep is refused from working, review and approved", () => {
   assert.throws(() => startStep("P", v, "idea"), /cannot start from review/);
   approveStep("P", v, "idea");
   assert.throws(() => startStep("P", v, "idea"), /cannot start from approved/);
+});
+test("one session id per agent kind is stored at the top level and survives step changes", () => {
+  const v = fresh();
+  assert.equal(readSession("P", v, "claude"), undefined);
+  setSession("P", v, "claude", "c-1"); setSession("P", v, "codex", "x-1");
+  startStep("P", v, "idea"); submitStep("P", v, "idea", { summary: "s", flags: [] });
+  assert.equal(readSession("P", v, "claude"), "c-1");
+  assert.equal(readSession("P", v, "codex"), "x-1");
+  setSession("P", v, "claude", undefined);
+  assert.equal(readSession("P", v, "claude"), undefined);
+  assert.equal(readSession("P", v, "codex"), "x-1");
 });
