@@ -16,3 +16,13 @@ Owner-selected direction: adapt the liquid glass and stellar design from `D:\app
 - Responsive controls wrap; wide scene data and the stage rail scroll within their own regions. Focus rings, labelled regions and text status carry state without relying on color. No decorative animation is required for this operating surface.
 
 Source: `ui/index.html`, `ui/studio.css`, `ui/app.js`. The server snapshots the allowlisted stylesheet with the rest of the UI. Browser verification uses isolated fixture content. Real media, real CLI prompt acceptance and owner-window startup are separate live checks.
+
+## Review desk (2026-11-16)
+
+The autonomous-steps workflow changes structure and wording, not the look: the tokens and the glass, silver ground and midnight terminal above stay. One screen with three always-visible parts:
+
+- Top bar: project menu (project, video, new, jobs), the five steps `Idea`, `Plan`, `Look`, `Assets`, `Edit` as a compact progress row, one alert badge that opens the list of notices (health, connection, owner window), and the Chat button.
+- Gate bar, only while a step is in review, changes or blocked: one line of summary, counts, and the approve and changes buttons. While the agent works it is a progress line and asks nothing of the owner. State is always written as text, never colour alone.
+- Player and strip: the selected scene or render large, with one tile per scene below it showing a kind icon and one status mark (done, flagged, working, stale). The strip scrolls, filters to flagged and groups by plan section.
+
+The Details drawer (prompt, references, settings, takes, the agent note, history), the plan reader and the Chat drawer with its Terminal tab stay hidden until asked. Safety-relevant text is shortened, not removed: it lives in the alert list and the gate bar blocked reason. Touch targets are 44px under `(pointer: coarse)` and focus rings are kept. See `docs/review-desk.md`.

@@ -546,3 +546,22 @@ test("studio_status carries steps and the production plan without writing steps.
   assert.equal(typeof st.production_plan.rev, "string");
   assert.equal(existsSync(join(P.subDir("Gate", "gstatus"), "steps.json")), false);
 });
+
+test("an old sub with kept clips and a render can be approved at Edit as the first owner action, losing nothing", async () => {
+  const { LocalCore } = await import("./core.js");
+  const P = await import("./projects.js"), S = await import("./steps.js"), H = await import("./handoff.js");
+  const starter = starterSpy(), core = new LocalCore({ runner: async () => [], queueOpts: { pauseMs: [0, 0] }, starter });
+  P.createSub("Gate", "gold", "16:9");
+  const dir = join(home, "oldmedia"); mkdirSync(dir, { recursive: true });
+  const still = join(dir, "s.png"), clip = join(dir, "c.mp4"); writeFileSync(still, "i"); writeFileSync(clip, "c");
+  const plan = P.readPlan("Gate", "gold"); plan.chosen = "idea"; plan.scenes = [{ n: 1, prompt: "p", storyboard: still, approved: true, clip, kept: true }] as never; P.writePlan(plan);
+  mkdirSync(H.rendersDir("Gate", "gold"), { recursive: true }); writeFileSync(join(H.rendersDir("Gate", "gold"), "v1.mp4"), "r");
+  const file = join(P.subDir("Gate", "gold"), "steps.json"), before = JSON.stringify(P.readPlan("Gate", "gold"));
+  assert.equal(existsSync(file), false);
+  assert.equal((await core.studio_step_read({ project: "Gate", sub: "gold" } as never)).status, "review", "reads the derived state without writing");
+  assert.equal(existsSync(file), false);
+  core.gate({ project: "Gate", sub: "gold", step: "edit", action: "approve" });
+  assert.deepEqual(S.STEP_ORDER.map((k) => S.readSteps("Gate", "gold").steps[k].status), ["approved", "approved", "approved", "approved", "approved"]);
+  assert.equal(JSON.stringify(P.readPlan("Gate", "gold")).replace(/"rev":\d+/, ""), before.replace(/"rev":\d+/, ""));
+  assert.deepEqual(starter.calls, []);
+});

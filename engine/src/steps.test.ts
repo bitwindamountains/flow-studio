@@ -132,3 +132,34 @@ test("one session id per agent kind is stored at the top level and survives step
   assert.equal(readSession("P", v, "claude"), undefined);
   assert.equal(readSession("P", v, "codex"), "x-1");
 });
+
+// deriveSteps: old sub-projects (no steps.json) mapped onto the five steps, cumulatively, writing nothing.
+const { deriveSteps } = await import("./steps.js");
+const { readPlan, writePlan, subDir } = await import("./projects.js");
+const { existsSync } = await import("node:fs");
+type Sc = { n: number; approved?: boolean; kept?: boolean; stale?: number; kind?: "still" | "clip"; start?: { kind: "continue"; from: number } };
+const old = (o: { chosen?: string; scenes?: Sc[]; made?: boolean; renders?: number[]; valid?: boolean }) => {
+  const plan = readPlan("P", fresh()); plan.chosen = o.chosen; plan.scenes = (o.scenes ?? []).map(s => ({ prompt: "p", ...s })) as never;
+  return deriveSteps({ plan, scenes: plan.scenes.map(s => ({ n: s.n, validPlan: o.valid ?? true, validSource: true, storyboardExists: o.made ?? true, clipExists: o.made ?? true, hasTakes: false, hasActiveJob: false })), renderVersions: o.renders ?? [], editTaskPhase: null });
+};
+const flow = (st: ReturnType<typeof old>) => STEP_ORDER.map(k => st.steps[k].status).join(",");
+test("derive: nothing chosen is all idle", () => assert.equal(flow(old({})), "idle,idle,idle,idle,idle"));
+test("derive: chosen with valid scenes approves idea and plan", () => assert.equal(flow(old({ chosen: "a", scenes: [{ n: 1 }] })), "approved,approved,idle,idle,idle"));
+test("derive: chosen with invalid scenes approves only idea", () => assert.equal(flow(old({ chosen: "a", scenes: [{ n: 1 }], valid: false })), "approved,idle,idle,idle,idle"));
+test("derive: every scene approved with a still approves look", () => assert.equal(flow(old({ chosen: "a", scenes: [{ n: 1, approved: true }, { n: 2, approved: true }] })), "approved,approved,approved,idle,idle"));
+test("derive: an unapproved scene stops look", () => assert.equal(flow(old({ chosen: "a", scenes: [{ n: 1, approved: true }, { n: 2 }] })), "approved,approved,idle,idle,idle"));
+test("derive: every scene kept and usable approves assets; a stale clip does not", () => {
+  assert.equal(flow(old({ chosen: "a", scenes: [{ n: 1, approved: true, kept: true }, { n: 2, approved: true, kept: true, kind: "still" }] })), "approved,approved,approved,approved,idle");
+  assert.equal(flow(old({ chosen: "a", scenes: [{ n: 1, approved: true, kept: true, stale: 1 }] })), "approved,approved,approved,idle,idle");
+});
+test("derive: a render after assets puts edit in review", () => assert.equal(flow(old({ chosen: "a", scenes: [{ n: 1, approved: true, kept: true }], renders: [1] })), "approved,approved,approved,approved,review"));
+test("derive: a render with unapproved scenes leaves edit idle", () => assert.equal(flow(old({ chosen: "a", scenes: [{ n: 1 }], renders: [1] })), "approved,approved,idle,idle,idle"));
+test("derive: budgets 0, nothing reserved, paused or running", () => {
+  const st = old({ chosen: "a", scenes: [{ n: 1, approved: true, kept: true }], renders: [1] });
+  assert.ok(STEP_ORDER.every(k => st.steps[k].budget === 0 && !st.steps[k].reservations.length && !st.steps[k].paused && st.steps[k].status !== "working"));
+});
+test("derive writes no file; startup pause creates none for an old sub", () => {
+  const v = fresh(); const plan = readPlan("P", v); plan.chosen = "a"; writePlan(plan);
+  deriveSteps({ plan, scenes: [], renderVersions: [], editTaskPhase: null });
+  assert.equal(existsSync(join(subDir("P", v), "steps.json")), false);
+});

@@ -37,3 +37,5 @@ Independent review reproduced three issues—newest-render target drift, asynchr
 
 See `docs/guided-workspace.md` for the implementation handoff and limitations. Existing historical entries below remain intact.
 
+
+The review desk (steps with owner gates, budgets, unattended runs) is described in `docs/review-desk.md`.

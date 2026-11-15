@@ -14,12 +14,12 @@ import { ACCOUNTS_FILE, currentLocation, discoverAccounts, ensureAffordable, ens
 import { BIN, COMPUTER, IS_MAC, IS_WIN, moveToBin } from "./platform.js";
 import { PlanSchema, isStill, sceneSettings, projDir, subDir, safeName, addReference, createSub, listProjects, notesRev, planRev, readNotes, readPlan, uploadsDir, within, writeNotes, writePlan } from "./projects.js";
 import { readJson, writeJsonAtomic } from "./persist.js";
-import { STEP_ORDER, approveStep, blockStep, pauseWorking, readSteps, remaining, reopenStep, requestChanges, reserve, resumeStep, setBudget, settle, startStep, submitStep, type StepName, type StepState } from "./steps.js";
+import { STEP_ORDER, approveStep, deriveSteps, seedSteps, blockStep, pauseWorking, readSteps, remaining, reopenStep, requestChanges, reserve, resumeStep, setBudget, settle, startStep, submitStep, type StepName, type StepState } from "./steps.js";
 import { clipsDir, handoff, listRenders, renderDone } from "./handoff.js";
 import { proposeLesson, readLessons } from "./lessons.js";
 import { TECHNIQUES, techniqueById } from "./techniques.js";
 import { activeEdit, readEdit, startEdit, updateEdit, finishEdit } from "./edit-tasks.js";
-import { deriveWorkflow } from "./workflow.js";
+import { deriveWorkflow, type WorkflowFacts } from "./workflow.js";
 import { UiContextSchema, UiContextStore, UiPublicationSchema, type UiContext } from "./ui-context.js";
 import { creativeGuideInfo, readCreativeGuide } from "./creative-guide.js";
 
@@ -483,7 +483,7 @@ export class LocalCore implements Core {
 
   // Owner route only (server.ts), never an MCP tool: releases the step's held jobs that still hold a reservation.
   resumeStepJobs(project: string, sub: string, name: StepName): string[] {
-    const reserved = new Set(readSteps(project, sub).steps[name].reservations.map((r) => r.job));
+    const reserved = new Set(this.stepState(project, sub).steps[name].reservations.map((r) => r.job));
     const ids = this.queue.list().filter((j) => j.status === "held" && reserved.has(j.id) && j.params.studio?.project === project && j.params.studio.sub === sub && j.params.studio.step === name).map((j) => j.id);
     for (const id of ids) this.queue.approve({ job_id: id });
     return ids;
@@ -492,10 +492,11 @@ export class LocalCore implements Core {
   // Owner route only (/api/step in server.ts), never an MCP tool: every owner gate action and its effects.
   gate(a: { project: string; sub: string; step: StepName; action: GateAction; text?: string; scene?: number; at?: number; credits?: number; budgets?: Partial<Record<"look" | "assets", number>> }): StepState {
     const { project, sub } = this.pick(a), { step } = a;
+    seedSteps(project, sub, this.stepState(project, sub));
     const run = (n: StepName) => { startStep(project, sub, n); this.starter.start(project, sub, n); };
     switch (a.action) {
       case "approve": {
-        if (readSteps(project, sub).steps[step].status !== "review") throw new Error(`${step[0].toUpperCase() + step.slice(1)} is not ready for review.`);
+        if (this.stepState(project, sub).steps[step].status !== "review") throw new Error(`${step[0].toUpperCase() + step.slice(1)} is not ready for review.`);
         const plan = readPlan(project, sub), file = (f?: string) => !!f && existsSync(f);
         if (step === "idea" && !plan.chosen) throw new Error("Choose an idea before approving Idea.");
         if (step === "edit" && !listRenders(project, sub).length) throw new Error("Render the video before approving Edit.");
@@ -506,7 +507,7 @@ export class LocalCore implements Core {
         }
         if (step === "assets") {
           // restoreTake clears Keep and marks dependents stale, so every pick goes in before anything is kept.
-          for (const p of readSteps(project, sub).steps.assets.picks ?? [])
+          for (const p of this.stepState(project, sub).steps.assets.picks ?? [])
             if (plan.scenes.find((s) => s.n === p.scene)?.clip !== p.clip) this.restoreTake({ project, sub, scene: p.scene, clip: p.clip });
           const now = readPlan(project, sub);
           for (const s of now.scenes) if (isStill(s) ? file(s.storyboard) : file(s.clip) && s.stale === undefined) s.kept = true;
@@ -530,7 +531,7 @@ export class LocalCore implements Core {
       case "budget": setBudget(project, sub, step, a.credits ?? NaN); break;
       case "resume": {
         // Blocked (e.g. on budget) restarts the step; a paused run is un-paused; a live run is never doubled.
-        const x = readSteps(project, sub).steps[step];
+        const x = this.stepState(project, sub).steps[step];
         if (x.status === "blocked") startStep(project, sub, step);
         else if (x.status === "working" && x.paused) resumeStep(project, sub, step);
         else throw new Error(`${step[0].toUpperCase() + step.slice(1)} ${x.status === "working" ? "is already working" : `cannot resume from ${x.status}`}.`);
@@ -539,23 +540,23 @@ export class LocalCore implements Core {
       }
       case "start": {
         // Any idle step whose earlier steps are all approved (startStep checks those): Idea first, or a step after a reopen.
-        if (readSteps(project, sub).steps[step].status !== "idle") throw new Error(`${step[0].toUpperCase() + step.slice(1)} is not idle.`);
+        if (this.stepState(project, sub).steps[step].status !== "idle") throw new Error(`${step[0].toUpperCase() + step.slice(1)} is not idle.`);
         run(step);
         break;
       }
     }
-    return readSteps(project, sub);
+    return this.stepState(project, sub);
   }
 
   // The step whose owner-approved budget may pay for clips without a click: Look or Assets, working and not paused.
   private fundingStep(project: string, sub: string): StepName | undefined {
-    const steps = readSteps(project, sub).steps;
+    const steps = this.stepState(project, sub).steps;
     return (["look", "assets"] as const).find((n) => steps[n].status === "working" && !steps[n].paused);
   }
 
   // Returns the funding step when the whole batch fits; otherwise blocks the step and throws before anything is queued.
   private fundBatch(project: string, sub: string, costs: number[]): StepName | undefined {
-    const steps = readSteps(project, sub).steps;
+    const steps = this.stepState(project, sub).steps;
     const step = this.fundingStep(project, sub);
     if (!step || !costs.length) return undefined;
     if (costs.some((c) => !Number.isInteger(c) || c < 0)) throw new Error("Inside a step budget max_credits must be a whole number, 0 or more.");
@@ -853,16 +854,21 @@ export class LocalCore implements Core {
     this.validateUiContext(input.context);
     return this.uiContext.publish(input);
   }
-  async studio_workflow_read(a: Args<"studio_workflow_read">) {
-    const { project, sub } = this.pick(a), plan = readPlan(project, sub);
+  private facts(project: string, sub: string): WorkflowFacts {
+    const plan = readPlan(project, sub);
     const file = (path?: string) => { try { return !!path && statSync(path).isFile(); } catch { return false; } };
     const active = (n: number) => this.queue.list().some(j => j.params.studio?.project === project && j.params.studio.sub === sub && j.params.studio.scene === n && ["held", "queued", "running"].includes(j.status));
-    return deriveWorkflow({ plan, scenes: plan.scenes.map(s => ({
+    return ({ plan, scenes: plan.scenes.map(s => ({
       n: s.n, validPlan: !!s.prompt.trim(),
       validSource: s.start?.kind !== "continue" || (s.start.from < s.n && plan.scenes.some(source => source.n === (s.start as { from: number }).from)),
       storyboardExists: file(s.storyboard), clipExists: file(s.clip), hasTakes: this.takeHistory(project, sub, s).length > 0, hasActiveJob: active(s.n),
     })), renderVersions: listRenders(project, sub).map(r => r.version), editTaskPhase: readEdit(project, sub)?.phase ?? null });
   }
+  // Step state; a sub-project with no steps.json yet reads as its derived state (nothing is written).
+  private stepState(project: string, sub: string): StepState {
+    return existsSync(join(subDir(project, sub), "steps.json")) ? readSteps(project, sub) : deriveSteps(this.facts(project, sub));
+  }
+  async studio_workflow_read(a: Args<"studio_workflow_read">) { const { project, sub } = this.pick(a); return deriveWorkflow(this.facts(project, sub)); }
   private pickProject(p?: string): string {
     const r = p ?? this.selection?.project;
     if (!r) throw new Error(NO_SELECTION);
@@ -996,7 +1002,7 @@ export class LocalCore implements Core {
   }
   async studio_renders(a: Args<"studio_renders">) { const { project, sub } = this.pick(a); return { renders: listRenders(project, sub) }; }
   async studio_step_read(a: Args<"studio_step_read">) {
-    const { project, sub } = this.pick(a); const st = readSteps(project, sub);
+    const { project, sub } = this.pick(a); const st = this.stepState(project, sub);
     const step = STEP_ORDER.find((n) => st.steps[n].status !== "approved") ?? null, x = step && st.steps[step];
     return { step, status: x ? x.status : "approved", paused: !!x?.paused, budget: x?.budget ?? 0, remaining: x ? remaining(x) : 0, feedback: x?.feedback ?? [], steps: STEP_ORDER.map((name) => ({ name, status: st.steps[name].status })), rev: st.rev };
   }
@@ -1252,7 +1258,7 @@ export class LocalCore implements Core {
         jobs: mine.filter((j) => j.params.studio!.scene === s.n).map((j) => ({ id: j.id, kind: j.params.studio!.kind, status: j.status, batch: j.batch, credits: j.credits, note: j.note, error: j.error })),
       })),
       pending: this.queue.pendingApproval().filter((g) => g.jobs.some((j) => j.params.studio?.project === plan.project && j.params.studio.sub === plan.sub)),
-      steps: readSteps(project, sub),
+      steps: this.stepState(project, sub),
       production_plan: await this.studio_production_plan_read({ project, sub }),
     };
   }

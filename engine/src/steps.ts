@@ -2,6 +2,9 @@ import { join } from "node:path";
 import { z } from "zod";
 import { subDir } from "./projects.js";
 import { readJson, writeJsonAtomic } from "./persist.js";
+import { isStill } from "./projects.js";
+import type { WorkflowFacts } from "./workflow.js";
+import { existsSync } from "node:fs";
 
 export const STEP_ORDER = ["idea", "plan", "look", "assets", "edit"] as const;
 export type StepName = (typeof STEP_ORDER)[number];
@@ -25,10 +28,30 @@ const file = (p: string, s: string) => join(subDir(p, s), "steps.json");
 const blank = (): Step => ({ status: "idle", budget: 0, reservations: [], spent: 0, flags: [], feedback: [] });
 const label = (n: StepName) => n[0].toUpperCase() + n.slice(1);
 export const remaining = (st: Step) => st.budget - st.spent - st.reservations.reduce((a, r) => a + r.credits, 0);
+const blankState = (): StepState => ({ owner: "flow-studio-steps-v1", rev: 0, steps: Object.fromEntries(STEP_ORDER.map(n => [n, blank()])) as Record<StepName, Step> });
 export function readSteps(p: string, s: string): StepState {
   const data = readJson<unknown>(file(p, s), null);
-  return data === null ? { owner: "flow-studio-steps-v1", rev: 0, steps: Object.fromEntries(STEP_ORDER.map(n => [n, blank()])) as Record<StepName, Step> } : State.parse(data);
+  return data === null ? blankState() : State.parse(data);
 }
+// Maps a sub-project made before steps existed onto the steps. Pure and cumulative: it stops at the first unsatisfied step,
+// so a later step is never approved while an earlier one is not. Budgets 0, nothing working or paused, nothing written.
+export function deriveSteps(f: WorkflowFacts): StepState {
+  const st = blankState(), scenes = f.plan.scenes, fact = (n: number) => f.scenes.find(x => x.n === n);
+  const ok: Record<Exclude<StepName, "edit">, boolean> = {
+    idea: !!f.plan.chosen,
+    plan: !!scenes.length && f.scenes.length === scenes.length && f.scenes.every(x => x.validPlan && x.validSource),
+    look: !!scenes.length && scenes.every(s => s.approved === true && (!!fact(s.n)?.storyboardExists || s.start?.kind === "continue")),
+    assets: !!scenes.length && scenes.every(s => s.kept === true && (isStill(s) ? !!fact(s.n)?.storyboardExists : !!fact(s.n)?.clipExists && s.stale === undefined)),
+  };
+  for (const n of STEP_ORDER) {
+    if (n === "edit") { if (f.renderVersions.length) st.steps.edit.status = "review"; break; }
+    if (!ok[n]) break;
+    st.steps[n].status = "approved";
+  }
+  return st;
+}
+// The first owner write for an old sub-project starts from its derived state instead of all-idle.
+export function seedSteps(p: string, s: string, derived: StepState): void { if (!existsSync(file(p, s))) writeJsonAtomic(file(p, s), derived); }
 function change(p: string, s: string, fn: (st: StepState) => void): StepState {
   const st = readSteps(p, s); fn(st); st.rev++; writeJsonAtomic(file(p, s), st); return st;
 }
