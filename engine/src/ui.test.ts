@@ -149,7 +149,7 @@ function editHarness(revise = false) {
     btn: (label: string, click: () => unknown) => ({ label, click, dataset: {} }),
     picker: (label: string, pick: (f: string) => unknown) => ({ label, pick }),
     upload: async (f: string) => f, media: (f: string) => f, setTimeout: () => 0,
-    view: "edit", why: (_key: string, text: string) => ({ args: [text] }),
+    view: "edit", why: (_key: string, text: string) => ({ args: [text] }), keepOpen: () => ({}),
   };
   const render = runInNewContext(source.slice(source.indexOf("const editFiles ="), source.lastIndexOf("refresh(true);")) + "\neditSection", context);
   const show = (name: string) => { project = name; nodes = render(); };
