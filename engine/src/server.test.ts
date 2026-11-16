@@ -419,3 +419,29 @@ test("POST /api/step resume on a working step that is not paused is 409 and star
     assert.deepEqual(calls, []);
   } finally { srv.lastServer!.closeAllConnections(); await new Promise<void>(r => srv.lastServer!.close(() => r())); }
 });
+
+test("server: /api/step-log returns a step's run log as plain text, with the flow token only", async () => {
+  process.env.STUDIO_PROJECTS = join(home, "log-projects");
+  const { LocalCore } = await import("./core.js"), srv = await import("./server.js");
+  const { createSub } = await import("./projects.js"), { stepLogPath } = await import("./step-runner.js");
+  createSub("Logs", "video");
+  const core = new LocalCore(); await srv.startServer(core, undefined, STUDIO);
+  try {
+    const html = await page(), token = /data-token="(\w+)"/.exec(html)![1], base = `http://127.0.0.1:${port}`;
+    const get = (q: string, t = token) => fetch(`${base}/api/step-log?${q}`, { headers: { "x-flow-token": t } });
+    assert.equal((await get("project=Logs&sub=video&step=look", "wrong")).status, 401);
+    assert.equal((await get("project=Logs&sub=video&step=look")).status, 404, "no run yet");
+    assert.equal((await get("project=Logs&sub=video&step=nope")).status, 400);
+    const file = stepLogPath("Logs", "video", "look");
+    assert.ok(file.startsWith(join(home, "step-logs")), "logs live under HOME/step-logs");
+    mkdirSync(join(file, ".."), { recursive: true }); writeFileSync(file, "<script>x</script> run output");
+    const r = await get("project=Logs&sub=video&step=look");
+    assert.equal(r.status, 200);
+    assert.match(r.headers.get("content-type") ?? "", /^text\/plain/);
+    assert.equal(r.headers.get("x-content-type-options"), "nosniff");
+    assert.equal(await r.text(), "<script>x</script> run output");
+    // a ".." name is checked by subDir: it never names a file outside the log folder
+    const bad = await get("project=..&sub=..&step=look");
+    assert.notEqual(bad.status, 200);
+  } finally { srv.lastServer!.closeAllConnections(); await new Promise((r) => srv.lastServer!.close(r)); }
+});

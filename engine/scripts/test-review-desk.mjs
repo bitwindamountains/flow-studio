@@ -683,6 +683,11 @@ try {
     // Reopen: one inline confirm step, then action reopen for that step
     await page.evaluate(() => { window.fixture.posts = []; });
     const plan = page.locator('#details .step-list li[data-step=plan]');
+    // the run log: a link per step that has left idle, read through the flow-token route
+    const href = await plan.locator('a.step-log').getAttribute('href');
+    assert.match(href, /^\/api\/step-log\?token=[^&]+&project=A&sub=video&step=plan$/);
+    assert.equal(await plan.locator('a.step-log').getAttribute('rel'), 'noopener');
+    assert.equal(await page.locator('#details .step-list li[data-status=idle] a.step-log').count(), 0, 'no log link for an idle step');
     await plan.getByRole('button', { name: 'Reopen', exact: true }).click();
     assert.match(await plan.innerText(), /Reopen Plan\?/);
     assert.equal(await page.evaluate(() => document.activeElement.textContent), 'Confirm');

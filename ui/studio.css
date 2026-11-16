@@ -206,6 +206,7 @@ video.render { max-width: 100%; max-height: 60vh; border-radius: 14px; backgroun
 .step-list li[data-status=approved] b::before { content: '\2713\00a0'; color: #24633b; }
 .step-list .row { margin: 0; }
 .step-list .ask { font-weight: 600; }
+.step-log { display: inline-flex; align-items: center; min-height: 44px; padding: 0 8px; color: #233ca3; font-size: 13px; }
 .step-summary { white-space: pre-line; }
 .take { margin: 10px 0; }
 .take video { display: block; width: 100%; max-height: 200px; border-radius: 10px; background: var(--night); }

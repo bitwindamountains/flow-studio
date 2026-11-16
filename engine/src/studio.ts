@@ -1,10 +1,8 @@
 #!/usr/bin/env node
 // Standalone Studio: runs the panel without Claude. If Claude's MCP process already serves it, just opens that.
-import { join } from "node:path";
-import { HOME_DIR } from "./chrome.js";
 import { LocalCore } from "./core.js";
 import { selectedAgent } from "./pty.js";
-import { StepRunner } from "./step-runner.js";
+import { STEP_LOG_DIR, StepRunner } from "./step-runner.js";
 import { PORT, startServer } from "./server.js";
 import { openUrl } from "./platform.js";
 
@@ -12,7 +10,7 @@ import { openUrl } from "./platform.js";
 process.on("unhandledRejection", (e) => console.error("flow-mcp: unhandled rejection:", e));
 process.on("uncaughtException", (e) => console.error("flow-mcp: uncaught exception:", e));
 // Headless step runs start only from an owner gate action (LocalCore.gate), never on startup.
-const runner = new StepRunner({ agent: selectedAgent, logDir: join(HOME_DIR, "step-logs") });
+const runner = new StepRunner({ agent: selectedAgent, logDir: STEP_LOG_DIR });
 process.once("exit", () => runner.stopAll()); // as server.ts kills the embedded agent
 const local = new LocalCore({ starter: runner });
 const role = await startServer(local, undefined, { studio: true });

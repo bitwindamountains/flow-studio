@@ -1,11 +1,18 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { appendFileSync, mkdirSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
+import { HOME_DIR } from "./chrome.js";
 import type { StepStarter } from "./core.js";
 import { subDir } from "./projects.js";
 import { CWD, STUDIO, type StudioAgent } from "./pty.js";
 import { blockStep, readSession, readSteps, setSession, type StepName } from "./steps.js";
 
+export const STEP_LOG_DIR = join(HOME_DIR, "step-logs");
+// Built from the checked folder names, so a name like ".." can never leave the log folder; the server reads the same path.
+export const stepLogPath = (p: string, s: string, step: StepName, logDir = STEP_LOG_DIR) => {
+  const dir = subDir(p, s);
+  return join(logDir, basename(dirname(dir)), basename(dir), `${step}.log`);
+};
 const label = (n: StepName) => n[0].toUpperCase() + n.slice(1);
 export const stepPrompt = (step: StepName, project: string, sub: string) =>
   `Run the "${label(step)}" step for ${project}/${sub}. Follow the "${label(step)} step" section of your instructions. Call studio_step_read first; finish with studio_step_submit or studio_step_blocked.`;
@@ -45,7 +52,7 @@ export class StepRunner implements StepStarter {
     this.agent = opts.agent; this.launch = opts.launch ?? spawn; this.logDir = opts.logDir;
   }
 
-  logPath(p: string, s: string, step: StepName): string { subDir(p, s); return join(this.logDir, p, s, `${step}.log`); }
+  logPath(p: string, s: string, step: StepName): string { return stepLogPath(p, s, step, this.logDir); }
   running(p: string, s: string): StepName | null { return this.runs.get(`${p}/${s}`)?.step ?? null; }
 
   start(p: string, s: string, step: StepName): void {

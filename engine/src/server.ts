@@ -14,6 +14,7 @@ import { flowHealth, formatHealth } from "./health.js";
 import { projectsRoot, readPlan, writePlan } from "./projects.js";
 import { remotionRoot } from "./handoff.js";
 import { STEP_ORDER } from "./steps.js";
+import { stepLogPath } from "./step-runner.js";
 
 export const PORT = Number(process.env.FLOW_MCP_PORT ?? 8787);
 export const TOKEN_FILE = join(HOME_DIR, "token");
@@ -230,6 +231,15 @@ export async function startServer(core: Core, spawner = startAgent, opts: { stud
       }
       if (req.method === "GET" && url.pathname === "/api/pending") {
         return core instanceof LocalCore ? json(res, 200, core.queue.pendingApproval()) : json(res, 404, { error: "Not found." });
+      }
+      // A step's headless run log, as plain text (the end of it); nosniff so agent output never renders as a page.
+      if (req.method === "GET" && url.pathname === "/api/step-log") {
+        const q = z.object({ project: z.string().min(1), sub: z.string().min(1), step: z.enum(STEP_ORDER) }).parse(Object.fromEntries(url.searchParams));
+        const file = stepLogPath(q.project, q.sub, q.step);
+        if (!existsSync(file)) return json(res, 404, { error: "No log for this step yet." });
+        const size = statSync(file).size, start = Math.max(0, size - 256 * 1024);
+        res.writeHead(200, { "content-type": "text/plain; charset=utf-8", "x-content-type-options": "nosniff", "cache-control": "no-store" });
+        return void createReadStream(file, { start }).on("error", () => res.destroy()).pipe(res);
       }
       if (req.method === "GET" && url.pathname === "/api/lessons") return json(res, 200, { lessons: readLessons(), pending: pendingLessons() });
       if (req.method === "GET" && url.pathname === "/media") return sendMedia(req, res, url.searchParams.get("path") ?? "");

@@ -1066,7 +1066,9 @@ function stepList() {
     const actions = status !== "approved" ? [] : asking
       ? [h("span", { class: "ask" }, `Reopen ${stepLabel(n)}?`), button("Confirm", () => reopenStep(n, scope), { "data-write": "1", "data-confirm": n, disabled: off }), button("Cancel", () => { reopenAsk = ""; renderDetails(); $("details").querySelector(`[data-reopen="${n}"]`)?.focus(); })]
       : [button("Reopen", () => { reopenAsk = scope + "/" + n; reopenError = ""; renderDetails(); $("details").querySelector(`[data-confirm="${n}"]`)?.focus(); }, { "data-write": "1", "data-reopen": n, disabled: off })];
-    return h("li", { "data-step": n, "data-status": status }, h("div", { class: "row" }, h("b", {}, stepLabel(n)), h("span", { class: "dim" }, STEP_WORD[status] || status), ...actions),
+    // The run log (plain text from /api/step-log); a step that never left idle has none.
+    const log = mine && status !== "idle" ? h("a", { href: `/api/step-log?token=${encodeURIComponent(TOKEN)}&project=${encodeURIComponent(cur().project)}&sub=${encodeURIComponent(cur().sub)}&step=${n}`, target: "_blank", rel: "noopener", class: "step-log" }, "Log", h("span", { class: "sr-only" }, ` for ${stepLabel(n)}`)) : null;
+    return h("li", { "data-step": n, "data-status": status }, h("div", { class: "row" }, h("b", {}, stepLabel(n)), h("span", { class: "dim" }, STEP_WORD[status] || status), log, ...actions),
       status === "blocked" && x.blockedReason ? h("p", { class: "dim" }, x.blockedReason) : null,
       x?.summary ? h("p", { class: "dim step-summary" }, x.summary) : null);
   });
