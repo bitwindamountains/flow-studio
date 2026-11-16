@@ -952,7 +952,9 @@ addEventListener("keydown", (e) => {
 });
 // Optional explanations sit behind a "Why?" next to the control they explain; open ones stay open across redraws.
 const openWhys = new Set();
-const why = (key, text) => h("details", { class: "why", open: openWhys.has(key), ontoggle: (e) => { if (e.target.isConnected) { if (e.target.open) openWhys.add(key); else openWhys.delete(key); } } }, h("summary", {}, "Why?"), h("p", {}, text));
+// Any disclosure in the drawers keeps its open state across redraws by key (Details redraws whenever the data changes).
+const keepOpen = (key) => ({ open: openWhys.has(key), ontoggle: (e) => { if (e.target.isConnected) { if (e.target.open) openWhys.add(key); else openWhys.delete(key); } } });
+const why = (key, text) => h("details", { class: "why", ...keepOpen("why:" + key) }, h("summary", {}, "Why?"), h("p", {}, text));
 
 // ---- plan reader: the production plan's markdown as plain text blocks (textContent only, never parsed as HTML) ----
 let planShown = null;
@@ -1040,7 +1042,7 @@ function renderSceneDetails(el, s) {
         const result = await apiOk("studio_redo", { ...c, scene: s.n, ...(change.trim() ? { prompt: change.trim() } : {}), ...(redoDur.value ? { duration: Number(redoDur.value) } : {}) });
         if (result.already_queued?.length) toast("This scene already has an active job. Finish or cancel it before changing the redo request.");
       })),
-    x.takes?.length ? h("details", { class: "takes" }, h("summary", {}, `Takes (${x.takes.length})`),
+    x.takes?.length ? h("details", { class: "takes", ...keepOpen("takes:" + c.project + "/" + c.sub + "/" + s.n) }, h("summary", {}, `Takes (${x.takes.length})`),
       why("takes", "Using an earlier take clears Keep on this scene and marks scenes that continue from it stale; they need a redo."),
       ...x.takes.map((take, index) => {
         const use = btn(take.clip === s.clip ? "Current take" : "Use this take", async () => {
@@ -1116,7 +1118,7 @@ function renderVideoDetails(el) {
   if (p) {
     // Ideas: Claude writes the options, the owner picks one in chat; read-only here.
     const opts = p.options || [];
-    if (opts.length) kids.push(h("details", { class: "ideas" }, h("summary", {}, `Ideas (${opts.length})`),
+    if (opts.length) kids.push(h("details", { class: "ideas", ...keepOpen("ideas") }, h("summary", {}, `Ideas (${opts.length})`),
       why("ideas", p.chosen ? "Chosen in chat. To change it, tell the agent which option to go with." : "Tell the agent in chat which option to go with (e.g. \"go with option 2\")."),
       h("div", { class: "grid" }, opts.map((o, i) => h("div", { class: "card" + (o.id === p.chosen ? " chosen" : "") },
         h("b", {}, `${i + 1}. ${o.title}`), o.id === p.chosen ? h("span", { class: "tag" }, " chosen") : null,
@@ -1133,10 +1135,10 @@ function renderVideoDetails(el) {
       why("refs", "Video references apply to every scene. Removing one clears scene approval and keeps earlier media and library files."),
       picker("Add video reference", async (f) => { const r = await apiOk("studio_add_reference", { ...c, path: await upload(f) }); await setAdReference(r.path, true, c); }),
       (data.activeRefs || []).length ? h("div", { class: "refs" }, data.activeRefs.map(path => referenceFigure(path, c, true))) : h("p", { class: "dim" }, "None"),
-      h("details", {}, h("summary", {}, `Reference library (${(data.libraryRefs || []).length} unused for this video)`),
+      h("details", keepOpen("library"), h("summary", {}, `Reference library (${(data.libraryRefs || []).length} unused for this video)`),
         why("library", "Stored images are available to reuse. They are not automatically included in this video."),
         h("div", { class: "refs" }, (data.libraryRefs || []).map(path => referenceFigure(path, c, false)))));
-    if (p.lessons && p.lessons.length) kids.push(h("details", {}, h("summary", {}, `Lessons (${p.lessons.length})`), h("ul", {}, p.lessons.map((l) => h("li", {}, `[${l.scope}] ${l.text}`)))));
+    if (p.lessons && p.lessons.length) kids.push(h("details", keepOpen("lessons"), h("summary", {}, `Lessons (${p.lessons.length})`), h("ul", {}, p.lessons.map((l) => h("li", {}, `[${l.scope}] ${l.text}`)))));
     // Stills and clips for every scene: moved from the Storyboard and Generate views.
     const missing = p.scenes.filter((s) => !isCont(s) && !s.storyboard).map((s) => s.n);
     const make = btn("Make missing stills (free)", () => apiOk("studio_storyboard", { ...c, scenes: missing }));
@@ -1251,7 +1253,7 @@ function editSection() {
     h("h4", {}, "Renders"),
     renders.length ? h("div", { class: "row renders" }, renders.map((r) => btn(`v${r.version}`, () => { renderSel = { key: label, count: renders.length, v: r.version }; selectContextItem({ kind: "render", version: r.version }); }, false, r.version === sel ? "ok" : "")))
       : h("p", { class: "dim" }, "None"),
-    h("details", { class: "edit-clips" }, h("summary", {}, `Kept clips (${kept.length})`),
+    h("details", { class: "edit-clips", ...keepOpen("kept-clips") }, h("summary", {}, `Kept clips (${kept.length})`),
       kept.length ? h("div", { class: "thumbs" }, kept.map((s) => h("figure", {}, h("video", { src: media(s.clip), muted: true, preload: "metadata" }), h("figcaption", {}, `Scene ${s.n}`))))
         : h("p", { class: "dim" }, "None"))];
 }

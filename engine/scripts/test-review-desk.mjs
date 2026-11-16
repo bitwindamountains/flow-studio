@@ -656,6 +656,10 @@ try {
     await page.locator('#details').getByRole('button', { name: 'Use this take', exact: true }).click();
     await page.waitForFunction(() => window.fixture.calls.some(c => c.url === 'take'));
     assert.deepEqual(await calls(page, /^take$/), [{ ...base, scene: 2, clip: 't1.mp4' }]);
+    // an open disclosure survives a redraw caused by changed data
+    await page.evaluate(async () => { window.fixture.scenes[1].prompt = 'two, redrawn'; await refresh(true); });
+    await page.waitForFunction(() => /two, redrawn/.test(document.querySelector('#details-scene').textContent));
+    assert.equal(await page.locator('#details details.takes').getAttribute('open'), '', 'Takes stays open across redraws');
     // notes: autosave with the revision; a conflict keeps the draft and offers both ways out
     await page.locator('#notes').fill('Warmer grade');
     await page.waitForFunction(() => window.fixture.notes.studio_notes.text === 'Warmer grade');
