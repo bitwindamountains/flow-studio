@@ -193,7 +193,7 @@ export async function startServer(core: Core, spawner = startAgent, opts: { stud
         const b = z.object({
           project: z.string().min(1), sub: z.string().min(1), step: z.enum(STEP_ORDER), action: z.enum(["approve", "changes", "reopen", "budget", "resume", "start"]),
           text: z.string().max(2000).optional(), scene: z.number().int().min(1).optional(), at: z.number().min(0).optional(), credits: credits.optional(),
-          budgets: z.object({ look: credits.optional(), assets: credits.optional() }).strict().optional(),
+          budgets: z.object({ look: credits.optional(), assets: credits.optional() }).strict().optional(), rev: z.number().int().min(0).optional(),
         }).parse(JSON.parse((await readBody(req, 64 * 1024)).toString() || "{}"));
         if (b.action === "changes" && !b.text?.trim()) return json(res, 400, { error: "Say what to change." });
         if (b.action === "budget" && b.credits === undefined) return json(res, 400, { error: "credits is required." });

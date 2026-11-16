@@ -260,6 +260,7 @@ try {
   };
   const setSteps = (page, steps) => page.evaluate(async (steps) => { const f = window.fixture; f.steps = { owner: 'flow-studio-steps-v1', rev: f.steps.rev + 1, steps }; f.posts = []; await refresh(true); }, steps);
   const posts = (page) => page.evaluate(() => window.fixture.posts);
+  const seen = (page) => page.evaluate(() => window.fixture.steps.rev); // approve and changes carry the revision the gate drew
   const ACTIONS = ['start', 'approve', 'ask-changes', 'resume', 'add-credits'];
   const shown = (page) => page.locator(ACTIONS.map(id => '#' + id).join(',')).evaluateAll(b => b.filter(x => x.checkVisibility()).map(x => x.id));
   const base = { project: 'A', sub: 'video' };
@@ -320,7 +321,7 @@ try {
     assert.equal(await page.locator('#ask-changes').isDisabled(), true);
     await page.evaluate(() => { window.release(); window.fixture.hold = null; });
     await page.waitForFunction(() => !$('approve').disabled);
-    assert.deepEqual(await posts(page), [{ ...base, step: 'assets', action: 'approve' }]);
+    assert.deepEqual(await posts(page), [{ ...base, step: 'assets', action: 'approve', rev: await seen(page) }]);
     assert.equal(await page.evaluate(() => window.asked), 0, 'permission already granted: not asked');
     // a 409 shows the server's message as text and re-enables the buttons
     await page.evaluate(() => { window.fixture.replies = [{ status: 409, error: '<b>Assets</b> is not ready for review.' }]; });
@@ -345,7 +346,7 @@ try {
     await page.locator('#pin-scene').check();
     await page.locator('#send-changes').click();
     await page.waitForFunction(() => window.fixture.posts.length === 1 && !$('approve').disabled);
-    assert.deepEqual(await posts(page), [{ ...base, step: 'assets', action: 'changes', text: 'Make the sleeve red', scene: 5 }]);
+    assert.deepEqual(await posts(page), [{ ...base, step: 'assets', action: 'changes', text: 'Make the sleeve red', scene: 5, rev: await seen(page) }]);
     assert.equal(await page.locator('#changes-form').isVisible(), false, 'form closes once sent');
     await page.evaluate(async () => { window.fixture.renders = [{ version: 1, path: 'v1.mp4' }]; selectScene(null); await refresh(true); });
     await page.locator('#player video').evaluate(v => Object.defineProperty(v, 'currentTime', { value: 12.34 }));
@@ -356,14 +357,14 @@ try {
     await page.locator('#pin-scene').check();
     await page.locator('#send-changes').click();
     await page.waitForFunction(() => window.fixture.posts.length === 2);
-    assert.deepEqual((await posts(page))[1], { ...base, step: 'assets', action: 'changes', text: 'Cut the pause', at: 12.3 });
+    assert.deepEqual((await posts(page))[1], { ...base, step: 'assets', action: 'changes', text: 'Cut the pause', at: 12.3, rev: await seen(page) });
     await page.evaluate(async () => { window.fixture.renders = []; await refresh(true); });
     await page.locator('#ask-changes').click();
     await page.locator('#changes-form textarea').fill('Warmer light');
     await page.screenshot({ path: shots9 + 'gate-changes-1366.png' });
     await page.locator('#send-changes').click();
     await page.waitForFunction(() => window.fixture.posts.length === 3);
-    assert.deepEqual((await posts(page))[2], { ...base, step: 'assets', action: 'changes', text: 'Warmer light' }, 'unpinned: no scene, no time');
+    assert.deepEqual((await posts(page))[2], { ...base, step: 'assets', action: 'changes', text: 'Warmer light', rev: await seen(page) }, 'unpinned: no scene, no time');
 
     // Plan gate: budgets pre-filled from the estimate line; empty or negative blocks approve
     await setSteps(page, STATES.plan);
@@ -388,7 +389,7 @@ try {
     await page.locator('#budget-look').fill('50');
     await page.locator('#approve').click();
     await page.waitForFunction(() => window.fixture.posts.length === 1 && !$('approve').disabled);
-    assert.deepEqual(await posts(page), [{ ...base, step: 'plan', action: 'approve', budgets: { look: 50, assets: 360 } }]);
+    assert.deepEqual(await posts(page), [{ ...base, step: 'plan', action: 'approve', budgets: { look: 50, assets: 360 }, rev: await seen(page) }]);
     assert.equal(await page.locator('#gate-error').innerText(), '');
     const noEstimate = S({ plan: { ...step('review'), summary: 'Plan ready.\nSix scenes.\nEstimate: about 400' }, look: step('idle'), assets: step('idle'), edit: step('idle') });
     await setSteps(page, noEstimate);
@@ -509,7 +510,7 @@ try {
     await page.evaluate(() => { window.release(); window.fixture.hold = null; });
     await settled();
     await page.waitForTimeout(200);
-    assert.deepEqual(await posts(page), [{ ...base, step: 'assets', action: 'approve' }]);
+    assert.deepEqual(await posts(page), [{ ...base, step: 'assets', action: 'approve', rev: await seen(page) }]);
     assert.equal(await page.locator('#gate-error').innerText(), '');
     await agentSwitch('video');
     // hidden window: polls every 15 s while a step works, so the title and one notification still arrive

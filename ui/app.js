@@ -804,7 +804,7 @@ function renderGate(steps) {
     if (status) gateNotice = "";
   }
   // Every request from this gate goes to exactly this video, step and state (gatePost), never to cur() at send time.
-  gateTarget = status ? { project: cur().project, sub: cur().sub, step, status } : null;
+  gateTarget = status ? { project: cur().project, sub: cur().sub, step, status, rev: data.status?.steps?.rev } : null;
   if (!status) return;
   const review = status === "review", plan = review && step === "plan", more = status === "blocked" ? moreCredits(x.blockedReason) : 0;
   const key = [gateScope, status, x.summary, x.blockedReason, x.budget].join("\n"), fresh = key !== gateKey;
@@ -864,7 +864,8 @@ async function gatePost(...bodies) {
   try {
     for (const b of bodies) {
       if (!same()) return false;
-      await owner("/api/step", { project: t.project, sub: t.sub, step: t.step, ...b });
+      // Approve and changes act on what the owner saw: they carry the revision drawn, and the engine refuses a newer one.
+      await owner("/api/step", { project: t.project, sub: t.sub, step: t.step, ...b, ...(["approve", "changes"].includes(b.action) && Number.isInteger(t.rev) ? { rev: t.rev } : {}) });
     }
     return same();
   } catch (e) { if (same()) $("gate-error").textContent = String(e.message || e); return false; }

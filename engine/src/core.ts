@@ -490,8 +490,10 @@ export class LocalCore implements Core {
   }
 
   // Owner route only (/api/step in server.ts), never an MCP tool: every owner gate action and its effects.
-  gate(a: { project: string; sub: string; step: StepName; action: GateAction; text?: string; scene?: number; at?: number; credits?: number; budgets?: Partial<Record<"look" | "assets", number>> }): StepState {
+  gate(a: { project: string; sub: string; step: StepName; action: GateAction; text?: string; scene?: number; at?: number; credits?: number; budgets?: Partial<Record<"look" | "assets", number>>; rev?: number }): StepState {
     const { project, sub } = this.pick(a), { step } = a;
+    // The window sends the revision it drew: a resubmission between the owner's look and click is never approved unseen.
+    if (a.rev !== undefined && this.stepState(project, sub).rev !== a.rev) throw new Error("This step changed since you looked. Review it again.");
     const stepsFile = join(subDir(project, sub), "steps.json"), seeded = !existsSync(stepsFile);
     seedSteps(project, sub, this.stepState(project, sub));
     try {

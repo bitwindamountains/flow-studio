@@ -381,6 +381,15 @@ test("POST /api/step without the owner cookie is 403 and changes nothing", async
       { ...scope, step: "idea", action: "changes", text: "x".repeat(2001) }, { ...scope, step: "idea", action: "changes", text: "x", scene: 0 }, { ...scope, step: "idea", action: "changes", text: "x", at: -1 }])
       assert.equal((await post("/api/step", bad, h)).status, 400, JSON.stringify(bad).slice(0, 120));
     assert.deepEqual(calls, ["idea"]);
+    // the revision the window drew reaches the engine: a stale one is refused before the gate runs
+    S.submitStep("Gate", "web", "idea", { summary: "ok", flags: [] });
+    const rev = S.readSteps("Gate", "web").rev, approve = { ...scope, step: "idea", action: "approve" };
+    const stale = await post("/api/step", { ...approve, rev: rev - 1 }, h);
+    assert.equal(stale.status, 409); assert.match(((await stale.json()) as { error: string }).error, /changed/);
+    assert.equal((await post("/api/step", { ...approve, rev: -1 }, h)).status, 400);
+    const current = await post("/api/step", { ...approve, rev }, h); // reaches the gate, which wants a chosen idea
+    assert.equal(current.status, 409); assert.doesNotMatch(((await current.json()) as { error: string }).error, /changed/);
+    assert.equal(S.readSteps("Gate", "web").steps.idea.status, "review");
   } finally { srv.lastServer!.closeAllConnections(); await new Promise<void>(r => srv.lastServer!.close(() => r())); }
 });
 

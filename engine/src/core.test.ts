@@ -410,6 +410,19 @@ test("approve plan with budgets {look:40, assets:400} stores both and starts loo
   assert.deepEqual(starter.calls, [["start", "gplan", "look"]]);
 });
 
+test("a gate action carrying the revision the owner saw is refused once the step was resubmitted", async () => {
+  const { core, starter, steps, scope, S } = await gateFixture("grev", "idea", []);
+  const seen = S.readSteps("Gate", "grev").rev;
+  // the agent resubmits between the owner's look and click: same status, new content
+  S.requestChanges("Gate", "grev", "idea", { text: "x" }); S.startStep("Gate", "grev", "idea");
+  S.submitStep("Gate", "grev", "idea", { summary: "new pitch", flags: [] });
+  assert.throws(() => core.gate({ ...scope, step: "idea", action: "approve", rev: seen }), /changed/i);
+  assert.throws(() => core.gate({ ...scope, step: "idea", action: "changes", text: "y", rev: seen }), /changed/i);
+  assert.equal(steps().idea.status, "review"); assert.deepEqual(starter.calls, []);
+  core.gate({ ...scope, step: "idea", action: "approve", rev: S.readSteps("Gate", "grev").rev });
+  assert.equal(steps().idea.status, "approved");
+});
+
 test("approve look marks storyboarded scenes approved; scenes without a still stay unapproved", async () => {
   const still = join(home, "glook-1.png"); writeFileSync(still, "img");
   const { core, starter, steps, scope, P } = await gateFixture("glook", "look", [
