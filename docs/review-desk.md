@@ -1,6 +1,6 @@
 # Review desk
 
-An agent does each production step on its own and the owner approves each step in the Studio window. Design: `docs/superpowers/specs/2026-11-15-review-desk-design.md`. Status: committed locally on `build/flow-studio`, not pushed, merged or released. 262 unit tests pass (see `git log` on `build/flow-studio` for HEAD). No live or paid check has been run for any of this work.
+An agent does each production step on its own and the owner approves each step in the Studio window. Design: `docs/superpowers/specs/2026-11-15-review-desk-design.md`. Status: committed locally on `build/flow-studio`, not pushed, merged or released. 261 unit tests pass (see `git log` on `build/flow-studio` for HEAD). No live or paid check has been run for any of this work.
 
 ## The five gates
 
@@ -43,7 +43,7 @@ Permissions of the unattended agent (`claude/settings.headless.json`): `studio_*
 
 ## Screen
 
-Top bar with the five steps and an alert badge, gate bar, player, scene strip, and hidden drawers (details, plan reader, chat with terminal). See `DESIGN.md`.
+Top bar with the five steps and an alert badge, gate bar, player, scene strip, and hidden drawers: Details (selected scene first, then Video with Steps and owner Reopen, notes, references, edit), Chat (Message | Terminal), Alerts (one line each, full text on expand) and the plan reader (markdown as plain text). The step log has no server route yet; Details shows the step summary and blocked reason. See `DESIGN.md`.
 
 ## How to test
 
