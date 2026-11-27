@@ -19,9 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-engine/ started as a copy of flow-mcp by GTAI-1 (https://github.com/GTAI-1/flow-mcp),
-whose package.json declares the ISC license. That code remains under ISC; see
-engine/NOTICE.md. The MIT license above covers Flow Studio's own additions.
