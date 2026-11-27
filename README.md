@@ -101,3 +101,9 @@ npm run test:desk
 | `docs/` | How the review desk, workflow, Codex terminal and Flow accounts behave, plus the creative prompt guide |
 | `AGENTS.md`, `CLAUDE.md` | Rules and current status for the agents |
 | `DESIGN.md`, `PRODUCT.md` | UI design system and product notes |
+
+## License
+
+MIT, see [LICENSE](LICENSE). The flow-mcp code in `engine/` stays under its ISC license, see [engine/NOTICE.md](engine/NOTICE.md).
+
+Flow Studio automates the Google Flow web interface. Automated use may be against Google's terms of service. Use it on your own account, at your own risk.
