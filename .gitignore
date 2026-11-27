@@ -13,3 +13,5 @@ CLAUDE.md
 claude/studio-prompt.md
 docs/Google Flow Prompt Fix Log.md
 remotion-skills/
+claude/creative-guide.json
+engine/src/creative-guide.private.test.ts

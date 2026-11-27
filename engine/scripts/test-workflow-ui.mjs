@@ -98,7 +98,7 @@ try {
     await pickScene(1);
     await page.getByRole('button',{name:'Remove scene 1 reference scene.png',exact:true}).click();
     await page.waitForFunction(()=>window.fixture.scenes[0].references.length===0);
-    assert.ok((await page.locator('#details .creative-guide').innerText()).trim().length > 0, 'the guide shows its text');
+    assert.ok((await page.locator('#details .creative-guide').innerText()).trim().length > 0, 'the expanded guide shows its text');
     await page.evaluate(async()=>{await refresh(true);});
     assert.equal(await page.locator('#details .creative-guide').getAttribute('open'),'','guide stays open during refresh');
     await page.locator('#details .creative-guide summary').click();
