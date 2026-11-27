@@ -16,7 +16,7 @@ Flow Studio connects scenario development, scene planning, storyboard review, Go
 
 ## Operating Context
 
-- Repository: `D:\flow-studio`; Remotion workspace: `D:\flow-studio\remotion`.
+- Remotion workspace: `remotion/` inside the studio folder.
 - Five production stages, in order: Ideas, Plan, Storyboard, Generate, Edit.
 - One selected project/sub-project and one embedded Claude Code or Codex CLI session.
 - The owner selects a scenario in chat, approves scenes, approves credit spending, keeps takes and reviews versioned renders.

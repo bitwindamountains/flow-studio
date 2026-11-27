@@ -8,7 +8,7 @@ After any active generation finishes, restart Flow Studio with `Flow Studio.cmd`
 
 Codex must be installed on PATH and signed in using its own CLI login. No credentials or model defaults are changed by Studio. The installed CLI on this machine is 0.166.0.
 
-Codex starts in `D:/flow-studio/remotion`, with the projects folder added to its workspace, a workspace-write sandbox, and on-request command approvals. It loads the parent repository's `AGENTS.md` and `.codex/config.toml`. That configuration points at the same Flow Studio MCP and disables `flow_generate`, `flow_edit`, and `flow_continue`; use the `studio_*` tools and the owner's credit approval button. The running Studio owner continues to drive its existing Brave Flow session.
+Codex starts in the studio folder's `remotion/`, with the projects folder added to its workspace, a workspace-write sandbox, and on-request command approvals. It loads the parent repository's `AGENTS.md` and `.codex/config.toml`. That configuration points at the same Flow Studio MCP and disables `flow_generate`, `flow_edit`, and `flow_continue`; use the `studio_*` tools and the owner's credit approval button. The running Studio owner continues to drive its existing Brave Flow session.
 
 Both agents use the owner's Remotion style skills under `remotion/.claude/skills/`. Their locations are recorded in `AGENTS.md`. The Edit/Revise buttons send their instructions to whichever terminal agent is running.
 

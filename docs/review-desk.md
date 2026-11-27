@@ -47,7 +47,7 @@ Top bar with the five steps and an alert badge, gate bar, player, scene strip, a
 
 ## How to test
 
-From `D:\flow-studio\engine`, all with temporary fixtures only:
+From `engine/`, all with temporary fixtures only:
 
 - `npm.cmd test` (builds, then all unit tests)
 - `npm.cmd run test:terminal`
