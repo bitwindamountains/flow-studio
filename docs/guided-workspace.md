@@ -37,8 +37,3 @@ When no generation/edit/render is active, close the old Studio window and restar
 
 The live session was left running deliberately while the owner was away. Source edits are snapshotted only on server startup, so the currently open window may still show the previous UI.
 
-## Work record
-
-Design: `docs/superpowers/specs/2026-11-01-guided-workspace-design.md`.
-Plan: `docs/superpowers/plans/2026-11-01-guided-workspace.md`.
-Progress and preserved code baseline: `.superpowers/sdd/2026-11-01-guided-workspace/`.
