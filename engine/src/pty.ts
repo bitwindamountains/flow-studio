@@ -1,5 +1,6 @@
 import { spawn, type IPty } from "@lydell/node-pty";
 import type { WebSocket } from "ws";
+import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { UiContextSchema, formatMessageContext, type UiContext } from "./ui-context.js";
@@ -9,6 +10,9 @@ export const STUDIO = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..
 // Remotion root, so the owner's style skills in remotion/.claude/skills load.
 export const CWD = `${STUDIO}/remotion`;
 export type StudioAgent = "claude" | "codex";
+// The studio prompt is the owner's private file and isn't in the public repository; agents start without it if it's missing.
+const STUDIO_PROMPT = `${STUDIO}/claude/studio-prompt.md`;
+export const STUDIO_PROMPT_ARGS = existsSync(STUDIO_PROMPT) ? ["--append-system-prompt-file", STUDIO_PROMPT] : [];
 export const CODEX_ARGS = [
   "--cd", CWD,
   "--add-dir", `${STUDIO}/projects`,
@@ -24,7 +28,7 @@ export const CLAUDE_ARGS = [
   "--add-dir", `${STUDIO}/projects`,
   "--mcp-config", `${STUDIO}/claude/mcp.json`,
   "--settings", `${STUDIO}/claude/settings.json`,
-  "--append-system-prompt-file", `${STUDIO}/claude/studio-prompt.md`,
+  ...STUDIO_PROMPT_ARGS,
 ];
 
 export function startAgent(agent: StudioAgent = "claude", launch: typeof spawn = spawn): IPty {

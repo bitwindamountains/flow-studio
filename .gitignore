@@ -6,3 +6,10 @@ projects/
 .superpowers/
 .tmp/
 remotion/
+
+# Owner-private: agent instructions, prompts, the creative prompt guide and editing styles stay on this PC only
+AGENTS.md
+CLAUDE.md
+claude/studio-prompt.md
+docs/Google Flow Prompt Fix Log.md
+remotion-skills/

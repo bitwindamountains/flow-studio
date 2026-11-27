@@ -63,8 +63,12 @@ remotion/
 
 - `my-video` uses Remotion 4.0.539 with the official `@remotion/*` packages (captions, media, fonts, transitions and more). Install the ones its compositions import.
 - Both embedded agents start in `remotion/` so that Claude Code loads the two style skills. The agents follow `remotion-style-a` or `remotion-style-b`, depending on the plan's style.
-- The style skills are kept in this repo under `remotion-skills/`. Copy them into place: `cp -r remotion-skills/* remotion/.claude/skills/`. The copy in `remotion/.claude/skills/` is the one the agents use. After editing a skill there, copy it back to `remotion-skills/` and commit it.
+- The style skills are the owner's own and are not in this repository; bring your own skills with these names.
 - Studio writes clips to `my-video/public/<project>/<sub>/clips/` and renders to `my-video/out/<project>/<sub>/v<N>.mp4`.
+
+## Private files
+
+The agent instructions (`AGENTS.md`, `CLAUDE.md`), the studio prompt (`claude/studio-prompt.md`), the creative prompt guide and the Remotion style skills are the owner's own and stay out of this repository. Without them the Studio still runs: agents start without the studio prompt, and the guided Ideas, Plan and Storyboard steps report that the guide is missing.
 
 ## Run
 
@@ -95,11 +99,9 @@ npm run test:desk
 |---|---|
 | `engine/` | flow-mcp server, Studio server and MCP tools (TypeScript) |
 | `ui/` | Studio window (plain HTML, CSS, JavaScript and xterm) |
-| `claude/` | Embedded agent settings, MCP config and studio prompt |
+| `claude/` | Embedded agent settings and MCP config |
 | `scripts/` | Launcher preflight |
-| `remotion-skills/` | Backup of the Remotion editing style skills (A and B) |
-| `docs/` | How the review desk, workflow, Codex terminal and Flow accounts behave, plus the creative prompt guide |
-| `AGENTS.md`, `CLAUDE.md` | Rules and current status for the agents |
+| `docs/` | How the review desk, workflow, Codex terminal and Flow accounts behave |
 | `DESIGN.md`, `PRODUCT.md` | UI design system and product notes |
 
 ## License

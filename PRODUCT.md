@@ -33,7 +33,7 @@ Flow Studio connects scenario development, scene planning, storyboard review, Go
 
 ## Evidence on Hand
 
-`AGENTS.md`, `CLAUDE.md`, `docs/workflow-usability.md`, `docs/codex-terminal.md`, `ui/index.html`, `ui/app.js`, `engine/src/core.ts`, `engine/src/pty.ts` and the existing isolated workflow/terminal tests describe current behavior. This planning session has inspected source, not visually verified the live owner window.
+`docs/workflow-usability.md`, `docs/codex-terminal.md`, `ui/index.html`, `ui/app.js`, `engine/src/core.ts`, `engine/src/pty.ts` and the existing isolated workflow/terminal tests describe current behavior. This planning session has inspected source, not visually verified the live owner window.
 
 ## Product Principles
 

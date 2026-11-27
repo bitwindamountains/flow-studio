@@ -4,6 +4,7 @@ import { get } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { creativeGuideAvailable } from "./creative-guide.js";
 
 const home = mkdtempSync(join(tmpdir(), "fm-server-"));
 const port = 20000 + Math.floor(Math.random() * 20000);
@@ -45,12 +46,14 @@ test("screen context is owner-published, client-readable, scoped and never appro
     assert.equal(await core.studio_current(), null);
     const workflow = await core.studio_workflow_read({ project: "Context", sub: "ad" });
     assert.equal(workflow.stages.generate.access, "locked");
+    if (creativeGuideAvailable()) { // the owner's private guide is not in the public repository or CI
     const guide = await (await post("/api/studio_guide_read", {stage:"ideas"})).json() as {source:string;revision:string;text:string};
     assert.equal(guide.source,"docs/Google Flow Prompt Fix Log.md");
     assert.ok(guide.text.length > 0, "the guide has text for the ideas stage");
     const guidedPlan = await core.studio_plan_read({project:"Context",sub:"ad"}) as {creative_guide:{revision:string;tool:string}};
     assert.equal(guidedPlan.creative_guide.revision,guide.revision);
     assert.equal(guidedPlan.creative_guide.tool,"studio_guide_read");
+    }
     assert.equal((await post("/api/studio_guide_read",{stage:"unknown"})).status,400);
   } finally { await new Promise<void>(r => srv.lastServer!.close(() => r())); }
 });

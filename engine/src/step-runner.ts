@@ -4,7 +4,7 @@ import { basename, dirname, join } from "node:path";
 import { HOME_DIR } from "./chrome.js";
 import type { StepStarter } from "./core.js";
 import { subDir } from "./projects.js";
-import { CWD, STUDIO, type StudioAgent } from "./pty.js";
+import { CWD, STUDIO, STUDIO_PROMPT_ARGS, type StudioAgent } from "./pty.js";
 import { blockStep, readSession, readSteps, setSession, type StepName } from "./steps.js";
 
 export const STEP_LOG_DIR = join(HOME_DIR, "step-logs");
@@ -28,7 +28,7 @@ const CLAUDE_HEADLESS = ["-p", "--output-format", "json", "--strict-mcp-config",
   "--settings", `${STUDIO}/claude/settings.headless.json`,
   "--setting-sources", "project", // user/local allow rules (e.g. .claude/settings.local.json "Bash(python *)") must not widen these
   "--permission-mode", "dontAsk", // anything not allowed is denied, never prompted (nobody is there to answer)
-  "--append-system-prompt-file", `${STUDIO}/claude/studio-prompt.md`];
+  ...STUDIO_PROMPT_ARGS];
 export const CODEX_REFUSED = "Headless steps run with Claude Code for now. Switch the agent to Claude and press Resume.";
 // Claude's json result carries session_id.
 const sessionIn = (out: string) => {
