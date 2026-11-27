@@ -2,7 +2,7 @@
 
 Follow-up: the terminal is below the workspace at every width, with vertical resizing and expand/restore. New cuts have an explicit empty ad-reference selection. Plan now offers add/remove controls for ad-wide and scene references, plus a separate reusable library. Removal preserves files/earlier ads and invalidates obsolete waiting jobs. Browser generation now prepares the correct account/cut Flow project before checking for a composer; source-bound edits and Flow asset projects retain their safeguards.
 
-Implemented in the working tree on `build/flow-studio`, preserving the owner's earlier uncommitted work. No merge, push or live Studio restart was performed.
+Implemented on `main` (then `build/flow-studio`), preserving the owner's earlier uncommitted work.
 
 ## What changed
 

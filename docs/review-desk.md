@@ -1,6 +1,6 @@
 # Review desk
 
-An agent does each production step on its own and the owner approves each step in the Studio window. Status: on `build/flow-studio`, pushed to the private GitHub repo `bitwindamountains/flow-studio`; not merged or released. 263 unit tests pass (see `git log` on `build/flow-studio` for HEAD). No live or paid check has been run for any of this work.
+An agent does each production step on its own and the owner approves each step in the Studio window. Status: on `main` in the private GitHub repo `bitwindamountains/flow-studio`; not released. 263 unit tests pass. No live or paid check has been run for any of this work.
 
 ## The five gates
 
