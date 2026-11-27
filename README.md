@@ -35,7 +35,7 @@ remotion/
 
 - `my-video` uses Remotion 4.0.539 with the official `@remotion/*` packages (captions, media, fonts, transitions and more). Install the ones its compositions import.
 - Both embedded agents start in `remotion/` so that Claude Code loads the two style skills. The agents follow `remotion-style-a` or `remotion-style-b`, depending on the plan's style.
-- The style skills are the owner's own files. They are not published anywhere, so copy them over from the original machine.
+- The style skills are kept in this repo under `remotion-skills/`. Copy them into place: `cp -r remotion-skills/* remotion/.claude/skills/`. The copy in `remotion/.claude/skills/` is the one the agents use. After editing a skill there, copy it back to `remotion-skills/` and commit it.
 - Studio writes clips to `my-video/public/<project>/<sub>/clips/` and renders to `my-video/out/<project>/<sub>/v<N>.mp4`.
 
 ## Run
@@ -67,6 +67,7 @@ npm run test:desk
 | `ui/` | Studio window (plain HTML, CSS, JavaScript and xterm) |
 | `claude/` | Embedded agent settings, MCP config and studio prompt |
 | `scripts/` | Launcher preflight |
+| `remotion-skills/` | Backup of the Remotion editing style skills (A and B) |
 | `docs/` | How the review desk, workflow, Codex terminal and Flow accounts behave, plus the creative prompt guide |
 | `AGENTS.md`, `CLAUDE.md` | Rules and current status for the agents |
 | `DESIGN.md`, `PRODUCT.md` | UI design system and product notes |
