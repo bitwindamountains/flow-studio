@@ -4,6 +4,7 @@
 import { createHash } from "node:crypto";
 import { appendFileSync, copyFileSync, existsSync, linkSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, extname, join, relative, isAbsolute } from "node:path";
+import { fileURLToPath } from "node:url";
 import { clipsDir, remotionRoot, rendersDir } from "../dist/handoff.js";
 import { projectsRoot } from "../dist/projects.js";
 
@@ -20,7 +21,7 @@ const health = `http://127.0.0.1:${process.env.FLOW_MCP_PORT ?? 8797}/api/health
 const up = await fetch(health, { signal: AbortSignal.timeout(1500) }).then(() => true, () => false);
 if (up) { console.error(`The studio is running (${health} answered). Stop it first.`); process.exit(1); }
 
-const QUEUE = process.env.STUDIO_QUEUE ?? String.raw`D:\flow-studio\data\queue.json`;
+const QUEUE = process.env.STUDIO_QUEUE ?? fileURLToPath(new URL("../../data/queue.json", import.meta.url)); // data/ in the studio folder
 const JOURNAL = join(QUEUE, "..", "migrate-storage.journal"); // old\tnew per finished move: a re-run maps renamed files right
 const BACKUP = join(QUEUE, "..", `migrate-backup-${new Date().toISOString().replace(/[:.]/g, "-")}`);
 const sum = { moved: [], duplicates: [], kept: [], rewritten: [], notes: [] };

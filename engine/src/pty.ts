@@ -1,10 +1,13 @@
 import { spawn, type IPty } from "@lydell/node-pty";
 import type { WebSocket } from "ws";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { UiContextSchema, formatMessageContext, type UiContext } from "./ui-context.js";
 
+// The studio folder is two levels above engine/dist/pty.js, wherever the repo was cloned. Forward slashes, as before.
+export const STUDIO = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..").replace(/\\/g, "/");
 // Remotion root, so the owner's style skills in remotion/.claude/skills load.
-export const CWD = "D:/flow-studio/remotion";
-export const STUDIO = "D:/flow-studio";
+export const CWD = `${STUDIO}/remotion`;
 export type StudioAgent = "claude" | "codex";
 export const CODEX_ARGS = [
   "--cd", CWD,

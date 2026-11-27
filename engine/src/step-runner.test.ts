@@ -10,6 +10,7 @@ const logDir = mkdtempSync(join(tmpdir(), "studio-runner-logs-"));
 const { createSub } = await import("./projects.js");
 const S = await import("./steps.js");
 const { StepRunner, stepPrompt } = await import("./step-runner.js");
+const { CWD, STUDIO } = await import("./pty.js");
 
 type Fake = EventEmitter & { stdout: EventEmitter; stderr: EventEmitter; stdin: { text: string; end(s: string): void }; killed: number; kill(): void };
 function harness(agent: "claude" | "codex" = "claude") {
@@ -32,8 +33,8 @@ test("start spawns once with the step prompt and writes output to the log file",
   const { runner, calls, kids } = harness(), v = working();
   runner.start("P", v, "idea");
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].opts.cwd, "D:/flow-studio/remotion");
-  assert.ok(calls[0].args.includes("-p") && calls[0].args.includes("D:/flow-studio/claude/settings.headless.json"));
+  assert.equal(calls[0].opts.cwd, CWD);
+  assert.ok(calls[0].args.includes("-p") && calls[0].args.includes(`${STUDIO}/claude/settings.headless.json`));
   assert.equal(kids[0].stdin.text, stepPrompt("idea", "P", v));
   assert.equal(stepPrompt("idea", "P", v), `Run the "Idea" step for P/${v}. Follow the "Idea step" section of your instructions. Call studio_step_read first; finish with studio_step_submit or studio_step_blocked.`);
   assert.equal(runner.running("P", v), "idea");

@@ -9,8 +9,16 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
-set "FLOW_MCP_HOME=D:\flow-studio\data"
-set "FLOW_MCP_OUTPUT=D:\flow-studio\projects"
+rem Paths follow this folder, wherever the repo was cloned. configure-paths points the agents' MCP configs here too.
+set "FLOW_MCP_HOME=%~dp0data"
+set "FLOW_MCP_OUTPUT=%~dp0projects"
+node "%~dp0scripts\configure-paths.mjs"
+if errorlevel 1 (
+  echo.
+  echo Could not point claude\mcp.json and .codex\config.toml at this folder - see the error above.
+  pause
+  exit /b 1
+)
 rem 8787 is often taken by another local service, so the studio uses 8797. claude\mcp.json uses the same port.
 set "FLOW_MCP_PORT=8797"
 set "FLOW_STUDIO_NO_OPEN=1"
@@ -43,7 +51,7 @@ exit /b 1
 :up
 set "BRAVE=%ProgramFiles%\BraveSoftware\Brave-Browser\Application\brave.exe"
 if not exist "%BRAVE%" set "BRAVE=%LOCALAPPDATA%\BraveSoftware\Brave-Browser\Application\brave.exe"
-rem The window gets its own profile outside D:\flow-studio, never an everyday browser profile (the owner cookie must not land there).
+rem The window gets its own profile outside the studio folder, never an everyday browser profile (the owner cookie must not land there).
 set "UIPROFILE=%LOCALAPPDATA%\FlowStudioUI"
 set "EDGE=%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe"
 if not exist "%BRAVE%" set "BRAVE=%EDGE%"

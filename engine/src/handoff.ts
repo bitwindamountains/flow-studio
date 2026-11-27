@@ -1,11 +1,13 @@
 import { constants, copyFileSync, existsSync, linkSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, extname, join, relative } from "node:path";
+import { fileURLToPath } from "node:url";
 import { isStill, safeName, within, type Plan } from "./projects.js";
 import { readJson, writeJsonAtomic } from "./persist.js";
 import { z } from "zod";
 
-// Read lazily so tests can point STUDIO_REMOTION at a temp dir.
-export const remotionRoot = () => process.env.STUDIO_REMOTION ?? String.raw`D:\flow-studio\remotion\my-video`;
+// Read lazily so tests can point STUDIO_REMOTION at a temp dir. The default is remotion/my-video in the studio folder
+// (two levels above engine/dist/handoff.js), wherever the repo was cloned.
+export const remotionRoot = () => process.env.STUDIO_REMOTION ?? fileURLToPath(new URL("../../remotion/my-video", import.meta.url));
 
 // One copy of every media file: clips live in Remotion's public/, finished videos in its out/.
 export const subPublicDir = (project: string, sub: string) => join(remotionRoot(), "public", safeName(project), safeName(sub));

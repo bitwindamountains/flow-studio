@@ -94,12 +94,12 @@ test("owner terminal switches between fixed agents, synchronizes windows, and dr
 });
 
 test("Codex launch contract keeps sandbox, MCP project discovery, and owner approval boundaries", async () => {
-  const pty = await import("./pty.js") as unknown as { CODEX_ARGS: string[] };
+  const pty = await import("./pty.js") as unknown as { CODEX_ARGS: string[]; STUDIO: string };
   assert.ok(pty.CODEX_ARGS, "Codex launch arguments must be explicit");
   assert.ok(pty.CODEX_ARGS.includes("workspace-write"));
   assert.ok(pty.CODEX_ARGS.includes("on-request"));
   assert.ok(pty.CODEX_ARGS.includes("--no-daemon"), "embedded Codex must not leave work running in a shared daemon");
-  assert.ok(pty.CODEX_ARGS.includes("D:/flow-studio/remotion"));
+  assert.ok(pty.CODEX_ARGS.includes(`${pty.STUDIO}/remotion`));
   assert.ok(!pty.CODEX_ARGS.some((s) => s.includes("dangerously")));
 });
 
