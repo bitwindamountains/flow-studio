@@ -19,7 +19,24 @@ A video moves through five steps: **Idea, Plan, Look, Assets, Edit**. An embedde
 - Brave (Edge works as a fallback for the Studio window)
 - ffmpeg, for continuing a clip from its last frame (`winget install Gyan.FFmpeg`)
 - A Google account with Flow access. You sign in by hand in the Studio's browser profile.
-- A Remotion project at `remotion/`. It is not part of this repository.
+- The Remotion workspace at `remotion/` (see below). It is not part of this repository.
+
+## Remotion workspace (set up separately)
+
+The Edit step renders in Remotion, and git ignores `remotion/`, so a fresh clone does not have it. Create it like this:
+
+```
+remotion/
+  my-video/                  # a Remotion project (npx create-video@latest my-video), then npm install
+  .claude/skills/
+    remotion-style-a/        # editing style skill: SKILL.md, assets/, references/
+    remotion-style-b/        # editing style skill: SKILL.md, assets/
+```
+
+- `my-video` uses Remotion 4.0.539 with the official `@remotion/*` packages (captions, media, fonts, transitions and more). Install the ones its compositions import.
+- Both embedded agents start in `remotion/` so that Claude Code loads the two style skills. The agents follow `remotion-style-a` or `remotion-style-b`, depending on the plan's style.
+- The style skills are the owner's own files. They are not published anywhere, so copy them over from the original machine.
+- Studio writes clips to `my-video/public/<project>/<sub>/clips/` and renders to `my-video/out/<project>/<sub>/v<N>.mp4`.
 
 ## Run
 

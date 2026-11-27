@@ -11,6 +11,11 @@
         ],
         "createdAt": "2026-11-15T07:42:15.165Z",
         "reason": "Claude: throwaway brainstorm wireframe (tiny scaled-down badges/labels), already decided and superseded; not product UI"
+      },
+      {
+        "rule": "overused-font",
+        "value": "geist",
+        "createdAt": "2026-11-15T16:17:31.320Z"
       }
     ]
   }
